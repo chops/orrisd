@@ -3,7 +3,7 @@
 {
   languages.elixir = {
     enable = true;
-    package = pkgs.elixir_1_19;
+    package = pkgs.beam.packages.erlang_29.elixir_1_20;
   };
 
   # devenv 1.11 unconditionally references process.managers.process-compose.configFile

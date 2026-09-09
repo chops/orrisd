@@ -27,7 +27,7 @@ busy never authorizes delivery; idle recovery still requires identical
 stripped-content fingerprints, then the normal idle debounce before sending.
 Existing IPC shapes are unchanged.
 
-The pinned OTP 28 toolchain exceeds the OTP 24 alias floor: late replies after
+The pinned OTP 29.0.5 toolchain exceeds the OTP 24 alias floor: late replies after
 GenServer call timeout are dropped. A test explicitly checks this assumption.
 
 ## Limits and Followups

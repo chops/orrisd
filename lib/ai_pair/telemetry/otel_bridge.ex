@@ -19,7 +19,6 @@ defmodule AiPair.Telemetry.OtelBridge do
 
   use GenServer
 
-  require Logger
   require OpenTelemetry.Tracer, as: Tracer
 
   @default_heartbeat_interval_ms 60_000

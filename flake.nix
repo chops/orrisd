@@ -2,7 +2,7 @@
   description = "Orrisd: agent coordination runtime (Elixir/OTP)";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    nixpkgs.url = "github:NixOS/nixpkgs/e8be7818e19ada32105a8af937a6a473b38167ca";
     devenv.url = "github:cachix/devenv/v1.11.2";
   };
 
@@ -20,8 +20,9 @@
 
       mkAiPair = pkgs:
         let
-          beamPackages = pkgs.beam.packagesWith pkgs.erlang_28;
-          elixir = pkgs.elixir_1_19;
+          beamPackages = pkgs.beam.packages.erlang_29.overrideScope (final: prev: {
+            elixir = prev.elixir_1_20;
+          });
           src = builtins.path {
             path = ./.;
             name = "ai-pair-source";
@@ -34,7 +35,7 @@
         in
         beamPackages.mixRelease {
           pname = "ai-pair";
-          inherit version src elixir;
+          inherit version src;
           meta.license = pkgs.lib.licenses.asl20;
 
           # mix.exs writes a deterministic cookie via a :steps callback.
@@ -45,7 +46,7 @@
 
           mixFodDeps = beamPackages.fetchMixDeps {
             pname = "mix-deps-ai-pair";
-            inherit version src elixir;
+            inherit version src;
             hash = "sha256-LdIpt1YHFQjnacyASDNhnA6wjC4K7LddJVYN2tu+Zxk=";
           };
 

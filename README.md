@@ -39,7 +39,7 @@ service labels, and Nix module options. Examples and code use those identifiers.
 
 ## Develop and verify
 
-The pinned Nix development environment provides Elixir 1.19.5 with Erlang/OTP 28
+The pinned Nix development environment provides Elixir 1.20.4 with Erlang/OTP 29.0.5
 and verification tools. From a clone with Nix installed and flakes enabled:
 
 ```sh

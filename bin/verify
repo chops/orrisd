@@ -16,16 +16,28 @@ for command in git mix shellcheck rg; do
   }
 done
 
-toolchain="$(elixir --version)"
-printf '%s\n' "$toolchain"
-grep -Fq 'Elixir 1.19.5 (compiled with Erlang/OTP 28)' <<<"$toolchain" || {
-  printf 'unsupported Elixir toolchain; expected Elixir 1.19.5 compiled with OTP 28\n' >&2
+required_elixir="1.20.4"
+required_otp="29.0.5"
+
+actual_elixir="$(elixir -e 'IO.write(System.version())')"
+actual_otp="$(
+  elixir -e '
+    release = :erlang.system_info(:otp_release) |> List.to_string()
+    path = Path.join([List.to_string(:code.root_dir()), "releases", release, "OTP_VERSION"])
+    path |> File.read!() |> String.trim() |> IO.write()
+  '
+)"
+
+if [[ "$actual_elixir" != "$required_elixir" || "$actual_otp" != "$required_otp" ]]; then
+  printf 'toolchain mismatch: expected Elixir %s / OTP %s, got Elixir %s / OTP %s\n' \
+    "$required_elixir" "$required_otp" "$actual_elixir" "$actual_otp" >&2
+  printf 'run verification through: nix develop --impure --command bin/verify\n' >&2
   exit 1
-}
-grep -Eq '^Erlang/OTP 28([[:space:]]|$)' <<<"$toolchain" || {
-  printf 'unsupported Erlang toolchain; expected OTP 28\n' >&2
-  exit 1
-}
+fi
+
+printf 'verification profile: %s (Elixir %s / OTP %s)\n' \
+  "adopted" "$actual_elixir" "$actual_otp"
+
 
 mix deps.get --check-locked
 expected_redaction_scanner_sha="47e5dec33ad734a0e560a02f0b0b3b2a9e91d82feed3159f2b05bfe13d901843"
