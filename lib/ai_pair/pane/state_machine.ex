@@ -229,11 +229,19 @@ defmodule AiPair.Pane.StateMachine do
     {:keep_state, data2, actions}
   end
 
+  def handle_event(:enter, _old, :dead, data) do
+    {:keep_state, %{data | idle_since_ms: nil}, [{{:timeout, :poll}, :cancel}]}
+  end
+
   def handle_event(:enter, _old, _new, data) do
     {:keep_state, %{data | idle_since_ms: nil}}
   end
 
   # ----- poll tick -----
+
+  # Death is terminal for this registered process. Ignore a late poll even
+  # if its timer event was already pending when the pane was marked dead.
+  def handle_event({:timeout, :poll}, _, :dead, _data), do: :keep_state_and_data
 
   def handle_event({:timeout, :poll}, _, state, data) do
     started_at_us = System.monotonic_time(:microsecond)

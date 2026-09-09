@@ -152,6 +152,22 @@ defmodule AiPair.Pane.StateMachineTest do
     assert {:error, :pane_dead} = StateMachine.send_text(sm, "ignored")
   end
 
+  test "a late poll cannot revive a dead pane or invoke capture" do
+    capture_fn = fn _pane ->
+      send(self(), :late_dead_capture)
+      {:ok, "BUSY_MARKER"}
+    end
+
+    {:ok, :unknown, data, _actions} =
+      StateMachine.init(pane_id: "%test", capture_fn: capture_fn, classifier: MarkerClassifier)
+
+    # Deliver the named timer event directly: it must be harmless even if a
+    # poll was already pending when mark_dead transitioned the live process.
+    outcome = StateMachine.handle_event({:timeout, :poll}, nil, :dead, data)
+    refute_received :late_dead_capture
+    assert outcome == :keep_state_and_data
+  end
+
   test "ANSI is stripped before classification" do
     ansi_busy = "\e[31m\e[1mBUSY_MARKER\e[0m"
     {sm, _capture_agent, _paste_agent} = setup_pane(initial_capture: ansi_busy)
