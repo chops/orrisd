@@ -117,7 +117,7 @@ while (($#)); do
   fi
   shift
 done
-printf '%s\n' '## Summary' 'fixture report' '' '## Findings' '- [info] fixture' '' '## Suggestions' '- none'
+printf '%s\n' '* Summary' 'fixture report' '' '* Findings' '- [info] fixture' '' '* Suggestions' '- none'
 EOF
 chmod +x "$tmp/bin/agy"
 
@@ -131,10 +131,13 @@ run_case() {
     GEMINI_ORACLE_BIN=agy AGY_CAPTURE="$tmp/$name.prompt" \
     CURL_ARGS_LOG="$tmp/$name.curl" \
     bash "$script" otel --limit "$limit" >"$tmp/$name.out"
-  find "$inbox/gemini" -maxdepth 1 -type f -name 'otel-*.md' -print | sort | tail -1
+  find "$inbox/gemini" -maxdepth 1 -type f -name 'otel-*.org' -print | sort | tail -1
 }
 
 report="$(run_case starvation 4)"
+grep -q '^#+title: Gemini OTel analysis' "$report"
+grep -Fq 'concise Org-mode report' "$tmp/starvation.prompt"
+grep -Fq '"* Summary"' "$tmp/starvation.prompt"
 grep -Fq -- '- calls analyzed: 4' "$report"
 grep -Fq -- '- providers: anthropic=3, openai-codex=1' "$report"
 [[ "$(grep -c '^trace_id:' "$tmp/starvation.prompt")" -eq 4 ]]

@@ -24,7 +24,7 @@ let
 
   peerProtocolDocs = pkgs.runCommandLocal "ai-pair-peer-protocol" { } ''
     mkdir -p $out/share/ai-pair
-    install -Dm644 ${./files/peer-protocol.md}          $out/share/ai-pair/peer-protocol.md
+    install -Dm644 ${./files/peer-protocol.org}          $out/share/ai-pair/peer-protocol.org
     install -Dm644 ${./files/peer-protocol.schema.json} $out/share/ai-pair/peer-protocol.schema.json
   '';
 

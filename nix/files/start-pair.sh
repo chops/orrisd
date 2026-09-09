@@ -158,7 +158,7 @@ register_panes() {
 # fingerprint anchors), but `ap send` queues for non-idle panes via the
 # SM catch-all, so the wakeup channel cannot dismiss the modal itself.
 # Direct tmux send-keys is correct here: the channel-discipline rule
-# (peer-protocol.md) forbids raw tmux for waking the PEER agent. This is
+# (peer-protocol.org) forbids raw tmux for waking the PEER agent. This is
 # different — we're scripting cold-start setup of panes we own, before
 # either agent is interacting. Pre-existing trust state in ~/.claude and
 # ~/.codex makes this no-op on subsequent boots; the watcher just times

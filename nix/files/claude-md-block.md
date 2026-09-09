@@ -14,8 +14,8 @@ pane to read it. Use both.
 ### Content channel — file-based peer protocol
 
 Schema and examples in
-`~/.ai-agent-inbox/<project>/peer-protocol.md`, or the installed package
-resource at `<package>/share/ai-pair/peer-protocol.md`:
+`~/.ai-agent-inbox/<project>/peer-protocol.org`, or the installed package
+resource at `<package>/share/ai-pair/peer-protocol.org`:
 
 - Stage outgoing messages under `$AI_PAIR_INBOX/outbox/`
 - Atomically `mv` into `$AI_PAIR_INBOX/inbox/` to publish

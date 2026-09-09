@@ -39,6 +39,9 @@ printf 'verification profile: %s (Elixir %s / OTP %s)\n' \
   "adopted" "$actual_elixir" "$actual_otp"
 
 
+bin/check-documentation-format
+bash test/documentation_format_test.sh
+
 mix deps.get --check-locked
 expected_redaction_scanner_sha="47e5dec33ad734a0e560a02f0b0b3b2a9e91d82feed3159f2b05bfe13d901843"
 expected_redaction_test_sha="33100a8ba332bc06297e64c8755109f04764795e2df05082be3755ebbf7443b9"

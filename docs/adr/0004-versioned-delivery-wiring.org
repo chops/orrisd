@@ -1,12 +1,13 @@
----
-status: accepted
-date: 2026-09-04
----
+#+options: ^:nil
 
-# ADR-0004: Versioned delivery wiring
-
-## Authority and Ordering
-
+* ADR-0004: Versioned delivery wiring
+:PROPERTIES:
+:CUSTOM_ID: adr-0004-versioned-delivery-wiring
+:END:
+** Authority and Ordering
+:PROPERTIES:
+:CUSTOM_ID: authority-and-ordering
+:END:
 The daemon starts ReceiptStore before its IPC listener. The listener refuses to
 start without a live receipt authority and passes that authority to attached
 panes. Versioned sends refuse a pane configured with a different authority.
@@ -35,8 +36,10 @@ failed receipt write is logged statically; the poisoned store fails queries
 closed instead of claiming a durable non-delivery. Legacy queue behavior stays
 unchanged. These paths have separate regression tests with zero-paste assertions.
 
-## Wire and Diagnostics
-
+** Wire and Diagnostics
+:PROPERTIES:
+:CUSTOM_ID: wire-and-diagnostics
+:END:
 The 16 producer fixtures execute against the runtime dispatcher. A socket/CLI
 test verifies explicit capabilities, stdin send, duplicate suppression, and
 reconciliation with one physical paste. Version 1 fixtures are unchanged.
@@ -52,10 +55,12 @@ Erlang printing, and legacy unreceipted queues are outside that protection.
 The pane's existing screen capture can itself contain sensitive material; this
 change does not claim whole-process crash-log confidentiality.
 
-## Test Notes
-
+** Test Notes
+:PROPERTIES:
+:CUSTOM_ID: test-notes
+:END:
 The queued-send crash test proves the crash window with an explicit
-`paste_entered` barrier, because durable queued state predates paste entry. The
+~paste_entered~ barrier, because durable queued state predates paste entry. The
 restart tests rebind their context to the revived store rather than the killed
 process. Two numeric pane fixtures use runtime concatenation so exact test
 values do not expand the scanner allowlist.

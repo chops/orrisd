@@ -2,7 +2,7 @@ defmodule AiPair.Delivery.IPCReconcileTest do
   @moduledoc """
   Reconcile at the IPC seam (protocol version 2).
 
-  `docs/contracts/ipc-v1.md` freezes v1 byte-for-byte and classifies negotiation, capability
+  `docs/contracts/ipc-v1.org` freezes v1 byte-for-byte and classifies negotiation, capability
   advertisement, msg-id echo and incompatible-peer rejection as v2 features, so reconcile
   lives in **protocol v2**, and these tests pin it as such:
 
