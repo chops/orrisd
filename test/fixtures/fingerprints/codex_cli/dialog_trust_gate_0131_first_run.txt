@@ -1,0 +1,19 @@
+WARNING: proceeding, even though we cou
+ld not update PATH: Refusing to create
+helper binaries under temporary dir "/t
+mp" (codex_home: AbsolutePathBuf("/tmp/
+llm-proxy-shim.cd6aAj"))
+> You are in /home/agent/src/research_p
+
+  Do you trust the contents of this
+  directory? Working with untrusted
+  contents comes with higher risk of
+  prompt injection. Trusting the
+  directory allows project-local
+  config, hooks, and exec policies to
+  load.
+
+› 1. Yes, continue
+  2. No, quit
+
+  Press enter to continue

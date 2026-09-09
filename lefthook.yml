@@ -1,0 +1,12 @@
+pre-commit:
+  parallel: true
+  commands:
+    format:
+      run: nix develop --impure --command mix format --check-formatted
+    compile:
+      run: nix develop --impure --command mix compile --warnings-as-errors
+
+pre-push:
+  commands:
+    verify:
+      run: nix develop --impure --command bin/verify

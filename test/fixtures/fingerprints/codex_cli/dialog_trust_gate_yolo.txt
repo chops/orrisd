@@ -1,0 +1,4 @@
+? Codex is running in YOLO mode
+  Allow / Deny
+  Trust this session?
+›

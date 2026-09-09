@@ -1,0 +1,13 @@
+#+title: Redaction scanner contract
+
+The tracked-file redaction scanner and its isolated self-test share the
+project-owned scanner implementation developed with Orris. The exact bytes
+used here are pinned below.
+
+- =bin/redaction-check= SHA-256 :: =47e5dec33ad734a0e560a02f0b0b3b2a9e91d82feed3159f2b05bfe13d901843=
+- =test/redaction_check_test.sh= SHA-256 :: =33100a8ba332bc06297e64c8755109f04764795e2df05082be3755ebbf7443b9=
+
+=bin/verify= checks both hashes before executing the self-test and scanning every
+tracked text file. Reviewed exceptions use exact
+=pattern:path:SHA256(regex-capture)= locators in =.redaction-allow=; path-wide
+exclusions are forbidden.

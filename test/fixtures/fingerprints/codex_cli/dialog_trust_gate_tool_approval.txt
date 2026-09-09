@@ -1,0 +1,4 @@
+⚠ Run command: mix test
+  approve shell
+  Deny
+›

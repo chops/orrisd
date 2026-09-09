@@ -1,0 +1,9 @@
+
+
+
+
+  Reading file: lib/ai_pair/state_machine.ex
+
+  Working on your request...
+
+* Crunching... (12s · ↑ 1.2k tokens · esc to interrupt)

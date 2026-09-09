@@ -1,0 +1,5 @@
+# Devenv/flake is the source of truth for toolchain versions.
+# This file is a hint for editors/IDEs that read .tool-versions
+# (e.g., asdf-aware editors). Keep aligned with devenv.nix.
+elixir 1.19.5-otp-28
+erlang 28.0

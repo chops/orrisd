@@ -1,0 +1,35 @@
+{
+  "name": "ai-pair",
+  "version": "0.1.0",
+  "executables": {
+    "watch": {
+      "path": "bin/ai-pair-watch",
+      "args": []
+    },
+    "client": {
+      "path": "bin/ai-pair",
+      "args": []
+    },
+    "calibrate": {
+      "path": "bin/ai-pair-calibrate",
+      "args": []
+    }
+  },
+  "daemon": {
+    "service_name": "ai-pair",
+    "restart_policy": "on-failure",
+    "healthcheck": {
+      "type": "uds-json-ping",
+      "socket": "$AI_PAIR_INBOX/sock/ai-pair.sock",
+      "packet": 4,
+      "timeout_ms": 1000
+    },
+    "required_state_dirs": ["sock", "fingerprints", "logs", "state"]
+  },
+  "environment": {
+    "AI_PAIR_INBOX": {
+      "required": false,
+      "default": "$HOME/.ai-agent-inbox/ai-pair"
+    }
+  }
+}

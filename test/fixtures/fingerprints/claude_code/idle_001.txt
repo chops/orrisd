@@ -1,0 +1,11 @@
+
+
+
+
+  Welcome back to Claude Code
+
+  Type your message and hit Enter.
+
+>
+
+? for shortcuts                                                ctrl+c to exit

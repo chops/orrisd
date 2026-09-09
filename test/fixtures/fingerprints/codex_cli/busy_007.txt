@@ -1,0 +1,40 @@
+[2m╭────────────────────────────────────────────╮
+│ >_ [0;1mOpenAI Codex[0;2m (v0.128.0)                 │
+│                                            │
+│ model:     [0mgpt-5.5 high[2m   [0m[38;5;6m/model[2m[39m to change │
+│ directory: [0m~/src/project[2m                   │
+╰────────────────────────────────────────────╯
+
+[0m  [1mTip:[0m When the composer is empty, press Esc to step back and edit your last message; Enter confirms.
+
+
+[1;2m› [0mAnswer from general knowledge only. Do not use any tools, do not read any files, do not run any shell commands, do
+  not browse the web. In at least 500 words of streamed prose, explain the conceptual difference between Erlang/OTP
+  `:gen_statem` and `:gen_server`, covering state-enter callbacks, `:state_timeout`, and when you would reach for one
+  over the other. Take your time.
+
+
+[1m[38;2;167;167;167m•[0m [1m[38;2;231;231;231mW[38;2;202;202;202mo[38;2;167;167;167mr[38;2;138;138;138mk[38;2;128;128;128ming[0m [2m(1s • esc to interrupt)
+
+
+[0;1m›[0m [2mWrite tests for @filename
+
+  gpt-5.5 high · ~/src/project · gpt-5.5 · main · Context 0% used · 5h 83% · weekly 76% · 0.128.0
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

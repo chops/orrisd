@@ -1,0 +1,24 @@
+  through large codebases, check
+  assumptions with tools, and keep going
+  until the work is done.
+
+  Learn more:
+  https://openai.com/index/introducing-g
+pt-5-5/
+
+⚠ MCP client for `arxiv` failed to
+  start: MCP startup failed: handshaking
+  with MCP server failed: connection
+  closed: initialize response
+
+⚠ MCP client for `semantic_scholar`
+  failed to start: MCP startup failed:
+  handshaking with MCP server failed:
+  connection closed: initialize response
+
+• Starting MCP servers (2/5): codex_app…
+
+
+› Use /skills to list available skills
+
+  gpt-5.5 default · ~/src/example_workt…

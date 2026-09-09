@@ -1,0 +1,61 @@
+---
+status: accepted
+date: 2026-09-04
+---
+
+# ADR-0004: Versioned delivery wiring
+
+## Authority and Ordering
+
+The daemon starts ReceiptStore before its IPC listener. The listener refuses to
+start without a live receipt authority and passes that authority to attached
+panes. Versioned sends refuse a pane configured with a different authority.
+The root supervisor remains one_for_one. Store restart recovers unresolved
+records as ambiguous; old operation tokens cannot authorize a paste in the new
+epoch. This does not restore lost pane queues or imply cross-VM locking.
+
+Protocol version 1 remains unreceipted and preserves its frozen reply fixtures.
+Protocol version 2 must be explicit. Ping advertises delivery_reconcile only
+with a live store. Send requires the caller's stable message ID, hashes the
+received text independently, and never mints a replacement ID. Reconcile binds
+message ID, pane ID and payload hash, with a bounded wait (default 250 ms).
+
+The pane, not its IPC connection, owns admission and the operation token. It
+persists queued before adding the queue entry, calls begin_paste immediately
+before the paste adapter, and persists delivered or ambiguous afterward. An
+uncertain paste is never classified as absence or automatically retried. Only
+proven pre-paste refusal records not_delivered. A duplicate returns the existing
+receipt view without pasting. A receipt-store failure prevents new paste
+authorization. The original caller may time out while an owned operation
+continues; it must reconcile the same identity rather than infer absence.
+
+Explicit pane death and confirmed pane disappearance finalize queued, unstarted
+receipted entries as not_delivered before removing them. They never paste. A
+failed receipt write is logged statically; the poisoned store fails queries
+closed instead of claiming a durable non-delivery. Legacy queue behavior stays
+unchanged. These paths have separate regression tests with zero-paste assertions.
+
+## Wire and Diagnostics
+
+The 16 producer fixtures execute against the runtime dispatcher. A socket/CLI
+test verifies explicit capabilities, stdin send, duplicate suppression, and
+reconciliation with one physical paste. Version 1 fixtures are unchanged.
+Conflict replies echo the requested identity, never another record's identity.
+Errors use a static vocabulary, with no receipt-store or paste-adapter terms.
+CLI, IPC and pane-paste spans retain parent linkage and exclude prompt bytes.
+
+Receipted call messages and queue entries carry Delivery.Payload. Its ordinary
+Inspect implementation emits hash and byte count; JSON and string serialization
+are deliberately unsupported. Bytes are exposed at the paste adapter only.
+This is not memory isolation: deliberate field access, structs: false, raw
+Erlang printing, and legacy unreceipted queues are outside that protection.
+The pane's existing screen capture can itself contain sensitive material; this
+change does not claim whole-process crash-log confidentiality.
+
+## Test Notes
+
+The queued-send crash test proves the crash window with an explicit
+`paste_entered` barrier, because durable queued state predates paste entry. The
+restart tests rebind their context to the revived store rather than the killed
+process. Two numeric pane fixtures use runtime concatenation so exact test
+values do not expand the scanner allowlist.

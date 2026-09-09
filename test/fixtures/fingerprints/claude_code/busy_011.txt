@@ -1,0 +1,40 @@
+[38;5;174m ▐[48;5;16m▛███▜[49m▌[39m   [1mClaude Code[0m [38;5;246mv2.1.140[39m                                                                                         
+[38;5;174m▝▜[48;5;16m█████[49m▛▘[39m  [38;5;246mOpus 4.7 (1M context) with xhigh effort · Claude Max[39m                                                         
+[38;5;174m  ▘▘ ▝▝  [39m  [38;5;246m~/src/project[39m                                                                                                
+
+[38;5;220m⏺[39m [38;5;220mAuto mode lets Claude handle permission prompts automatically — Claude checks each tool call for risky actions[39m        
+  [38;5;220m and prompt injection before executing. Actions Claude identifies as safe are executed, while actions Claude [39m         
+  [38;5;220midentifies as risky are blocked and Claude may try a different approach. Ideal for long-running tasks. [39m               
+  [38;5;220mSessions are slightly more expensive. Claude can make mistakes that allow harmful commands to run, it's [39m              
+  [38;5;220mrecommended to only use in isolated environments. Shift+Tab to change mode.
+
+[38;5;239m[48;5;237m❯ [38;5;231mWithout using any tools, browser, or file edits, write a detailed explanation (at least 400 words, taking your time [39m  
+  [38;5;231mand streaming tokens slowly) of how Erlang/OTP `:gen_statem` differs from `:gen_server`, including state-enter [39m       
+  [38;5;231mcallbacks, timeouts, and a worked example of a debounced input handler.[39m                                               
+[49m                                                                                                                      
+[38;5;231m⏺[39m [1;3;4m[38;5;153m:gen_statem[39m vs [38;5;153m:gen_server[39m — A Detailed Tour
+
+[0m  [1mThe big picture[0m                                                                                                       
+
+  Both [38;5;153m:gen_server[39m and [38;5;153m:gen_statem[39m are OTP behaviours that wrap a process loop, message dispatch, and                   
+  supervision-friendly lifecycle. The difference is in how each one models [3mstate[0m.                                     
+
+  [38;5;153m:gen_server[39m treats state as a single opaque term. Every message goes through one of three callbacks — [38;5;153mhandle_call/3[39m,  
+  [38;5;153mhandle_cast/2[39m, [38;5;153mhandle_info/2[39m — and the [3mshape[0m of the message is what you switch on. The "state machine" is implicit: it
+   lives in [38;5;153mcase[39m clauses inside those handlers, in flags inside the state term, and in your head.                       
+                                                                                                                      
+[38;5;244m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[38;5;246m❯ [7m[39m 
+[0m[38;5;244m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m  [38;5;246msomeone@localhost[39m  [38;5;246m~/src/project[39m  [38;5;246m[feature/example-branch-v01][39m  [38;5;246mOpus[39m [38;5;246m4.7[39m [38;5;246m(1M[39m [38;5;246mcontext)[39m              [38;5;246m◉[39m [38;5;246mxhigh[39m [38;5;246m·[39m [38;5;246m/effort
+[39m  [38;5;220m⏵⏵[39m [38;5;220mauto[39m [38;5;220mmode[39m [38;5;220mon[38;5;246m (shift+tab[39m [38;5;246mto[39m [38;5;246mcycle)
+
+
+
+
+
+
+
+
+
+

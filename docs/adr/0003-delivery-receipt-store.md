@@ -1,0 +1,108 @@
+---
+status: accepted
+date: 2026-09-04
+---
+
+# ADR-0003: Serialized delivery receipt authority
+
+## Decision
+
+Implement the store portion of the protocol version 2 duplicate/receipt
+views pinned by `test/fixtures/contracts/ipc/v2`. The application starts the store before
+its IPC listener and hands it to the listener and panes; that wiring is specified in ADR-0004.
+
+`AiPair.Delivery.ReceiptStore` is a GenServer. Admission, attempts, transitions,
+monitor notifications and journal appends are serialized by that process. Its
+public mutation API is `admit/5` and `transition/4`; reconciliation is
+`reconcile/5`. It never accepts prompt bytes, only their validated SHA-256 hash.
+`observe/2` is a test observation hook, not a new IPC subscription API.
+
+Admission returns an opaque operation token only for a newly admitted attempt.
+Duplicate views contain no such token. A token from a prior attempt is stale;
+another message's token, or a fabricated reference, is foreign. Only a terminal
+`not_delivered` attempt can be retried, under the same message ID and a new
+attempt number. Receipt identity never changes across attempts.
+
+## Durable Record
+
+The private log is `delivery/receipts.jsonl` beneath the configured inbox. Its
+directory is narrowed to 0700 and the file to 0600 before any record is written.
+Each complete newline-terminated JSON record includes schema/version, sequence,
+the exact preceding line's SHA-256 (including newline), daemon epoch, message ID,
+pane ID, payload hash, status and delivery attempt. Tokens and owner PIDs are not
+persisted. Records are appended, never rewritten to change a prior outcome.
+
+The store uses `ReceiptLog` for filesystem and replay work through `Delivery.Fs`.
+Every acknowledged record has completed file fsync. Directory entries are synced
+at initialization, not on ordinary appends. There is no mutable head file: boot
+reads the complete log and validates its closed shape, chain, gapless sequence,
+identity consistency and legal attempt history before making it available.
+
+Only an unterminated final fragment is repairable. The preceding complete prefix
+must validate first, and truncation must be synced before service begins. A
+complete invalid last record is corruption, not a removable tail. This chain is
+not authentication against an attacker who can rewrite the entire log.
+
+## Ownership and Recovery
+
+The store mints its epoch once at initialization and monitors the actual delivery
+operation owner, not the requesting connection. Owner loss makes a pending or
+queued attempt durably ambiguous. Restart likewise appends ambiguity for every
+unresolved prior-epoch attempt before accepting new calls.
+
+Reconciliation has exactly five outcomes: delivered, queued, absent, ambiguous,
+conflict. `not_delivered` is a stored status mapping to absent; it is not a sixth
+outcome. A pending live operation may be waited for up to 5 seconds. Timeout does
+not append a fabricated outcome: the query answers ambiguous. A subsequent real
+completion may still establish delivery. The caller disappearing cancels its
+wait, not the operation it was querying.
+
+Any failed append or fsync stops further mutations in that process. Previously
+unresolved records cannot then answer queued/pending as if finalization remained
+healthy. The caller receives a named error and must recover the store; the code
+does not append behind an uncertain tail. A failed first admission may still be
+queried as absent because that operation was never authorized to paste.
+
+## Crossing the Paste Boundary
+
+`begin_paste/3` authenticates the current operation token immediately before the
+pane invokes the physical paste. It grants that permission once per attempt and
+marks the attempt in flight in memory. It does not append a new durable status:
+the existing pending/queued record already makes a crash ambiguous. A queued
+attempt in flight uses the pending bounded-wait behavior, not an immediate
+queued answer. Terminal finalization removes the runtime mark; owner loss wakes
+waiters with durably recorded ambiguity. Once paste is authorized, neither
+`not_delivered` nor a return to `queued` is accepted from that token.
+
+This extends the component for its pane-wiring obligation; IPC and pane callers
+must use it before the side effect. It does not make the filesystem record alone
+proof of an in-flight operation and does not introduce a durable `pasting` state.
+
+## Scope Limits
+
+- Single ownership is enforced for a normalized inbox path within this BEAM.
+  The enclosing host must ensure only one daemon opens the inbox. This is not a
+  cross-VM filesystem lock or a canonical-inode alias arbiter.
+- The configured inbox and its filesystem namespace are host-owned. This design
+  does not claim protection from concurrent same-user path replacement.
+- Durability uses the existing seam's `fsync`, not macOS `F_FULLFSYNC`; it does
+  not claim survival of every device-cache or sudden-power-loss failure.
+- Supervision ordering and pane receipt wiring are specified in ADR-0004, not here.
+- A graceful close failure is logged by name; no new public shutdown command is
+  introduced. Initialization cleanup errors preserve both failure reasons.
+
+## Verification
+
+The store is covered by `test/ai_pair/delivery/receipt_store_test.exs`. The
+gapless-admission test uses a long-lived operation owner: short-lived
+concurrent tasks otherwise legitimately emit owner-loss records beyond the 24
+admissions being counted. No expected receipt transition was removed.
+
+Additional regressions cover mutation refusal after uncertain writes, truthful
+query rejection after uncertain finalization, malformed filesystem results,
+strict ID/hash grammars, duplicate-token nondisclosure, complete-tail corruption,
+and an invalid attempt history despite valid hash links. The canonical gate is
+`nix develop --impure --command bin/verify`.
+
+Operators explicitly choose when to deploy a new package. An older daemon cannot use these receipts to authorize sends;
+the caller must fail closed when delivery reconciliation is unavailable.

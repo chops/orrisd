@@ -1,0 +1,24 @@
+│ directory:   ~/src/example_worktree
+│
+│ permissions: YOLO mode
+│
+╰───────────────────────────────────────
+──╯
+
+  Tip: GPT-5.5 is now available in
+  Codex. It's our strongest agentic
+  coding model yet, built to reason
+  through large codebases, check
+  assumptions with tools, and keep going
+  until the work is done.
+
+  Learn more:
+  https://openai.com/index/introducing-g
+pt-5-5/
+
+• Starting MCP servers (0/5): arxiv, co…
+
+
+› Use /skills to list available skills
+
+  gpt-5.5 default · ~/src/example_workt…

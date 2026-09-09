@@ -1,0 +1,36 @@
+{
+  "tui": "codex_cli",
+  "version": 2,
+  "normalize": {"width": 80, "height": 24, "strip_ansi": true},
+  "states": {
+    "idle": {
+      "bottom_lines": 6,
+      "all": [],
+      "any": [
+        "^›\\s*$",
+        "^›\\s+\\S+"
+      ]
+    },
+    "dialog": {
+      "bottom_lines": 14,
+      "all": [],
+      "any": [
+        "(?i)^\\s*((?!.*\\bpermissions\\b).*\\byolo\\b.*|Trust this session|.*\\bAllow\\b.*\\bDeny\\b|.*\\bDeny\\b.*\\bAllow\\b).*$",
+        "(?i)^\\s*(Run command\\b.*|approve\\s+[A-Za-z0-9_.\\/-]+\\b|⚠\\s*(run|execute|apply|write|modify|delete)\\b.*)$",
+        "(?i)^\\s*(.*\\bbypass\\b.*|.*--dangerously-allow.*)$",
+        "(?i)Do you trust the contents of this directory",
+        "^\\s*›\\s+\\d+\\.\\s+Yes,\\s*continue",
+        "(?i)Press enter to continue"
+      ]
+    },
+    "busy": {
+      "bottom_lines": 14,
+      "all": [],
+      "any": [
+        "•\\s+Working\\s+\\(\\d+s\\s+•\\s+esc to interrupt\\)",
+        "(?i)esc to interrupt|esc to stop",
+        "[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\\s+(reasoning|thinking|running|tool call)"
+      ]
+    }
+  }
+}

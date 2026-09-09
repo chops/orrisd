@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# ai-pair: short-lived UDS client. Connects to the running daemon's
+# socket, sends a single JSON command, prints the reply.
+#
+# argv is forwarded via AI_PAIR_ARGV_B64 because `release eval CODE`
+# does not populate System.argv/0 inside the BEAM.
+set -euo pipefail
+
+# Resolve symlinks so the wrapper still finds bin/ai_pair when invoked
+# through a Nix profile or a manual symlink. `readlink -f` is GNU-only,
+# so walk the chain by hand.
+script="$0"
+while [ -h "$script" ]; do
+  link="$(readlink "$script")"
+  case "$link" in
+    /*) script="$link" ;;
+    *) script="$(cd "$(dirname "$script")" && pwd -P)/$link" ;;
+  esac
+done
+release_root="$(cd "$(dirname "$script")/.." && pwd -P)"
+
+if [ "$#" -eq 0 ]; then
+  ARGV_B64=""
+else
+  ARGV_B64="$(printf '%s\0' "$@" | base64 | tr -d '\n')"
+fi
+
+exec env AI_PAIR_ARGV_B64="$ARGV_B64" \
+  "$release_root/bin/ai_pair" eval 'AiPair.CLI.Client.main_from_env()'

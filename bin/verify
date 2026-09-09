@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+cd "$root"
+
+if [[ $# -ne 0 ]]; then
+  printf 'usage: bin/verify\n' >&2
+  exit 2
+fi
+
+for command in git mix shellcheck rg; do
+  command -v "$command" >/dev/null 2>&1 || {
+    printf 'verification dependency missing: %s\n' "$command" >&2
+    exit 1
+  }
+done
+
+toolchain="$(elixir --version)"
+printf '%s\n' "$toolchain"
+grep -Fq 'Elixir 1.19.5 (compiled with Erlang/OTP 28)' <<<"$toolchain" || {
+  printf 'unsupported Elixir toolchain; expected Elixir 1.19.5 compiled with OTP 28\n' >&2
+  exit 1
+}
+grep -Eq '^Erlang/OTP 28([[:space:]]|$)' <<<"$toolchain" || {
+  printf 'unsupported Erlang toolchain; expected OTP 28\n' >&2
+  exit 1
+}
+
+mix deps.get --check-locked
+expected_redaction_scanner_sha="47e5dec33ad734a0e560a02f0b0b3b2a9e91d82feed3159f2b05bfe13d901843"
+expected_redaction_test_sha="33100a8ba332bc06297e64c8755109f04764795e2df05082be3755ebbf7443b9"
+actual_redaction_scanner_sha="$(shasum -a 256 bin/redaction-check | awk '{print $1}')"
+actual_redaction_test_sha="$(shasum -a 256 test/redaction_check_test.sh | awk '{print $1}')"
+[[ "$actual_redaction_scanner_sha" == "$expected_redaction_scanner_sha" ]] || {
+  printf 'redaction scanner hash mismatch: expected %s, got %s\n' \
+    "$expected_redaction_scanner_sha" "$actual_redaction_scanner_sha" >&2
+  exit 1
+}
+[[ "$actual_redaction_test_sha" == "$expected_redaction_test_sha" ]] || {
+  printf 'redaction scanner test hash mismatch: expected %s, got %s\n' \
+    "$expected_redaction_test_sha" "$actual_redaction_test_sha" >&2
+  exit 1
+}
+bash test/redaction_check_test.sh
+bin/redaction-check
+mix format --check-formatted
+mix compile --warnings-as-errors
+mix test --warnings-as-errors
+
+bash test/start_pair_launch_path_test.sh nix/files/start-pair.sh
+bash test/ap_project_resolution_test.sh nix/files/ap.sh nix/files/start-pair.sh
+bash test/gemini_otel_provider_sampling_test.sh nix/files/gemini-otel.sh
+
+shell_scripts=()
+while IFS= read -r -d '' path; do
+  shell_scripts+=("$path")
+done < <(find nix/files test -type f -name '*.sh' -print0)
+
+if [[ ${#shell_scripts[@]} -gt 0 ]]; then
+  shellcheck --severity=info -x "${shell_scripts[@]}"
+fi
+
+printf 'ai-pair verification: ok\n'

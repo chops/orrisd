@@ -1,0 +1,4 @@
+Codex approval overlay
+  --dangerously-allow enabled
+  bypass permissions for this session
+›

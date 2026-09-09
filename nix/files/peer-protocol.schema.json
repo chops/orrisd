@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/chops/orrisd/peer-protocol.schema.json",
+  "title": "ai-pair peer protocol envelope",
+  "type": "object",
+  "required": ["schema_version", "msg_id", "ts", "from", "to", "kind", "body"],
+  "additionalProperties": true,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "msg_id": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "ts": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC3339 UTC; must end with Z"
+    },
+    "from": { "$ref": "#/$defs/peer" },
+    "to":   { "$ref": "#/$defs/peer" },
+    "kind": {
+      "type": "string",
+      "enum": ["note", "ask", "answer", "status", "handoff", "consultation"]
+    },
+    "subject": { "type": "string", "maxLength": 200 },
+    "body":    { "type": "string" },
+    "in_reply_to": {
+      "type": ["string", "null"],
+      "minLength": 16,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "links": {
+      "type": "array",
+      "items": { "type": "string", "format": "uri" }
+    },
+    "context": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "project":    { "type": "string" },
+        "topic_slug": { "type": "string" }
+      }
+    }
+  },
+  "$defs": {
+    "peer": {
+      "type": "object",
+      "required": ["agent"],
+      "additionalProperties": true,
+      "properties": {
+        "agent":    { "type": "string", "enum": ["claude", "codex", "user", "orchestrator"] },
+        "pane_id":  { "type": ["string", "null"] },
+        "host":     { "type": ["string", "null"] },
+        "avm_id":   { "type": ["string", "null"] },
+        "work_key": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

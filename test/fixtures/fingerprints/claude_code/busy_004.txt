@@ -1,0 +1,40 @@
+[38;5;174m╭───[39m [38;5;174mClaude[39m [38;5;174mCode[39m [38;5;246mv2.1.131[39m [38;5;174m─────────────────────────────────────────────────────────────────────────────────────────────╮
+│[39m                                                    [2m[38;5;174m│[0m [1m[38;5;174mTips[0m [1m[38;5;174mfor[0m [1m[38;5;174mgetting[0m [1m[38;5;174mstarted[0m                                        [38;5;174m│
+│[39m                [1mWelcome[0m [1mback[0m [1mExample![0m               [2m[38;5;174m│[0m Run /init to create a CLAUDE.md file with instructions for Cla… [38;5;174m│
+│[39m                                                    [2m[38;5;174m│[0m [38;5;174m───────────────────────────────────────────────────────────────[39m [38;5;174m│
+│[39m                       [38;5;174m▐[48;5;16m▛███▜[49m▌[39m                      [2m[38;5;174m│[0m [1m[38;5;174mWhat's[0m [1m[38;5;174mnew[0m                                                      [38;5;174m│
+│[39m                      [38;5;174m▝▜[48;5;16m█████[49m▛▘[39m                     [2m[38;5;174m│[0m Added `CLAUDE_CODE_SESSION_ID` environment variable to the Bas… [38;5;174m│
+│[39m                        [38;5;174m▘▘[39m [38;5;174m▝▝[39m                       [2m[38;5;174m│[0m Added `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1` env var to opt … [38;5;174m│
+│[39m   [38;5;246mOpus[39m [38;5;246m4.7[39m [38;5;246m(1M[39m [38;5;246mcontext)[39m [38;5;246mwith[39m [38;5;246mxh…[39m [38;5;246m·[39m [38;5;246mClaude[39m [38;5;246mMax[39m [38;5;246m·[39m    [2m[38;5;174m│[0m Added a "Pasting…" footer hint while a Ctrl+V image paste is b… [38;5;174m│
+│[39m   [38;5;246msomeone@ex.test's[39m [38;5;246mOrganization[39m                   [2m[38;5;174m│[0m [3m[38;5;246m/release-notes[0m [3m[38;5;246mfor[0m [3m[38;5;246mmore[0m                                         [38;5;174m│
+│[39m                   [38;5;246m~/src/project[39m                    [2m[38;5;174m│[0m                                                                 [38;5;174m│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+[38;5;239m[48;5;237m❯ [38;5;231mWithout using any tools, browser, or file edits, write a detailed explanation (at least 400 words, taking your time [39m  
+  [38;5;231mand streaming tokens slowly) of how Erlang/OTP `:gen_statem` differs from `:gen_server`, including state-enter [39m       
+  [38;5;231mcallbacks, timeouts, and a worked example of a debounced input handler.[39m                                               
+[49m                                                                                                                      
+[38;5;174m✢[39m [38;5;174mSpelunking… 
+[39m                                                                                                                        
+[38;5;244m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[38;5;246m❯ [7m[39m 
+[0m[38;5;244m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m  [38;5;246msomeone@localhost[39m  [38;5;246m~/src/project[39m  [38;5;246m[main][39m  [38;5;246mOpus[39m [38;5;246m4.7[39m [38;5;246m(1M[39m [38;5;246mcontext)[39m                                    [38;5;246m◉[39m [38;5;246mxhigh[39m [38;5;246m·[39m [38;5;246m/effort
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,18 @@
+# Exact pattern:path:match-sha256 locator followed by " # " and a reason. Path-wide exclusions are forbidden.
+# The digest covers the regex capture including boundary characters. One entry allows every
+# occurrence of that exact captured value in that path.
+linux_home:nix/nixos-module.nix:d76af373b470dde8394bc80ca5c525066b27251ac89562b3751e6945ab8d21eb # reviewed portable implementation path
+linux_home:test/fixtures/fingerprints/claude_code/dialog_trust_gate_first_run.txt:d76af373b470dde8394bc80ca5c525066b27251ac89562b3751e6945ab8d21eb # reviewed classifier fixture
+linux_home:test/fixtures/fingerprints/codex_cli/dialog_trust_gate_0131_first_run.txt:d76af373b470dde8394bc80ca5c525066b27251ac89562b3751e6945ab8d21eb # reviewed classifier fixture
+tmux_pane_id:nix/files/peer-protocol.md:6e09c6f3f2b71cd8d4ba34274dcf636c7dd5fb71a8a3c1fc02881ed42c057778 # reviewed protocol documentation example
+tmux_pane_id:test/ai_pair/cli/client_test.exs:8acdfa83ab325a6fb8bcc4e0ad17ee20cb19e4624a3e4b4600c6d0a083624165 # reviewed deterministic test value
+tmux_pane_id:test/ai_pair/cli/client_test.exs:a5d93870657f73fd009bd3d7a3a0a6dcdfa08fea0fde2fec73b3969c3888b7d2 # reviewed deterministic test value
+tmux_pane_id:test/ai_pair/msgid_auto_mint_test.exs:a5d93870657f73fd009bd3d7a3a0a6dcdfa08fea0fde2fec73b3969c3888b7d2 # reviewed deterministic test value
+tmux_pane_id:test/ai_pair/telemetry/otel_bridge_test.exs:744a1470d813943267ed92ba7f752c4fbdbdc7948801e02435f29968d2d25c5e # reviewed deterministic test value
+tmux_pane_id:test/ai_pair/telemetry/otel_bridge_test.exs:fddcee834ded5330d9c0061cc4d38e2fdaaaa87c4b15388eabd4a6ee3c4da1e0 # reviewed deterministic test value
+tmux_pane_id:test/ai_pair/tmux_test.exs:7b3d1c9384ced67ca7588541bb79a3ff753af210c4cf20d5355808f1848ee7ce # reviewed deterministic test value
+tmux_pane_id:test/ap_project_resolution_test.sh:92a8e2ee912a8806ae7a785b7a0372ef85280cdcd9cf8a0e09f6791e1650f8c2 # reviewed deterministic test value
+tmux_pane_id:test/ap_project_resolution_test.sh:dd7faa24252ae8bc59e51f0d91c3ae1d7d70b89c150fd7cc0b5cb117996c94a3 # reviewed deterministic test value
+tmux_pane_id:test/start_pair_launch_path_test.sh:92a8e2ee912a8806ae7a785b7a0372ef85280cdcd9cf8a0e09f6791e1650f8c2 # reviewed deterministic test value
+tmux_pane_id:test/start_pair_launch_path_test.sh:dd7faa24252ae8bc59e51f0d91c3ae1d7d70b89c150fd7cc0b5cb117996c94a3 # reviewed deterministic test value
+user_profile:nix/files/ap.sh:52ff81b281998723793133212ed88ff46f306d124edbeb17a1d867e6038523d8 # reviewed portable implementation path

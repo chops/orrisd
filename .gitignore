@@ -1,0 +1,37 @@
+# Devenv
+.devenv/
+devenv.local.nix
+
+# Direnv
+.direnv/
+
+# Elixir / Mix
+/_build/
+/cover/
+/deps/
+/doc/
+/.fetch
+erl_crash.dump
+*.ez
+*.beam
+/config/*.secret.exs
+.elixir_ls/
+.lexical/
+
+# Releases
+ai_pair-*.tar
+/_build/prod/rel/
+
+# Nix build symlink
+/result
+
+# Local-only state
+/priv/plts/
+.tool-versions.local
+
+# Editor / OS
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/

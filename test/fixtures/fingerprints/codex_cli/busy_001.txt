@@ -1,0 +1,8 @@
+
+
+
+  codex
+
+
+
+  ⠋ reasoning... (running edit on /tmp/example-user/src/project/lib/main.ex)

@@ -1,0 +1,16 @@
+╭───────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.135.0)                    │
+│                                               │
+│ model:       gpt-5.5 xhigh   /model to change │
+│ directory:   ~/src/pair_demo_umbrella         │
+│ permissions: YOLO mode                        │
+╰───────────────────────────────────────────────╯
+
+  Tip: Visit the Codex community forum:
+  https://community.openai.com/c/codex/37
+
+
+› Run /review on my current changes
+
+  gpt-5.5 xhigh · ~/src/pair_demo_umbrella · gpt-5.5 · main · Cont…
+

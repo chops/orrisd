@@ -1,0 +1,34 @@
+{
+  "tui": "claude_code",
+  "version": 2,
+  "normalize": {"width": 80, "height": 24, "strip_ansi": true},
+  "states": {
+    "idle": {
+      "bottom_lines": 8,
+      "all": [],
+      "any": [
+        "❯\\s+Try \"[^\"]+\"",
+        "^❯\\s*$",
+        "(?i)esc to cancel|ctrl[\\s\\-+]*c"
+      ]
+    },
+    "dialog": {
+      "bottom_lines": 14,
+      "all": [],
+      "any": [
+        "(?i)❯\\s+\\d+\\.\\s+Yes,\\s+I\\s+trust\\s+this\\s+folder",
+        "(?i)Quick safety check",
+        "(?i)Is this a project\\s+you\\s+(created|trust)"
+      ]
+    },
+    "busy": {
+      "bottom_lines": 24,
+      "all": [],
+      "any": [
+        "[✻✽✢✳✶·]\\s+\\S+…",
+        "(?i)esc to interrupt|esc to stop",
+        "\\(\\d+s\\s*·\\s*↑\\s*\\S+\\s*tokens?"
+      ]
+    }
+  }
+}
