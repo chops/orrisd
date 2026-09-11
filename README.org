@@ -113,6 +113,7 @@ agent tools themselves.
 - [[file:nix/files/peer-protocol.org][Peer envelope protocol]]
 - [[file:docs/adr/0003-delivery-receipt-store.org][Delivery receipt design]]
 - [[file:docs/adr/0004-versioned-delivery-wiring.org][Versioned delivery wiring]]
+- [[file:docs/adr/0005-pane-intent-store.org][Pane intent store]]
 - [[file:docs/contracts/redaction-scanner.org][Redaction scanner contract]]
 - [[file:DEPENDENCIES.org][Dependency licenses]]
 

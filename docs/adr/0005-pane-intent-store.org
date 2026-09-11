@@ -1,0 +1,91 @@
+#+options: ^:nil
+
+* ADR-0005: Pane intent store
+:PROPERTIES:
+:CUSTOM_ID: adr-0005-pane-intent-store
+:END:
+** Context
+:PROPERTIES:
+:CUSTOM_ID: context
+:END:
+Pane attachment intents were persisted historically by a path-based helper that
+scanned unrelated projects, mapped corruption to an empty result, and offered no
+single owner for a project's state. A corrupt or unreadable file was therefore
+indistinguishable from "no attachments", and two callers could interleave
+read-modify-write cycles and lose one another's records.
+
+This unit replaces that with an isolated, supervision-ready store. It is
+deliberately narrow: boot reconciliation, attach and detach callers, and
+installed activation are follow-ons and are not addressed here.
+
+** Decision
+:PROPERTIES:
+:CUSTOM_ID: decision
+:END:
+One =GenServer= owns one explicit canonical project root. The root is normalised
+with =Path.expand/1= before ownership is considered, and ownership is claimed
+through a =:global= name keyed by that canonical path, so a dot-component alias
+of an owned root is refused before any filesystem call is made.
+
+The persisted format is closed. The envelope has exactly =schema_version=,
+=updated_at= and =attachments=; a record has exactly thirteen string keys. An
+unknown key, a missing key, a wrong type, an unsupported version, a duplicate
+JSON object key or an attachments key that disagrees with its record's
+=pane_id= is a visible error. The whole file is validated before any record is
+returned, so a corrupt tail cannot be served as a healthy prefix. Nothing
+untrusted is converted to an atom: input is compared as binaries against fixed
+literals, so a crafted file cannot grow the atom table.
+
+All filesystem effects go through an injected seam of eleven callbacks. Only
+=AiPair.PaneIntentStore.Fs.SystemFs= calls =File=/=:file=. A backend operation
+that is internally several syscalls checks each of them; =directory_sync/2=
+checks its open, its sync and its close, and reports which substep failed.
+
+A snapshot is published through exclusive temporary creation, a private mode
+before any content exists, a complete write, a file fsync, a checked close, an
+atomic rename and a parent-directory fsync. The root directory is synced after a
+new state directory is created. Delete uses the same replacement, including for
+the empty snapshot, and never unlinks the final file.
+
+Failures are =\{:error, %\{stage:, reason:, outcome:, cleanup_errors:\}\}=, where
+=stage= comes from a closed atom set fixed by the contract and never derived
+from file contents. Pre-rename failures report =:unchanged=; a rename failure or
+any failure after it reports =:uncertain= and poisons the owner, so =list/1=,
+=put/2= and =delete/2= fail visibly until an explicit stop and reload. A stale
+healthy view is never served after an uncertain replacement, and nothing is
+retried automatically.
+
+=start_link/1= validates paths and permissions, claims ownership and loads the
+snapshot in the CALLING process, spawning the owner only once a complete valid
+snapshot exists. This is not a style preference. =start_link= links, so
+signalling these failures from =init/1= would take down a caller that is not
+trapping exits - the very caller trying to inspect the error. It is also what
+"never start a half-ready owner" requires.
+
+** Consequences
+:PROPERTIES:
+:CUSTOM_ID: consequences
+:END:
+Ownership is per-BEAM. Sole-daemon, exclusive-root host ownership remains a
+PRECONDITION; no cross-VM file lock is claimed, and a same-user process
+replacing paths underneath the store violates that precondition rather than
+being defended against.
+
+Kernel fsync and atomic rename protect the stated daemon-crash boundary.
+Survival of sudden power loss on macOS is not claimed: that needs =F_FULLFSYNC=,
+which is unreachable from Erlang without a NIF.
+
+Privacy is enforced as an interval, not as samples at content operations. The
+owned file must be private from temporary creation, through the whole period it
+holds bytes, across the rename to its final path, and up to the observed end of
+the call - because a mode loosened between two operations, or during an
+in-flight write, or after the durability sync but before the call returns, still
+discloses committed bytes. Directory privacy is chmod before contents, not a
+claim of atomic mode-at-creation, and a loosened state directory exposes entries
+and directory write access rather than overriding a file's own mode.
+
+The store is dormant. =child_spec/1= exists but this unit does not add itself to
+the running application, and no runtime activation is implied by its presence.
+
+Existing unsafe directories or files are refused rather than repaired, so the
+store never widens permissions it did not create.

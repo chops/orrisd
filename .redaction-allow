@@ -16,3 +16,8 @@ tmux_pane_id:test/ap_project_resolution_test.sh:dd7faa24252ae8bc59e51f0d91c3ae1d
 tmux_pane_id:test/start_pair_launch_path_test.sh:92a8e2ee912a8806ae7a785b7a0372ef85280cdcd9cf8a0e09f6791e1650f8c2 # reviewed deterministic test value
 tmux_pane_id:test/start_pair_launch_path_test.sh:dd7faa24252ae8bc59e51f0d91c3ae1d7d70b89c150fd7cc0b5cb117996c94a3 # reviewed deterministic test value
 user_profile:nix/files/ap.sh:52ff81b281998723793133212ed88ff46f306d124edbeb17a1d867e6038523d8 # reviewed portable implementation path
+tmux_pane_id:test/ai_pair/pane_intent_store_test.exs:a5d93870657f73fd009bd3d7a3a0a6dcdfa08fea0fde2fec73b3969c3888b7d2 # S1-F1 synthetic fixture pane id, primary single-pane put/list/delete subject
+tmux_pane_id:test/ai_pair/pane_intent_store_test.exs:8acdfa83ab325a6fb8bcc4e0ad17ee20cb19e4624a3e4b4600c6d0a083624165 # S1-F1 synthetic fixture pane id, second pane proving different-pane writes serialize without loss
+tmux_pane_id:test/ai_pair/pane_intent_store_test.exs:6bdca038a1c8cc47add79dab5a001809a2b448722f1fc8b83d22d78dcacfe567 # S1-F1 synthetic fixture pane id, low decimal half of the ordering pair
+tmux_pane_id:test/ai_pair/pane_intent_store_test.exs:ea74f5dd3cbe92ad652f53de22903a416198271e27be9d264fceba661e8aa945 # S1-F1 synthetic fixture pane id, high decimal half that must sort first under lexicographic binary order
+tmux_pane_id:test/ai_pair/pane_intent_store_test.exs:0cc02f7365ac3eebb1bc6f856264c40f933592643f0b9724815949bb6c0a7a2a # S1-F1 synthetic fixture pane id, absent-pane subject of the H1 same-owner retry control
