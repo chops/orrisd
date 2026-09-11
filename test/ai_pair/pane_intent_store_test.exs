@@ -1752,30 +1752,119 @@ defmodule AiPair.PaneIntentStoreTest do
       stop_and_join!(seed)
 
       fs = new_fs()
-      # The debt derivation is the LAST lstat of startup, after inspection and
-      # load have both succeeded, so it is targeted here by ordinal.
+      state_dir = Path.join(root, "state")
+      final = state_path(root)
+
+      # Targeted by phase, not ordinal: `inspect_root` checks every ancestor,
+      # so adding path segments shifts the later lstat calls.
       #
-      # Two honest limits on that. The ordinal is root-depth dependent and so is
-      # fragile across platforms. And the path assertion below NARROWS the target
-      # but does not prove PHASE: earlier inspection checks the same state path,
-      # so a failure reported against that path could in principle come from an
-      # earlier call. Targeting by recorded phase or targeted seam state is
-      # required before cross-platform qualification.
+      # Path alone cannot replace it, because `inspect_state` reads the SAME state
+      # path earlier in startup. The discriminator is the successful snapshot read
+      # that sits between the two, so the fault arms only once that read is
+      # reached - and the timeline below proves the ordering rather than assuming
+      # it.
       #
-      # (An earlier revision of this comment referred to a fault_fired? assertion
-      # that is not present - it was replaced by the path assertion below.)
-      FaultFs.inject(fs, :lstat, 8, {:error, :eio})
+      # Both matchers are evaluated inside the double's own Agent process, so they
+      # share that process dictionary. Neither may call back into FaultFs: that
+      # would block on the Agent it is already executing in.
+      FaultFs.inject(
+        fs,
+        :read,
+        fn args ->
+          if args == [final], do: Process.put(:snapshot_read_reached, true)
+          # An observer, never a fault. Returning false leaves the read untouched,
+          # so the fault term below is unreachable by construction.
+          false
+        end,
+        {:error, :never_armed}
+      )
+
+      FaultFs.inject(
+        fs,
+        :lstat,
+        fn args -> args == [state_dir] and Process.get(:snapshot_read_reached, false) end,
+        {:error, :eio}
+      )
 
       assert {:error, %{stage: :path, outcome: :unchanged, reason: {path, :eio}}} =
                PaneIntentStore.start_link(root: root, fs: fs),
              "an lstat error must not be collapsed into 'no durability debt'"
 
-      # The guard that makes the ordinal above honest: if injection ever lands on
-      # an earlier inspection instead of the debt derivation, the reported path
-      # will not be the state directory and this row fails rather than passing
-      # for the wrong reason.
-      assert path == Path.join(root, "state"),
-             "precondition: the failing lstat must be the state-directory debt derivation"
+      assert path == state_dir, "the refused lstat must be the state directory"
+
+      # The phase witness, RETAINED rather than assumed. The snapshot read must
+      # have been invoked, returned successfully, and completed before the lstat
+      # that was refused.
+      timeline = FaultFs.timeline(fs)
+
+      assert %{disposition: :invoked, value: {:ok, _}, result_at: read_at} =
+               Enum.find(timeline, &(&1.op == :read and &1.args == [final])),
+             "the final snapshot read must have SUCCEEDED before the debt derivation"
+
+      assert %{attempt_at: debt_at} =
+               Enum.find(
+                 timeline,
+                 &(&1.op == :lstat and &1.args == [state_dir] and &1.disposition == :refused)
+               ),
+             "the refused call must be an lstat of the state directory"
+
+      assert read_at < debt_at,
+             "phase: the successful snapshot read must precede the targeted state lstat"
+
+      # Consumption witness: one fault fired, on the intended call, with the exact
+      # error. An attempt is not proof a matcher fired.
+      assert [{:lstat, [^state_dir], {:error, :eio}}] = FaultFs.faults_fired(fs),
+             "exactly one fault must fire and it must be the state-directory lstat"
+
+      # And the decoy is proven distinct rather than argued away: `inspect_state`
+      # observed the same path earlier and was NOT refused.
+      assert Enum.count(timeline, &(&1.op == :lstat and &1.args == [state_dir])) == 2,
+             "both state-path lstats must be observed, the earlier one unrefused"
+    end
+
+    # The same scenario under a materially deeper root. Ordinal targeting could
+    # not survive this by construction - every extra ancestor segment shifts every
+    # later ordinal - so this row is the regression guard that keeps the phase
+    # arming above depth-independent. Cleanup is joined: `deep` lives under the
+    # setup root, which is removed by the existing on_exit.
+    test "the phase-armed debt fault survives a materially deeper root", %{root: root} do
+      deep = Path.join([root, "a", "b", "c", "d", "e", "f"])
+      File.mkdir_p!(deep)
+      File.chmod!(deep, 0o700)
+
+      assert length(Path.split(deep)) - length(Path.split(root)) == 6,
+             "the fixture must actually be deeper, or this row proves nothing"
+
+      {:ok, seed} = PaneIntentStore.start_link(root: deep)
+      :ok = PaneIntentStore.put(seed, record(@pane_1, deep))
+      stop_and_join!(seed)
+
+      fs = new_fs()
+      state_dir = Path.join(deep, "state")
+      final = state_path(deep)
+
+      FaultFs.inject(
+        fs,
+        :read,
+        fn args ->
+          if args == [final], do: Process.put(:snapshot_read_reached, true)
+          false
+        end,
+        {:error, :never_armed}
+      )
+
+      FaultFs.inject(
+        fs,
+        :lstat,
+        fn args -> args == [state_dir] and Process.get(:snapshot_read_reached, false) end,
+        {:error, :eio}
+      )
+
+      assert {:error, %{stage: :path, outcome: :unchanged, reason: {^state_dir, :eio}}} =
+               PaneIntentStore.start_link(root: deep, fs: fs),
+             "depth must not change which call the fault lands on"
+
+      assert [{:lstat, [^state_dir], {:error, :eio}}] = FaultFs.faults_fired(fs)
     end
 
     # H1. mkdir can succeed and the chmod after it still fail, which leaves the
