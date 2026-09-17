@@ -52,7 +52,7 @@ service labels, and Nix module options. Examples and code use those identifiers.
 The pinned Nix development environment provides Elixir 1.20.4 with Erlang/OTP 29.0.5
 and verification tools. From a clone with Nix installed and flakes enabled:
 
-#+begin_src sh
+#+begin_src bash
 nix develop --impure --command bin/verify
 #+end_src
 
@@ -66,13 +66,15 @@ inbox.
 
 Build the daemon and CLI packages without installing or starting a service:
 
-#+begin_src sh
+#+begin_src bash
 nix build .#default .#ap
 nix flake check --impure
 #+end_src
 
 The CLI scripts require host tools and agent executables appropriate to the
-chosen command. Building the packages does not configure those tools or agent
+chosen command. Checkout scripts require GNU Coreutils (~sha256sum~); JSON and
+telemetry helpers use Elixir 1.20 / OTP 29. Packaged callers pin these tools.
+Building the packages does not configure agent
 accounts. Review the Nix modules and runtime configuration before starting a
 session or enabling a service.
 

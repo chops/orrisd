@@ -300,9 +300,9 @@ in
       ];
       wants = [ "network-online.target" ];
 
-      # rsync + openssh are the data-plane; jq parses routing.json
+      # The packaged bridge pins its Elixir JSON reader.
       # and envelope to.host on every tick. coreutils for mv/mkdir.
-      path = [ pkgs.jq pkgs.rsync pkgs.openssh pkgs.coreutils ];
+      path = [ pkgs.rsync pkgs.openssh pkgs.coreutils ];
 
       serviceConfig = {
         Type = "simple";

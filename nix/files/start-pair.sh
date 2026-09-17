@@ -75,7 +75,7 @@ WORKDIR="$(cd "$WORKDIR" && pwd -P)"
 # Fail fast on a UUID-shaped --resume id with no transcript under this dir.
 # (Bare --resume / --continue are left for Claude's own picker/resolution.)
 if (( resume_flag )) && [[ -n "$resume_id" ]]; then
-  slug="$(printf '%s' "$WORKDIR" | sed 's/[^A-Za-z0-9]/-/g')"
+  slug="${WORKDIR//[^A-Za-z0-9]/-}"
   transcript="$HOME/.claude/projects/$slug/$resume_id.jsonl"
   if [[ ! -f "$transcript" ]]; then
     echo "start-pair: no Claude session '$resume_id' under $WORKDIR" >&2
@@ -85,11 +85,8 @@ if (( resume_flag )) && [[ -n "$resume_id" ]]; then
 fi
 
 AI_PAIR_PROJECT="${project_override:-${AI_PAIR_PROJECT:-$(basename "$WORKDIR")}}"
-if command -v shasum >/dev/null 2>&1; then
-  PROJECT_HASH="$(printf '%s' "$WORKDIR" | shasum -a 256 | head -c 8)"
-else
-  PROJECT_HASH="$(printf '%s' "$WORKDIR" | sha256sum | head -c 8)"
-fi
+PROJECT_HASH="$(printf '%s' "$WORKDIR" | sha256sum)"
+PROJECT_HASH="${PROJECT_HASH:0:8}"
 SESSION="ai-pair/${AI_PAIR_PROJECT}-${PROJECT_HASH}"
 export AI_PAIR_PROJECT AI_PAIR_PROJECT_HASH="$PROJECT_HASH" AI_PAIR_PROJECT_DIR="$WORKDIR"
 
@@ -181,7 +178,8 @@ autodismiss_trustgates() {
     t0=$SECONDS
     while (( SECONDS - t0 < max_wait )); do
       state="$("$AI_PAIR_BIN" pane_status "$pane_id" 2>/dev/null \
-        | sed -n 's/.*"state":"\([^"]*\)".*/\1/p' | head -1)"
+        | elixir -r "$(dirname "${BASH_SOURCE[0]}")/tooling.ex" \
+          -e 'AiPair.Tooling.main(System.argv())' -- get '' state)"
       if [[ "$state" == "dialog" ]]; then
         # The daemon's :dialog fingerprint false-positives on newer CLI boot
         # screens (e.g. Codex >= 0.135), and a stray Enter on a non-gate
@@ -234,7 +232,7 @@ ensure_gemini_window() {
   # reappear). `;` (not `&&`) so the window still drops to a shell if the oracle
   # is missing, the user bails from the wait, or the analyst TUI is quit;
   # launch-interactive returns (not exec) so its scratch dir is cleaned first.
-  gemini_cmd="$gemini_bin launch-interactive --await; exec \${SHELL:-/bin/sh}"
+  gemini_cmd="$gemini_bin launch-interactive --await; exec bash"
 
   local genv=(
     -e "AI_PAIR_PROJECT=$AI_PAIR_PROJECT"
@@ -378,20 +376,10 @@ if [[ "${AI_PAIR_SKIP_CODEX_AUTH_CHECK:-0}" != "1" ]]; then
     # refresh_token_invalidated). This is a cheap LOCAL exp check — no network,
     # no API spend on the common path (access tokens live ~10 days), so it taxes
     # only the launches that are actually near the danger boundary.
-    if command -v python3 >/dev/null 2>&1; then
-      codex_at_state="$(python3 - "$AI_PAIR_CODEX_HOME/auth.json" <<'PY' 2>/dev/null || true
-import json, sys, base64, time
-try:
-    d = json.load(open(sys.argv[1]))
-    at = (d.get("tokens") or {}).get("access_token", "") or ""
-    p = at.split(".")[1]; p += "=" * (-len(p) % 4)
-    exp = json.loads(base64.urlsafe_b64decode(p)).get("exp", 0)
-    left = exp - time.time()
-    print("expired" if left <= 0 else ("soon" if left < 3600 else "ok"))
-except Exception:
-    print("unknown")
-PY
-)"
+    if command -v elixir >/dev/null 2>&1; then
+      codex_at_state="$(elixir -r "$(dirname "${BASH_SOURCE[0]}")/tooling.ex" \
+        -e 'AiPair.Tooling.main(System.argv())' -- token-expiry \
+        "$AI_PAIR_CODEX_HOME/auth.json" 2>/dev/null || true)"
       if [[ "$codex_at_state" == "expired" || "$codex_at_state" == "soon" ]]; then
         log "WARN: codex access token for this home is ${codex_at_state}; it must refresh on launch"
         echo "ai-pair: codex will refresh its ChatGPT token on launch (token ${codex_at_state})." >&2

@@ -107,7 +107,9 @@ done
 
 generic_token="s""k-abcdefghijklmnopqrstuvwxyz1234567890"
 printf '%s\n' "$generic_token" >"$external/sample.txt"
-run_capture 1 env PATH=/bin:/usr/bin "$scanner" --paths "$external"
+mkdir "$tmp/grep-fallback"
+ln -s "$(command -v sha256sum)" "$tmp/grep-fallback/sha256sum"
+run_capture 1 env PATH="$tmp/grep-fallback:/bin:/usr/bin" "$scanner" --paths "$external"
 [[ "$output" == *"<external-1>/sample.txt:1:provider_token"* ]] || fail "grep fallback missed a provider token"
 
 anthropic_token="s""k-ant-abcdefghijklmnopqrstuvwxyz123456"
@@ -123,6 +125,12 @@ locator=$(grep '^provider_token:<external-1>/sample.txt:' <<<"$output")
 [[ "$locator" != *"$generic_token"* ]] || fail "locator mode disclosed matched content"
 printf '%s # reviewed synthetic test value\n' "$locator" >allow
 run_capture 0 "$scanner" --allowlist allow --paths "$external"
+
+printf '%s # reviewed without terminal newline' "$locator" >allow
+run_capture 0 "$scanner" --allowlist allow --paths "$external"
+printf '%sx # not the exact locator\n' "$locator" >allow
+run_capture 1 "$scanner" --allowlist allow --paths "$external"
+printf '%s # reviewed synthetic test value\n' "$locator" >allow
 
 printf '\n%s\n' "$generic_token" >"$external/sample.txt"
 run_capture 0 "$scanner" --allowlist allow --paths "$external"

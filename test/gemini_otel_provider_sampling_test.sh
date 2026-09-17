@@ -2,9 +2,21 @@
 set -euo pipefail
 
 script="${1:?usage: $0 path/to/gemini-otel.sh}"
+helper="${2:-$(dirname "$script")/telemetry-batch.ex}"
 tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
+cleanup() {
+  local rc=$? log
+  if [[ $rc != 0 ]]; then
+    for log in "$tmp"/*.curl; do [[ ! -f $log ]] || cat "$log" >&2; done
+  fi
+  rm -rf "$tmp"
+}
+trap cleanup EXIT
 mkdir -p "$tmp/bin"
+mkdir -p "$tmp/subject"
+cp "$script" "$tmp/subject/gemini-otel.sh"
+cp "$helper" "$tmp/subject/telemetry-batch.ex"
+script="$tmp/subject/gemini-otel.sh"
 
 cat >"$tmp/bin/curl" <<'EOF'
 #!/usr/bin/env bash
@@ -127,10 +139,18 @@ run_case() {
   mkdir -p "$inbox"
   : >"$tmp/$name.curl"
   PATH="$tmp/bin:$PATH" \
-    AI_PAIR_INBOX="$inbox" AI_PAIR_PROJECT=demo FIXTURE_CASE="$name" \
+    AI_PAIR_INBOX="$inbox" AI_PAIR_PROJECT=demo FIXTURE_CASE="$name" TEMPO=http://tempo-fixture.invalid \
     GEMINI_ORACLE_BIN=agy AGY_CAPTURE="$tmp/$name.prompt" \
     CURL_ARGS_LOG="$tmp/$name.curl" \
-    bash "$script" otel --limit "$limit" >"$tmp/$name.out"
+      bash "$script" otel --limit "$limit" >"$tmp/$name.out"
+  [[ -s $tmp/$name.curl ]]
+  while IFS= read -r line; do
+    url=${line##*$'\t'}
+    [[ $url == http://tempo-fixture.invalid/api/* ]]
+  done <"$tmp/$name.curl"
+  grep -Fq '/api/v2/search/tag/span.gen_ai.system/values' "$tmp/$name.curl"
+  grep -Fq '/api/search' "$tmp/$name.curl"
+  grep -Fq '/api/traces/' "$tmp/$name.curl"
   find "$inbox/gemini" -maxdepth 1 -type f -name 'otel-*.org' -print | sort | tail -1
 }
 
@@ -142,10 +162,23 @@ grep -Fq -- '- calls analyzed: 4' "$report"
 grep -Fq -- '- providers: anthropic=3, openai-codex=1' "$report"
 [[ "$(grep -c '^trace_id:' "$tmp/starvation.prompt")" -eq 4 ]]
 [[ "$(grep -c '^trace_id: o350$' "$tmp/starvation.prompt")" -eq 1 ]]
-mapfile -t selected < <(grep '^trace_id:' "$tmp/starvation.prompt" | awk '{print $2}')
+selected=()
+while IFS= read -r line; do
+  [[ $line != trace_id:* ]] || selected+=("${line#trace_id: }")
+done <"$tmp/starvation.prompt"
 [[ "${selected[*]}" == 'a200 a300 o350 a400' ]]
-[[ "$(awk -F '\t' '$3 !~ /\/api\/traces\// {print $1}' "$tmp/starvation.curl" | sort -u | wc -l | tr -d ' ')" -eq 1 ]]
-[[ "$(awk -F '\t' '$3 !~ /\/api\/traces\// {print $2}' "$tmp/starvation.curl" | sort -u | wc -l | tr -d ' ')" -eq 1 ]]
+window_start='' window_end='' window_queries=0
+while IFS= read -r line; do
+  start=${line%%$'\t'*}
+  rest=${line#*$'\t'}
+  end=${rest%%$'\t'*}
+  url=${rest#*$'\t'}
+  [[ $url != */api/traces/* ]] || continue
+  if [[ $window_queries == 0 ]]; then window_start=$start; window_end=$end; fi
+  [[ -n $start && -n $end && $start == "$window_start" && $end == "$window_end" ]]
+  window_queries=$((window_queries + 1))
+done <"$tmp/starvation.curl"
+[[ $window_queries -gt 0 ]]
 
 report="$(run_case single 3)"
 grep -Fq -- '- providers: anthropic=3, openai-codex=0' "$report"

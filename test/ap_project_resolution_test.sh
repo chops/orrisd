@@ -3,6 +3,7 @@ set -euo pipefail
 
 ap_source="${1:?usage: ap_project_resolution_test.sh PATH_TO_AP PATH_TO_START_PAIR}"
 start_pair_source="${2:?usage: ap_project_resolution_test.sh PATH_TO_AP PATH_TO_START_PAIR}"
+tooling_source="${3:-$(dirname "$ap_source")/tooling.ex}"
 root="$(mktemp -d)"
 trap 'rm -rf "$root"' EXIT
 
@@ -19,9 +20,10 @@ project_y="$(cd "$project_y" && pwd -P)"
 project_z="$(cd "$project_z" && pwd -P)"
 cp "$ap_source" "$bin/ap"
 cp "$start_pair_source" "$bin/start-pair"
+cp "$tooling_source" "$bin/tooling.ex"
 chmod +x "$bin/ap" "$bin/start-pair"
 
-for tool in bash basename cat date dirname grep head mkdir ln mktemp od rm sed sha256sum tail tr uname; do
+for tool in bash basename cat date dirname elixir grep head mkdir ln mktemp od rm sha256sum tail tr uname; do
   resolved="$(command -v "$tool" 2>/dev/null || true)"
   [[ -n "$resolved" ]] && ln -s "$resolved" "$tools/$tool"
 done

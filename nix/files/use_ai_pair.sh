@@ -19,11 +19,8 @@ use_ai_pair() {
   workdir="$(pwd -P)"
   local project_basename project_hash
   project_basename="$(basename "$workdir")"
-  if command -v shasum >/dev/null 2>&1; then
-    project_hash="$(printf '%s' "$workdir" | shasum -a 256 | head -c 8)"
-  else
-    project_hash="$(printf '%s' "$workdir" | sha256sum | head -c 8)"
-  fi
+  project_hash="$(printf '%s' "$workdir" | sha256sum)" || return
+  project_hash="${project_hash:0:8}"
 
   local inbox_base="${AI_PAIR_INBOX_BASE:-$HOME/.ai-agent-inbox}"
   local inbox="$inbox_base/${project_basename}-${project_hash}"

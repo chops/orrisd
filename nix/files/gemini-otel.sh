@@ -120,30 +120,6 @@ mkdir -p "$REPORT_DIR"
 cleanup() { [[ -n "${batch:-}" ]] && rm -f "$batch"; [[ -n "${collect_tmp:-}" ]] && rm -rf "$collect_tmp"; [[ -z "${GEMINI_OTEL_KEEP_SCRATCH:-}" && -n "${scratch:-}" ]] && rm -rf "$scratch"; [[ -n "${have_lock:-}" ]] && rmdir "$LOCKDIR" 2>/dev/null; }
 trap cleanup EXIT
 
-# --- Per-trace extraction (jq only; no python dependency). Shared by both modes.
-# shellcheck disable=SC2016 # This is a jq program, not an interpolated shell string.
-extract='
-  ([.batches[]?.scopeSpans[]?.spans[]?.attributes[]?]
-    | map({ (.key): (.value.stringValue // .value.intValue // .value.boolValue // .value.doubleValue // "") })
-    | add) as $a
-  | def g(k): ($a[k] // "?");
-    "trace_id: \($tid)
-provider: \(g("gen_ai.system"))
-http_method: \(g("http.request.method"))
-model: \(g("gen_ai.request.model"))
-agent: \($a["ai_pair.pane.agent"] // $a["ai_pair.harness"] // "?")
-project: \($a["ai_pair.project"] // "<none>")
-correlation_id: \($a["messaging.message.id"] // "<none>")
-operation: \(g("gen_ai.operation.name"))
-finish_reason: \(g("gen_ai.response.finish_reasons"))
-tokens: input=\(g("gen_ai.usage.input_tokens")) output=\(g("gen_ai.usage.output_tokens")) cache_read=\(g("gen_ai.usage.cache_read_input_tokens")) cache_creation=\(g("gen_ai.usage.cache_creation_input_tokens"))
-prompt_size_bytes: \(g("gen_ai.prompt.size_bytes")) (truncated=\($a["gen_ai.prompt.truncated"] // "false"))
---- PROMPT PREVIEW ---
-\(($a["gen_ai.prompt"] // "") | tostring | .[0:800])
---- RESPONSE PREVIEW ---
-\(($a["gen_ai.completion"] // "") | tostring | .[0:500])"
-'
-
 # collect_batch OUTFILE — query one fixed time window, select the newest
 # extractable call per active provider, then fill the remaining limit by global
 # recency. This prevents a busy provider from starving another provider out of
@@ -152,12 +128,12 @@ prompt_size_bytes: \(g("gen_ai.prompt.size_bytes")) (truncated=\($a["gen_ai.prom
 #   TRACE_COUNT      number of unique candidate traces queried
 #   QUERY            query description (for --dry-run display)
 #   PROVIDER_SUMMARY deterministic counts for the written batch
-# Always returns 0; the caller decides what to do with N / TRACE_COUNT.
+# Empty/malformed upstream data is best-effort; local helper failures are fatal.
 collect_batch() {
-  local out="$1" id s provider method provider_literal provider_query trace_json detail
-  local candidates unique_candidates extractable reserves selected counts details_dir
-  local candidate_limit selected_count anthropic_count openai_count extras line
-  local -a providers
+  local out="$1" helper curl_bin
+  helper="$(dirname "${BASH_SOURCE[0]}")/telemetry-batch.ex"
+  # Resolve before the Elixir wrapper changes PATH, including in inert tests.
+  curl_bin="$(command -v curl)" || return 1
 
   WINDOW_END="$(date +%s)"
   WINDOW_START="$((WINDOW_END - WINDOW_SECONDS))"
@@ -169,109 +145,12 @@ collect_batch() {
   QUERY="{ $QUERY_BODY } [provider-aware, start=$WINDOW_START, end=$WINDOW_END]"
 
   collect_tmp="$(mktemp -d)"
-  candidates="$collect_tmp/candidates"
-  unique_candidates="$collect_tmp/unique-candidates"
-  extractable="$collect_tmp/extractable"
-  reserves="$collect_tmp/reserves"
-  selected="$collect_tmp/selected"
-  counts="$collect_tmp/counts"
-  details_dir="$collect_tmp/details"
-  mkdir -p "$details_dir"
-  : >"$candidates"
-  candidate_limit=$((LIMIT * 2))
-  (( candidate_limit < 20 )) && candidate_limit=20
-  (( candidate_limit > 200 )) && candidate_limit=200
-
-  # The v2 tag-values endpoint discovers future provider names. Keep the two
-  # current providers as a fallback because older Tempo builds may not index
-  # tag values even when ordinary TraceQL searches work.
-  mapfile -t providers < <(
-    {
-      printf '%s\n' anthropic openai-codex
-      curl -s --get "$TEMPO/api/v2/search/tag/span.gen_ai.system/values" \
-        --data-urlencode "q={ $QUERY_BODY }" \
-        --data-urlencode "start=$WINDOW_START" \
-        --data-urlencode "end=$WINDOW_END" 2>/dev/null \
-        | jq -r '.tagValues[]? | if type == "object" then .value else . end' 2>/dev/null
-    } | awk 'NF && !seen[$0]++' | sort
-  )
-
-  # Broad candidates preserve best-effort coverage if tag discovery is stale.
-  curl -s --get "$TEMPO/api/search" \
-    --data-urlencode "q={ $QUERY_BODY }" \
-    --data-urlencode "limit=$candidate_limit" \
-    --data-urlencode "start=$WINDOW_START" \
-    --data-urlencode "end=$WINDOW_END" 2>/dev/null \
-    | jq -r '.traces[]? | "\(.startTimeUnixNano) \(.traceID)"' 2>/dev/null \
-    >>"$candidates"
-
-  for provider in "${providers[@]}"; do
-    provider_literal="$(jq -Rn --arg value "$provider" '$value')"
-    provider_query="{ $QUERY_BODY && span.gen_ai.system = $provider_literal }"
-    curl -s --get "$TEMPO/api/search" \
-      --data-urlencode "q=$provider_query" \
-      --data-urlencode "limit=$candidate_limit" \
-      --data-urlencode "start=$WINDOW_START" \
-      --data-urlencode "end=$WINDOW_END" 2>/dev/null \
-      | jq -r '.traces[]? | "\(.startTimeUnixNano) \(.traceID)"' 2>/dev/null \
-      >>"$candidates"
-  done
-
-  # Tempo emits current Unix-nanosecond timestamps as fixed-width decimal
-  # strings, so lexical ordering avoids BSD/GNU large-integer differences.
-  sort -k1,1r -k2,2 "$candidates" | awk '!seen[$2]++' >"$unique_candidates"
-  TRACE_COUNT="$(awk 'END {print NR + 0}' "$unique_candidates")"
-
-  while read -r trace_start id; do
-    [[ "$id" =~ ^[A-Za-z0-9._-]+$ ]] || continue
-    trace_json="$(curl -s "$TEMPO/api/traces/$id" 2>/dev/null)"
-    [[ -n "$trace_json" ]] || continue
-    provider="$(jq -r '[.batches[]?.scopeSpans[]?.spans[]?.attributes[]? | select(.key == "gen_ai.system") | .value.stringValue] | map(select(. != null and . != "")) | first // empty' <<<"$trace_json" 2>/dev/null)"
-    method="$(jq -r '[.batches[]?.scopeSpans[]?.spans[]?.attributes[]? | select(.key == "http.request.method") | .value.stringValue] | map(select(. != null and . != "")) | first // empty' <<<"$trace_json" 2>/dev/null)"
-    [[ -n "$provider" && "$method" == "POST" ]] || continue
-    s="$(jq -r --arg tid "$id" "$extract" <<<"$trace_json" 2>/dev/null)"
-    [[ -n "$s" ]] || continue
-    detail="$details_dir/$id"
-    printf '%s\n' "$s" >"$detail"
-    printf '%s %s %s %s\n' "$trace_start" "$id" "$provider" "$detail" \
-      >>"$extractable"
-  done <"$unique_candidates"
-
-  # One newest extractable trace per provider is reserved first. If providers
-  # outnumber LIMIT, the globally newest provider representatives win.
-  sort -k3,3 -k1,1r -k2,2 "$extractable" \
-    | awk '!seen[$3]++' \
-    | sort -k1,1r -k2,2 \
-    | awk -v limit="$LIMIT" 'NR <= limit' >"$reserves"
-  cp "$reserves" "$selected"
-  selected_count="$(awk 'END {print NR + 0}' "$selected")"
-
-  while read -r line; do
-    (( selected_count >= LIMIT )) && break
-    id="$(awk '{print $2}' <<<"$line")"
-    if ! awk -v wanted="$id" '$2 == wanted {found=1} END {exit !found}' "$selected"; then
-      printf '%s\n' "$line" >>"$selected"
-      selected_count=$((selected_count + 1))
-    fi
-  done < <(sort -k1,1r -k2,2 "$extractable")
-
-  N=0
-  : > "$out"
-  : >"$counts"
-  while read -r _ id provider detail; do
-    [[ -n "$id" && -f "$detail" ]] || continue
-    { printf '===== call %d =====\n' "$((N + 1))"; cat "$detail"; printf '\n\n'; } >>"$out"
-    printf '%s\n' "$provider" >>"$counts"
-    N=$((N + 1))
-  done < <(sort -k1,1 -k2,2 "$selected")
-
-  anthropic_count="$(awk '$0 == "anthropic" {n++} END {print n + 0}' "$counts")"
-  openai_count="$(awk '$0 == "openai-codex" {n++} END {print n + 0}' "$counts")"
-  PROVIDER_SUMMARY="anthropic=$anthropic_count, openai-codex=$openai_count"
-  extras="$(sort -u "$counts" | awk '$0 != "anthropic" && $0 != "openai-codex" && NF' | while read -r provider; do
-    printf ', %s=%s' "$provider" "$(awk -v wanted="$provider" '$0 == wanted {n++} END {print n + 0}' "$counts")"
-  done)"
-  PROVIDER_SUMMARY+="$extras"
+  elixir -r "$helper" -e 'AiPair.TelemetryBatch.main(System.argv())' -- \
+    "$curl_bin" "$TEMPO" "$QUERY_BODY" "$WINDOW_START" "$WINDOW_END" "$LIMIT" "$out" \
+    >"$collect_tmp/result" || return 1
+  {
+    IFS= read -r N && IFS= read -r TRACE_COUNT && IFS= read -r PROVIDER_SUMMARY
+  } <"$collect_tmp/result" || return 1
 
   rm -rf "$collect_tmp"
   collect_tmp=""
@@ -285,7 +164,7 @@ collect_batch() {
 if [[ "$MODE" == interactive ]]; then
   scratch="$(mktemp -d)"          # cwd + workspace; cleaned by the EXIT trap
   ctxfile="$scratch/otel-context.txt"
-  collect_batch "$ctxfile"
+  collect_batch "$ctxfile" || exit 1
 
   # On a cold session start there is usually no telemetry yet (the pair just
   # launched). Because start-pair creates the 'gemini' window exactly once, a
@@ -312,7 +191,7 @@ if [[ "$MODE" == interactive ]]; then
       else
         sleep "$poll"
       fi
-      collect_batch "$ctxfile"
+      collect_batch "$ctxfile" || exit 1
     done
     echo >&2
   fi
@@ -379,11 +258,11 @@ if (( watch )); then
     IFS= read -r _k </dev/tty 2>/dev/null || break
     [[ "$_k" == q ]] && break
   done
-  exec "${SHELL:-/bin/bash}"
+  exec bash
 fi
 
 batch="$(mktemp)"
-collect_batch "$batch"
+collect_batch "$batch" || exit 1
 
 if (( TRACE_COUNT == 0 )); then
   echo "gemini-otel: no LLM-call traces for project=${PROJECT:-<all>} at $TEMPO" >&2
@@ -450,13 +329,13 @@ if ! ( cd "$scratch" && "$ORACLE_BIN" --print "$prompt" \
          --print-timeout "$PRINT_TIMEOUT" --model "$MODEL" ) \
       >> "$report" 2>"$scratch/err"; then
   echo "gemini-otel: $ORACLE_BIN invocation failed:" >&2
-  sed 's/^/  /' "$scratch/err" >&2
+  while IFS= read -r line || [[ -n $line ]]; do printf '  %s\n' "$line"; done <"$scratch/err" >&2
   echo "gemini-otel: partial report at $report" >&2
   exit 1
 fi
 
 echo "gemini-otel: wrote $report  ($N calls: $PROVIDER_SUMMARY; project=${PROJECT:-<all>}, model=$MODEL)"
-sed -n '1,10p' "$report"
+head -n 10 "$report"
 
 if (( open )); then
   if [[ -n "${TMUX:-}" ]]; then

@@ -850,7 +850,7 @@ defmodule AiPair.PaneIntentStoreTest do
       on_exit(fn -> File.rm_rf!(dir) end)
 
       marker = Path.join(dir, "completed")
-      script = Path.join(dir, "adverse.py")
+      script = Path.join(dir, "adverse.bash")
 
       # A TRULY single-process adverse command. The previous fixture was a shell
       # running `sleep`, which forks a descendant - so joining the shell left the
@@ -858,17 +858,26 @@ defmodule AiPair.PaneIntentStoreTest do
       # launcher/child pair. This process does its own waiting and forks nothing,
       # which keeps the direct-child contract honest without inventing any
       # process-tree behaviour in the product.
-      python = System.find_executable("python3")
-      assert python, "precondition: python3 is required for the single-process fixture"
+      bash = System.find_executable("bash")
+      assert bash, "precondition: bash is required for the single-process fixture"
 
       File.write!(
         script,
-        "#!#{python}\nimport time\ntime.sleep(1.0)\nopen(#{inspect(marker)}, 'w').write('x')\n"
+        "#!#{bash}\nset -euo pipefail\n: \"${EPOCHREALTIME:?bash with EPOCHREALTIME is required}\"\n" <>
+          "start=${EPOCHREALTIME/./}\ntarget=$((10#$start + 1000000))\n" <>
+          "while :; do now=${EPOCHREALTIME/./}; ((10#$now >= target)) && break; done\n" <>
+          "printf x >\"$1\"\n"
       )
 
       File.chmod!(script, 0o700)
 
-      assert {:error, {:census_timed_out, os_pid, join}} = run_bounded_census(script, [], 40)
+      control_marker = Path.join(dir, "control-completed")
+      assert {"", 0} = System.cmd(script, [control_marker])
+      assert File.read!(control_marker) == "x", "the adverse command must have a reachable effect"
+
+      assert {:error, {:census_timed_out, os_pid, join}} =
+               run_bounded_census(script, [marker], 40)
+
       assert is_integer(os_pid), "the owned child's OS pid must be observable to be joined"
 
       assert {:joined, ^os_pid} = join,

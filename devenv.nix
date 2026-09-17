@@ -14,7 +14,7 @@
   packages = with pkgs; [
     git
     tmux
-    jq
+    coreutils
     lefthook
     ripgrep
     shellcheck

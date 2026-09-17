@@ -16,10 +16,20 @@ let
     install -Dm755 ${./files/start-pair.sh}  $out/bin/start-pair
     install -Dm755 ${./files/ap-bridge.sh}   $out/bin/ap-bridge
     install -Dm755 ${./files/gemini-otel.sh} $out/bin/gemini-otel
+    install -Dm644 ${./files/tooling.ex} $out/bin/tooling.ex
+    install -Dm644 ${./files/telemetry-batch.ex} $out/bin/telemetry-batch.ex
+    substituteInPlace $out/bin/ap $out/bin/start-pair $out/bin/ap-bridge $out/bin/gemini-otel \
+      --replace-fail 'elixir -r' '${pkgs.beam.packages.erlang_29.elixir_1_20}/bin/elixir -r'
+    substituteInPlace $out/bin/ap $out/bin/start-pair \
+      --replace-fail 'sha256sum' '${pkgs.coreutils}/bin/sha256sum'
+    substituteInPlace $out/bin/start-pair --replace-fail 'command -v elixir' \
+      'test -x ${pkgs.beam.packages.erlang_29.elixir_1_20}/bin/elixir'
   '';
 
   useAiPairLib = pkgs.runCommandLocal "ai-pair-direnv-lib" { } ''
     install -Dm644 ${./files/use_ai_pair.sh} $out/share/direnv/lib/use_ai_pair.sh
+    substituteInPlace $out/share/direnv/lib/use_ai_pair.sh \
+      --replace-fail 'sha256sum' '${pkgs.coreutils}/bin/sha256sum'
   '';
 
   peerProtocolDocs = pkgs.runCommandLocal "ai-pair-peer-protocol" { } ''
@@ -50,17 +60,8 @@ let
 ${body}
 AI_PAIR_BLOCK_EOF
     if ${pkgs.gnugrep}/bin/grep -qF "$begin" "$target"; then
-      ${pkgs.gawk}/bin/awk -v b="$begin" -v e="$end" -v f="$blockfile" '
-        BEGIN { in_blk=0; printed=0 }
-        $0==b { in_blk=1;
-                print b;
-                while ((getline line < f) > 0) print line;
-                print e;
-                printed=1;
-                next }
-        $0==e { in_blk=0; next }
-        { if (!in_blk) print }
-      ' "$target" >"$target.ai-pair.new"
+      ${pkgs.bash}/bin/bash ${./files/managed-block.sh} \
+        "$begin" "$end" "$blockfile" "$target" >"$target.ai-pair.new"
       ${pkgs.coreutils}/bin/mv "$target.ai-pair.new" "$target"
     else
       {

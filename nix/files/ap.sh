@@ -36,6 +36,15 @@ INHERITED_AI_PAIR_PROJECT_HASH="${AI_PAIR_PROJECT_HASH-}"
 # on PATH (notably some Claude Code sessions) otherwise hit `start-pair: not
 # found` when `ap up` execs the colocated helper.
 HERE="$(dirname "$0")"
+json() { elixir -r "$HERE/tooling.ex" -e 'AiPair.Tooling.main(System.argv())' -- "$@"; }
+print_help() {
+  local line first=1
+  while IFS= read -r line; do
+    if [[ $first == 1 ]]; then first=0; continue; fi
+    [[ $line != 'set -'* ]] || break
+    printf '%s\n' "$line"
+  done <"$0"
+}
 resolve_bin() {
   local name="$1"
   if [[ -x "$HERE/$name" ]]; then printf '%s' "$HERE/$name"
@@ -54,11 +63,8 @@ resolve_project() {
   else
     AI_PAIR_PROJECT="$(basename "$WORKDIR")"
   fi
-  if command -v shasum >/dev/null 2>&1; then
-    PROJECT_HASH="$(printf '%s' "$WORKDIR" | shasum -a 256 | head -c 8)"
-  else
-    PROJECT_HASH="$(printf '%s' "$WORKDIR" | sha256sum | head -c 8)"
-  fi
+  PROJECT_HASH="$(printf '%s' "$WORKDIR" | sha256sum)"
+  PROJECT_HASH="${PROJECT_HASH:0:8}"
   SESSION="ai-pair/${AI_PAIR_PROJECT}-${PROJECT_HASH}"
   INBOX_BASE="${AI_PAIR_INBOX_BASE:-$HOME/.ai-agent-inbox}"
   AI_PAIR_INBOX="$INBOX_BASE/$AI_PAIR_PROJECT-$PROJECT_HASH"
@@ -183,7 +189,7 @@ case "$CMD" in
         hc_elapsed="?"
       fi
       if printf '%s' "$hc_out" | grep -q '"ok":[[:space:]]*true'; then
-        hc_pong="$(printf '%s' "$hc_out" | sed -nE 's/.*"pong":"([^"]+)".*/\1/p')"
+        hc_pong="$(printf '%s' "$hc_out" | json get '' pong)"
         ok "healthcheck uds-json-ping (pong=${hc_pong:-?}, ${hc_elapsed}ms wall)"
         if [[ "$hc_elapsed" != "?" && "$hc_elapsed" -gt 1500 ]]; then
           say "warn: ${hc_elapsed}ms exceeds manifest 1000ms+cushion budget"
@@ -307,12 +313,12 @@ case "$CMD" in
     ;;
 
   help|--help|-h|"")
-    sed -n '2,/^set -/p' "$0" | sed '$d'
+    print_help
     ;;
 
   *)
     echo "ap: unknown subcommand: $CMD" >&2
-    sed -n '2,/^set -/p' "$0" | sed '$d' >&2
+    print_help >&2
     exit 2
     ;;
 esac

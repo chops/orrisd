@@ -54,6 +54,8 @@
           # Include it in the release closure as well as the CLI package.
           postInstall = ''
             install -Dm755 ${./nix/files/ap-bridge.sh} $out/bin/ap-bridge
+            install -Dm644 ${./nix/files/tooling.ex} $out/bin/tooling.ex
+            substituteInPlace $out/bin/ap-bridge --replace-fail 'elixir -r' '${beamPackages.elixir}/bin/elixir -r'
           '';
         };
     in
@@ -82,6 +84,14 @@
             install -Dm755 ${./nix/files/start-pair.sh}  $out/bin/start-pair
             install -Dm755 ${./nix/files/ap-bridge.sh}   $out/bin/ap-bridge
             install -Dm755 ${./nix/files/gemini-otel.sh} $out/bin/gemini-otel
+            install -Dm644 ${./nix/files/tooling.ex} $out/bin/tooling.ex
+            install -Dm644 ${./nix/files/telemetry-batch.ex} $out/bin/telemetry-batch.ex
+            substituteInPlace $out/bin/ap $out/bin/start-pair $out/bin/ap-bridge $out/bin/gemini-otel \
+              --replace-fail 'elixir -r' '${pkgs.beam.packages.erlang_29.elixir_1_20}/bin/elixir -r'
+            substituteInPlace $out/bin/ap $out/bin/start-pair \
+              --replace-fail 'sha256sum' '${pkgs.coreutils}/bin/sha256sum'
+            substituteInPlace $out/bin/start-pair --replace-fail 'command -v elixir' \
+              'test -x ${pkgs.beam.packages.erlang_29.elixir_1_20}/bin/elixir'
           '';
 
           devenv-up = self.devShells.${system}.default.config.procfileScript;
@@ -100,16 +110,16 @@
           '';
 
           ap-project-resolution = pkgs.runCommand "ap-project-resolution-test" {
-            nativeBuildInputs = [ pkgs.bash pkgs.coreutils pkgs.gnugrep ];
+            nativeBuildInputs = [ pkgs.bash pkgs.coreutils pkgs.gnugrep pkgs.beam.packages.erlang_29.elixir_1_20 ];
           } ''
-            bash ${./test/ap_project_resolution_test.sh} ${./nix/files/ap.sh} ${./nix/files/start-pair.sh}
+            bash ${./test/ap_project_resolution_test.sh} ${./nix/files/ap.sh} ${./nix/files/start-pair.sh} ${./nix/files/tooling.ex}
             touch "$out"
           '';
 
           gemini-otel-provider-sampling = pkgs.runCommand "gemini-otel-provider-sampling-test" {
-            nativeBuildInputs = [ pkgs.bash pkgs.coreutils pkgs.diffutils pkgs.gawk pkgs.gnugrep pkgs.jq ];
+            nativeBuildInputs = [ pkgs.bash pkgs.coreutils pkgs.diffutils pkgs.gnugrep pkgs.beam.packages.erlang_29.elixir_1_20 ];
           } ''
-            bash ${./test/gemini_otel_provider_sampling_test.sh} ${./nix/files/gemini-otel.sh}
+            bash ${./test/gemini_otel_provider_sampling_test.sh} ${./nix/files/gemini-otel.sh} ${./nix/files/telemetry-batch.ex}
             touch "$out"
           '';
         });

@@ -34,6 +34,7 @@ OUTBOX_BRIDGE="$INBOX/outbox-bridge"
 LOG_PREFIX="ap-bridge"
 
 log() { printf '%s %s\n' "$LOG_PREFIX" "$*" >&2; }
+json() { elixir -r "$(dirname "${BASH_SOURCE[0]}")/tooling.ex" -e 'AiPair.Tooling.main(System.argv())' -- "$@"; }
 
 if [[ ! -r "$ROUTING" ]]; then
   log "routing config $ROUTING not readable; bridge idle"
@@ -57,18 +58,18 @@ forward_envelope() {
   local base="${src##*/}"
 
   local route
-  route="$(printf '%s' "$routing_json" | jq -e --arg h "$dest_host" '.routes[$h] // empty')"
+  if ! route="$(printf '%s' "$routing_json" | json route "$dest_host")"; then route=; fi
   if [[ -z "$route" ]]; then
     log "no route for host=$dest_host (envelope $base); leaving in place"
     return 1
   fi
 
   local user host port inbox_path identity
-  user="$(printf '%s' "$route" | jq -r '.user // "agent"')"
-  host="$(printf '%s' "$route" | jq -r '.host')"
-  port="$(printf '%s' "$route" | jq -r '.port // 22')"
-  inbox_path="$(printf '%s' "$route" | jq -r '.inbox')"
-  identity="$(printf '%s' "$route" | jq -r '.identity_file // empty')"
+  user="$(printf '%s' "$route" | json get agent user)"
+  host="$(printf '%s' "$route" | json get null host)"
+  port="$(printf '%s' "$route" | json get 22 port)"
+  inbox_path="$(printf '%s' "$route" | json get null inbox)"
+  identity="$(printf '%s' "$route" | json get '' identity_file)"
 
   if [[ -z "$host" || -z "$inbox_path" || "$host" == "null" || "$inbox_path" == "null" ]]; then
     log "route for $dest_host missing host/inbox; leaving in place"
@@ -111,7 +112,7 @@ forward_envelope() {
 scan_once() {
   local routing local_host
   routing="$(read_routing)"
-  local_host="$(printf '%s' "$routing" | jq -r '.local_host // empty')"
+  local_host="$(printf '%s' "$routing" | json get '' local_host)"
 
   if [[ -z "$local_host" ]]; then
     return 0
@@ -123,7 +124,7 @@ scan_once() {
     [[ -f "$f" ]] || continue
 
     local to_host
-    to_host="$(jq -r '.to.host // empty' "$f" 2>/dev/null || true)"
+    to_host="$(json get '' to host <"$f" 2>/dev/null || true)"
 
     # No to.host or addressed to local → not our concern.
     if [[ -z "$to_host" || "$to_host" == "$local_host" ]]; then
