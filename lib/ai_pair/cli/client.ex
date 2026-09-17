@@ -416,7 +416,7 @@ defmodule AiPair.CLI.Client do
       attributes: Map.merge(%{"cli.command" => name}, extra_attrs)
     } do
       exit_code =
-        case request(cmd_payload) do
+        case bind_versioned_reply(request(cmd_payload), cmd_payload) do
           {:ok, %{"ok" => true} = payload} ->
             IO.puts(Jason.encode!(payload))
             0
@@ -437,6 +437,24 @@ defmodule AiPair.CLI.Client do
       exit_code
     end
   end
+
+  defp bind_versioned_reply({:ok, reply}, %{"protocol_version" => 2} = request) do
+    if is_map(reply) and reply["protocol_version"] === 2 and is_boolean(reply["ok"]) and
+         reply_identity_matches?(reply, request) do
+      {:ok, reply}
+    else
+      {:error, :protocol_reply_mismatch}
+    end
+  end
+
+  defp bind_versioned_reply(result, _request), do: result
+
+  defp reply_identity_matches?(reply, %{"cmd" => command} = request)
+       when command in ["send", "reconcile"] do
+    reply["msg_id"] === request["msg_id"] and reply["pane_id"] === request["pane_id"]
+  end
+
+  defp reply_identity_matches?(_reply, _request), do: true
 
   @doc false
   @spec parse_attach([String.t()]) :: {:ok, String.t(), String.t() | nil} | :error
@@ -612,6 +630,10 @@ defmodule AiPair.CLI.Client do
     do: "daemon refused connection (stale socket?)"
 
   defp format_error(:timeout), do: "timeout waiting for daemon reply"
+
+  defp format_error(:protocol_reply_mismatch),
+    do: "protocol_error: daemon reply does not match the requested protocol or identity"
+
   defp format_error(message) when is_binary(message), do: message
   defp format_error({:invalid_json, _}), do: "daemon returned invalid JSON"
   defp format_error({:stdin_read, reason}), do: "failed to read stdin: " <> inspect(reason)
