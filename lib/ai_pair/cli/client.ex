@@ -591,14 +591,28 @@ defmodule AiPair.CLI.Client do
     run_cmd("detach", %{"cmd" => "detach_pane", "pane_id" => pane_id})
   end
 
-  defp attach(pane_id, agent) do
-    cmd =
-      case agent do
-        nil -> %{"cmd" => "attach_pane", "pane_id" => pane_id}
-        a when is_binary(a) -> %{"cmd" => "attach_pane", "pane_id" => pane_id, "agent" => a}
-      end
+  @doc """
+  Builds the attach business payload; transport adds the current trace context.
 
-    run_cmd("attach", cmd)
+  Exactly `cmd` and `pane_id`, plus `agent` only when one is given and
+  `durable` only when requested. `maybe_put/3` drops nil, not false, so
+  "not durable" maps to nil: that keeps `durable` off the legacy frame
+  entirely rather than sending `durable: false`, which would still be a
+  new key. The CLI does not yet expose a durable attach; `attach/2`
+  always passes `false`.
+  """
+  @spec attach_payload(String.t(), String.t() | nil, boolean()) :: map()
+  def attach_payload(pane_id, agent, durable?) do
+    %{"cmd" => "attach_pane", "pane_id" => pane_id}
+    |> maybe_put("agent", agent)
+    |> maybe_put("durable", durable_attr(durable?))
+  end
+
+  defp durable_attr(true), do: true
+  defp durable_attr(false), do: nil
+
+  defp attach(pane_id, agent) do
+    run_cmd("attach", attach_payload(pane_id, agent, false))
   end
 
   defp ensure_socket_exists(path) do
