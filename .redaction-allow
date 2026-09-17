@@ -1,6 +1,8 @@
 # Exact pattern:path:match-sha256 locator followed by " # " and a reason. Path-wide exclusions are forbidden.
 # The digest covers the regex capture including boundary characters. One entry allows every
 # occurrence of that exact captured value in that path.
+tmux_pane_id:lib/ai_pair/tmux.ex:6e861e37ea72444561cee42b9e3cdb0af82925b4b7b48c23b381edb2662c1637 # reviewed percent-escape codec constant in tmux format, not a pane identity
+tmux_pane_id:lib/ai_pair/tmux.ex:d5140db8c05637d02a7e36950ffec291e1a8a3172b980cd7eeb03086f90e284f # reviewed percent-escape decoder constant, not a pane identity
 linux_home:nix/nixos-module.nix:d76af373b470dde8394bc80ca5c525066b27251ac89562b3751e6945ab8d21eb # reviewed portable implementation path
 linux_home:test/fixtures/fingerprints/claude_code/dialog_trust_gate_first_run.txt:d76af373b470dde8394bc80ca5c525066b27251ac89562b3751e6945ab8d21eb # reviewed classifier fixture
 linux_home:test/fixtures/fingerprints/codex_cli/dialog_trust_gate_0131_first_run.txt:d76af373b470dde8394bc80ca5c525066b27251ac89562b3751e6945ab8d21eb # reviewed classifier fixture

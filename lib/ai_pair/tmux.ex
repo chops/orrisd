@@ -42,7 +42,8 @@ defmodule AiPair.Tmux do
         }
   @type error :: %{cmd: [String.t()], status: integer(), stderr: binary()}
 
-  @list_panes_format "\#{pane_id}\t\#{session_name}\t\#{window_index}\t\#{pane_index}\t\#{pane_pid}\t\#{pane_current_command}"
+  # tmux sanitizes literal tab separators in C locales; escape printable fields instead.
+  @list_panes_format "\#{pane_id}|\#{s/%/%25/;s/[|]/%7C/:session_name}|\#{window_index}|\#{pane_index}|\#{pane_pid}|\#{s/%/%25/;s/[|]/%7C/:pane_current_command}"
   @default_call_timeout_ms 5_000
   @capture_call_timeout_ms 1_000
 
@@ -316,20 +317,24 @@ defmodule AiPair.Tmux do
   end
 
   defp parse_pane_line(line) do
-    case String.split(line, "\t") do
+    case String.split(line, "|") do
       [id, session, window, pane, pid, command] ->
         %{
           id: id,
-          session: session,
+          session: decode_pane_field(session),
           window: parse_int(window),
           pane: parse_int(pane),
           pid: parse_int(pid),
-          command: command
+          command: decode_pane_field(command)
         }
 
       _ ->
         nil
     end
+  end
+
+  defp decode_pane_field(value) do
+    value |> String.replace("%7C", "|") |> String.replace("%25", "%")
   end
 
   defp parse_int(s) do
