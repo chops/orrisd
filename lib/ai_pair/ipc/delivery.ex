@@ -1,7 +1,7 @@
 defmodule AiPair.IPC.Delivery do
   @moduledoc "Versioned delivery operations over the daemon's receipt authority."
 
-  alias AiPair.Delivery.{ReceiptLog, ReceiptStore}
+  alias AiPair.Delivery.{Payload, ReceiptLog, ReceiptStore}
   alias AiPair.Pane.StateMachine
   require OpenTelemetry.Tracer, as: Tracer
 
@@ -75,17 +75,38 @@ defmodule AiPair.IPC.Delivery do
   defp send_to_pane(params, store) do
     with :ok <- identity(params),
          :ok <- text(params["text"]),
-         {:ok, pane} <- AiPair.PaneSupervisor.whereis_pane(params["pane_id"]) do
-      timeout = Application.get_env(:ai_pair, :send_call_timeout_ms, 5_000)
-      result = StateMachine.send_receipted(pane, params["text"], timeout, params["msg_id"], store)
-      send_result(result)
+         {:ok, view} <-
+           ReceiptStore.reconcile(
+             store,
+             params["msg_id"],
+             params["pane_id"],
+             Payload.hash(Payload.new(params["text"])),
+             wait_ms: 0
+           ) do
+      case view.outcome do
+        "absent" -> send_to_registered_pane(params, store)
+        "conflict" -> %{ok: false, error: "conflict"}
+        _ -> send_result({:duplicate, view})
+      end
     else
-      :error -> %{ok: false, error: "pane_not_found"}
       {:error, reason} -> rejection(reason)
     end
   catch
     :exit, {:timeout, _} -> %{ok: false, error: "send_timeout"}
     :exit, _ -> %{ok: false, error: "delivery_unavailable"}
+  end
+
+  defp send_to_registered_pane(params, store) do
+    case AiPair.PaneSupervisor.whereis_pane(params["pane_id"]) do
+      {:ok, pane} ->
+        # This read did not admit an attempt; the pane still owns atomic admission.
+        timeout = Application.get_env(:ai_pair, :send_call_timeout_ms, 5_000)
+        result = StateMachine.send_receipted(pane, params["text"], timeout, params["msg_id"], store)
+        send_result(result)
+
+      :error ->
+        %{ok: false, error: "pane_not_found"}
+    end
   end
 
   defp send_result(:ok), do: %{ok: true, status: "sent"}

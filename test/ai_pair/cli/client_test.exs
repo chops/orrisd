@@ -89,7 +89,11 @@ defmodule AiPair.CLI.ClientTest do
     end
 
     test "ping with no daemon returns 1 with a useful error" do
-      sock = "/tmp/ai-pair-no-daemon-#{System.unique_integer([:positive])}/sock/ai-pair.sock"
+      root = Path.join(System.tmp_dir!(), "ai-pair-no-daemon-#{System.unique_integer([:positive])}")
+      File.mkdir!(root)
+      on_exit(fn -> File.rm_rf!(root) end)
+      sock = Path.join(root, "ai-pair.sock")
+      assert {:error, :enoent} = File.lstat(sock)
       System.put_env("AI_PAIR_DAEMON_SOCK", sock)
       on_exit(fn -> System.delete_env("AI_PAIR_DAEMON_SOCK") end)
 
