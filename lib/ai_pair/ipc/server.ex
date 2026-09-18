@@ -1012,7 +1012,9 @@ defmodule AiPair.IPC.Server do
 
   defp server_context!(opts) do
     durable = durable_enabled?()
-    generation = if durable, do: Keyword.fetch!(opts, :boot_generation), else: nil
+    # `get`, not `fetch!`: an absent option is the same caller defect as a
+    # malformed one and is reported as one ArgumentError, not as a KeyError.
+    generation = if durable, do: Keyword.get(opts, :boot_generation), else: nil
 
     if durable and not (is_binary(generation) and Regex.match?(~r/\A[0-9]+\z/, generation)) do
       raise ArgumentError, "boot_generation must be a nonempty ASCII decimal string"
