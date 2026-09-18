@@ -272,6 +272,13 @@ defmodule AiPair.Delivery.IPCReconcileTest do
   end
 
   describe "identity is echoed on every v2 reply" do
+    # The pane below is grammar-VALID and merely unregistered. It used to be
+    # `%does-not-exist`, which the receipt grammar refuses outright, so the row was
+    # answered `invalid_pane_id` while its name and its comments described a lookup
+    # that had not happened -- and it passed, because it only asserted `ok == false`.
+    # `Delivery.IPCIdentityGrammarTest` owns the grammar refusal; this row owns the
+    # echo on a refusal that really did reach the registry, so the error is asserted
+    # here to keep the two rows about different things.
     test "an error reply still echoes the message id it was given", ctx do
       sock = serve(ctx, :ipc_v2_echo_error)
 
@@ -279,17 +286,18 @@ defmodule AiPair.Delivery.IPCReconcileTest do
         send_frame(sock, %{
           "cmd" => "send",
           "protocol_version" => 2,
-          "pane_id" => "%does-not-exist",
+          "pane_id" => "%does_not_exist",
           "text" => "hello",
           "msg_id" => @msg_b
         })
 
       assert reply["ok"] == false
+      assert reply["error"] == "pane_not_found"
 
       assert reply["msg_id"] == @msg_b,
              "the client validates the echo before it interprets anything else"
 
-      assert reply["pane_id"] == "%does-not-exist",
+      assert reply["pane_id"] == "%does_not_exist",
              "a receipt is keyed by pane and message together, so both are echoed"
 
       assert reply["protocol_version"] == 2,

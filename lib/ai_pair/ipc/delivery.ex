@@ -140,16 +140,24 @@ defmodule AiPair.IPC.Delivery do
   defp text(value) when is_binary(value), do: {:error, :oversize}
   defp text(_), do: {:error, :missing_text}
 
+  # An identity is echoed exactly when `identity/1` above can read it, so the two
+  # decisions are ONE decision made by one predicate per field. `docs/contracts/ipc-v2.org`
+  # requires it: `pane_id` is `%` plus 1..128 of `[a-zA-Z0-9_]`, "the GOVERNING grammar:
+  # it is the one the daemon's receipt record is keyed by, so a pane id outside it cannot
+  # be stored and therefore cannot be delivered", and a daemon whose echo predicate is
+  # wider than its storage predicate "will echo a pane id it then refuses".
+  #
+  # This module used to hold that wider predicate -- the same regex plus `-`. Three
+  # hyphenated classes (`%pane-alpha`, `%panealpha-`, and a 128-character id ending in a
+  # hyphen) were echoed and then refused `invalid_pane_id` in the same reply. Calling
+  # `ReceiptLog.valid_pane?/1` here removes the second grammar rather than correcting it,
+  # because a corrected copy is still a copy that can drift.
   defp echo(params) do
     %{protocol_version: 2}
     |> maybe_echo(:msg_id, params["msg_id"], ReceiptLog.valid_id?(params["msg_id"]))
-    |> maybe_echo(:pane_id, params["pane_id"], echoable_pane?(params["pane_id"]))
+    |> maybe_echo(:pane_id, params["pane_id"], ReceiptLog.valid_pane?(params["pane_id"]))
   end
 
-  defp echoable_pane?(value) when is_binary(value),
-    do: Regex.match?(~r/\A%[a-zA-Z0-9_-]{1,128}\z/, value)
-
-  defp echoable_pane?(_), do: false
   defp maybe_echo(map, key, value, true), do: Map.put(map, key, value)
   defp maybe_echo(map, _key, _value, false), do: map
 
