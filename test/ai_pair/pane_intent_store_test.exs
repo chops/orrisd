@@ -413,7 +413,42 @@ defmodule AiPair.PaneIntentStoreTest do
   owner, and nothing here claims the global service stays stopped.
   """
 
-  use ExUnit.Case, async: true
+  # NOT async, and the reason is the descriptor census rather than any shared
+  # fixture of this suite's own.
+  #
+  # `run_fd_census/0` asks lsof for EVERY descriptor the BEAM holds
+  # (`-p <beam pid>`), because an Erlang process is not an OS process and the
+  # owned directory descriptor can only be found in the OS process that all of
+  # them share. The parser is then deliberately strict: any record it cannot
+  # frame is an ERROR, never a reclaimed descriptor. Those two properties are
+  # both correct and, with `async: true`, they combined into a row that failed
+  # on other suites' work.
+  #
+  # MEASURED, at 4bb8123, from a captured census that failed
+  # (`{:census_malformed, :empty_name}`): the scan returned 73 descriptor
+  # records, exactly ONE of which named the target; 50 were unix-domain-socket
+  # records belonging to IPC servers other async rows were starting and
+  # stopping, and one of those sockets was reported with an EMPTY name, which
+  # the grammar refuses. An empty name cannot be the target - the target is a
+  # non-empty absolute path - so the record that aborted the census could not
+  # have been one the assertion was about. The same run failed two S1-F1-07
+  # rows; a run with no changes at all had already failed a different row of
+  # the same helper, which is the signature of the census scope and not of any
+  # defect in the rows.
+  #
+  # Narrowing the scan to the target was measured and REJECTED rather than
+  # assumed: `lsof -F pfn -p <pid> -a -- <target> <witness>` answers a
+  # still-linked target cleanly, but for an UNLINKED one it exits 1 with byte
+  # for byte identical output whether the descriptor is still open or already
+  # closed. The temp-file row censuses exactly such a path after the owner's
+  # cleanup has unlinked it, so a narrowed census could not tell a leaked
+  # descriptor from a reclaimed one there - reintroducing, at the tool, the
+  # absence-versus-failure confusion this helper exists to prevent.
+  #
+  # Running the module in the serial phase removes the perturbation instead of
+  # the strictness: no other test is executing while a census is taken. Every
+  # assertion in this file is unchanged.
+  use ExUnit.Case, async: false
 
   alias AiPair.PaneIntentStore
   alias AiPair.Test.PaneIntentFaultFs, as: FaultFs

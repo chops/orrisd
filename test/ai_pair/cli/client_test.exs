@@ -57,8 +57,12 @@ defmodule AiPair.CLI.ClientTest do
 
     test "ignores AI_PAIR_INBOX (project shells override that — daemon socket is global)" do
       System.delete_env("AI_PAIR_DAEMON_SOCK")
+      # RESTORED, not deleted. `config/test.exs` gives the run an AI_PAIR_INBOX;
+      # deleting it here left every later row resolving the inbox from its
+      # $HOME default, which is the OPERATOR's daemon socket.
+      prior_inbox = System.get_env("AI_PAIR_INBOX")
       System.put_env("AI_PAIR_INBOX", "/tmp/ai-pair-some-project-inbox")
-      on_exit(fn -> System.delete_env("AI_PAIR_INBOX") end)
+      on_exit(fn -> restore_inbox(prior_inbox) end)
       expected = Path.join(System.user_home!(), ".ai-agent-inbox/ai-pair/sock/ai-pair.sock")
       assert Client.sock_path() == expected
     end
@@ -354,6 +358,7 @@ defmodule AiPair.CLI.ClientTest do
       tmp = Path.join(System.tmp_dir!(), "ai_pair_client_#{System.unique_integer([:positive])}")
       File.mkdir_p!(Path.join(tmp, "sock"))
       File.chmod!(Path.join(tmp, "sock"), 0o700)
+      prior_inbox = System.get_env("AI_PAIR_INBOX")
       System.put_env("AI_PAIR_INBOX", tmp)
       System.put_env("AI_PAIR_DAEMON_SOCK", Path.join(tmp, "sock/ai-pair.sock"))
 
@@ -368,7 +373,7 @@ defmodule AiPair.CLI.ClientTest do
           end
         end
 
-        System.delete_env("AI_PAIR_INBOX")
+        restore_inbox(prior_inbox)
         System.delete_env("AI_PAIR_DAEMON_SOCK")
         File.rm_rf!(tmp)
       end)
@@ -554,4 +559,12 @@ defmodule AiPair.CLI.ClientTest do
       assert status in ~w(detached already_detached)
     end
   end
+
+  # A key that HAD a value is put back; only a key that was absent is deleted.
+  # An unconditional delete is what leaked: `config/test.exs` sets
+  # AI_PAIR_INBOX for the run, so deleting it handed every suite that ran after
+  # this one the $HOME default - the OPERATOR's daemon inbox - and the
+  # full-application rows then failed to bind an already-bound socket.
+  defp restore_inbox(nil), do: System.delete_env("AI_PAIR_INBOX")
+  defp restore_inbox(prior), do: System.put_env("AI_PAIR_INBOX", prior)
 end
