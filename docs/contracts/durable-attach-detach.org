@@ -1,0 +1,524 @@
+#+options: ^:nil
+
+* Durable attach and detach IPC contract
+:PROPERTIES:
+:CUSTOM_ID: durable-attach-detach-contract
+:END:
+This document freezes what an ~attach_pane~ or ~detach_pane~ frame may carry and
+what the daemon answers once durable attachment recording is switched on: the
+request grammar, every reply member, the closed error vocabulary, the
+~persist_outcome~ and ~persist_stage~ unions, the fence and ordering rules, and
+what a client may conclude from each reply. The fixtures under
+~test/fixtures/contracts/ipc/durable~ are pinned byte-for-byte by
+~test/ai_pair/contracts/durable_ipc_contract_test.exs~.
+
+The behaviour is the R04 S9 slice's (audit R04-BOOT-RESTORATION-SOURCE-GAP-AUDIT
+section 4, row S9, flagged CONTRACT-CHANGE). The producer is not on main: main's
+~lib/ai_pair/ipc/server.ex~ never reads the ~durable~ request key and never
+names ~AiPair.PaneIntentStore~, ~Coordinator~ or ~Marker~ (see "Unchanged legacy
+behaviour"). Until S9 lands, nothing on the wire carries any member described
+here.
+
+** Citation key
+:PROPERTIES:
+:CUSTOM_ID: citation-key
+:END:
+Every rule below cites a line of reviewed source or a RED-row assertion. Where
+none of them says something, this document says "not promised" or records an
+open question rather than deciding.
+
+| Tag             | File                                                                                   |
+|-----------------+----------------------------------------------------------------------------------------|
+| ~lane:N~        | ~ff8650e:lib/ai_pair/ipc/server.ex~ (reviewed integration, SOURCE GO only)              |
+| ~main:N~        | ~lib/ai_pair/ipc/server.ex~ at this repository's main                                   |
+| ~RED:N~         | ~56b5c7b:test/ai_pair/pane_restore/boot_wiring_test.exs~ (the reviewed RED)             |
+| ~F:N~           | ~adf4ddb5:test/ai_pair/ipc/server_test.exs~ (F successor over ff8650e)                  |
+| ~FD:N~          | ~adf4ddb5:test/ai_pair/pane_restore/durable_detach_test.exs~                            |
+| ~R:N~           | ~e1aaa3f4:test/ai_pair/ipc/durable_disabled_test.exs~ (R successor over ff8650e)        |
+| ~scope:N~       | ~phase0/orrisd-boot-wiring-scope.org~ r10 in the planning repository                    |
+| ~coordinator.ex:N~ ~marker.ex:N~ ~store.ex:N~ ~record.ex:N~ ~client.ex:N~ ~delivery.ex:N~ | the modules of that name on main (~store.ex~ is ~lib/ai_pair/pane_intent_store.ex~) |
+
+** The mode gate
+:PROPERTIES:
+:CUSTOM_ID: mode-gate
+:END:
+Durability is a daemon-wide setting, never a deployment-independent request
+choice:
+
+- Durable mode is ~Application.get_env(:ai_pair, :durable_attachments) == true~,
+  a literal ~true~ and nothing else (~lane:742~; ~scope:40-44~). ~false~, any
+  other term and the key's absence are all legacy mode (~R:144-153,508-509~).
+- The mode is re-read for every dispatch, so disabling it restores ordinary
+  legacy behaviour on the same running server (~lane:718-719~).
+- The boot generation is fixed once, at server start (~lane:1010-1023~). In
+  durable mode ~start_link/1~ requires a ~boot_generation:~ option that is a
+  non-empty ASCII decimal string and raises ~ArgumentError~ otherwise; in legacy
+  mode it is ~nil~ and the option is not read (~RED:4197-4207~; ~scope:210-215~).
+  A server started in legacy mode therefore holds no generation, and a later
+  flip of the setting cannot manufacture one: such a server answers
+  ~durable_unavailable~ (~lane:730-731,675~).
+- In durable mode EVERY mutating pane-lifecycle frame goes through the
+  coordinator fence, legacy-shaped frames included (~lane:733-739,676~;
+  ~scope:42-44~; C1 ~RED:3872-3880~).
+
+** Request grammar
+:PROPERTIES:
+:CUSTOM_ID: request-grammar
+:END:
+*** ~attach_pane~
+The frame is a JSON object carrying exactly the business keys below, plus the
+transport's ~traceparent~/~tracestate~ carrier, which is metadata and not part
+of this grammar (~main:202-213~; ~scope:140-146~).
+
+| Key         | Type    | Required | Rule                                                                                  | Source                                     |
+|-------------+---------+----------+-----------------------------------------------------------------------------------------+--------------------------------------------|
+| ~cmd~       | string  | yes      | ~"attach_pane"~                                                                        | ~main:233~                                 |
+| ~pane_id~   | string  | yes      | non-empty; a percent sign followed by decimal digits for any request that may be recorded, because ~Record~ validates that shape (~record.ex:40~) | ~main:233-234~; ~FD:132-133~ |
+| ~agent~     | string  | no       | a registered agent name; required in practice for a durable request, see ~durable_metadata_missing~ | ~main:235~; ~lane:793-802~       |
+| ~durable~   | boolean | no       | ~true~ asks for the attachment to be RECORDED as well as started. Only a literal ~true~ opens the durable path; every other value, the key's absence included, is a legacy-shaped frame | ~lane:722~; T1 ~RED:4106-4120~ |
+
+~AiPair.CLI.Client.attach_payload/3~ is the pure builder, already on main
+(~client.ex:594-612~): it emits ~cmd~ and ~pane_id~, adds ~agent~ only when one
+is given, and adds ~durable~ only when ~true~ — never ~durable: false~, which
+would still be a new key on a legacy frame (~client.ex:598-601~; T1
+~RED:4092-4121~). The CLI exposes no durable attach today: ~attach/2~ always
+passes ~false~ (~client.ex:614-616~).
+
+*** ~detach_pane~
+| Key       | Type   | Required | Rule                | Source          |
+|-----------+--------+----------+---------------------+-----------------|
+| ~cmd~     | string | yes      | ~"detach_pane"~     | ~main:287~      |
+| ~pane_id~ | string | yes      | non-empty           | ~main:287-288~  |
+
+There is no ~durable~ key on detach, and adding one is refused by this contract.
+Withdrawal is not a per-request choice: if this daemon records attachments at
+all, a detach that left the record behind would have that attachment reasserted
+at the next boot. The daemon-wide setting is the only gate (~lane:53-61,872-874~).
+
+** Protocol version negotiation
+:PROPERTIES:
+:CUSTOM_ID: protocol-version
+:END:
+- A frame with no ~protocol_version~, or with ~1~, takes the v1 dispatch, which
+  is the only path that knows ~attach_pane~ and ~detach_pane~
+  (~main:217-223~; ~lane:271-282~).
+- A frame with ~protocol_version: 2~ goes to ~AiPair.IPC.Delivery~, which
+  handles only ~ping~, ~reconcile~ and ~send~; anything else answers
+  ~%{ok: false, error: "unknown command"}~ merged with the v2 echo
+  (~protocol_version: 2~, plus ~msg_id~ and ~pane_id~ when valid)
+  (~delivery.ex:19-52,143-154~). Durable attach and detach are therefore
+  **v1-only**: a client that negotiates v2 for delivery still sends attach and
+  detach as v1 frames.
+- Any other ~protocol_version~ answers ~unsupported_protocol_version~
+  (~delivery.ex:54-55~).
+- ~ping~ at v2 advertises ~capabilities: ["delivery_reconcile"]~
+  (~delivery.ex:34-37~). No capability names durable attachment, so a client
+  cannot negotiate for it and must learn the daemon's mode from the replies
+  below. Whether S9 should advertise one is an open question (OQ-4).
+
+** Reply members
+:PROPERTIES:
+:CUSTOM_ID: reply-members
+:END:
+Every reply is a JSON object. A member that is not listed for an outcome is
+ABSENT from that reply, not present-and-null: absence is the discriminator every
+RED row uses (~refute Map.has_key?~, e.g. G4 ~RED:3270~, G5 ~RED:3309~, A1
+~RED:3729~, C2 ~RED:3994,4049~, B13 ~RED:2889~, ~F:986,1014,1121~,
+~FD:341,356,399,436~). The one exception at ~ff8650e~ is ~body_error~; see OQ-1.
+
+| Member             | Type             | Appears                                                                                          | Must be absent                                                                     | Source                                     |
+|--------------------+------------------+----------------------------------------------------------------------------------------------------+--------------------------------------------------------------------------------------+--------------------------------------------|
+| ~ok~               | boolean          | always                                                                                           | never                                                                              | ~lane:454,469,1143,1152~                   |
+| ~pane_id~          | string           | every reply to a frame that carried a usable ~pane_id~; it is the requested id, echoed           | only on the ~missing pane_id~ dispatch refusal                                     | ~main:241,251~; ~lane:469~                 |
+| ~started~          | boolean          | a successful attach: ~true~ when this call started the child, ~false~ when one was already running | every refusal                                                                      | ~lane:454,459-466~; C1 ~RED:3890~          |
+| ~state~ ~agent~ ~classifier~ | string / string-or-null / string | a successful attach, describing the child that serves the pane                   | every refusal, and the post-start persistence failures, which drop them            | ~lane:594-626,459-466,1145-1153~           |
+| ~fallback~         | string           | a successful attach whose classifier could not be loaded for the named agent                     | otherwise                                                                          | ~lane:616-631~                             |
+| ~persisted~        | ~true~           | ONLY where a commit was observed to complete: a durable attach whose ~put~ returned ~:ok~, or a durable detach whose ~delete~ returned ~:ok~. It is never ~false~ | every other reply, the fence-update failure included (~lane:1065~) | ~lane:1143,961~; ~lane:50-51~; G4/G5/A1/A1b/C2 above |
+| ~persist_outcome~  | string           | every durable-mode reply that touched, or could not reach, the store; see the union below        | legacy-mode replies; refusals decided before the store was consulted               | ~lane:1143,1150,685,917,926,961,971,1081~  |
+| ~persist_stage~    | string           | a persistence failure that named a stage; see the union below                                    | every reply that did not fail at a stage                                            | ~lane:1151,968,1081~                       |
+| ~repair_required~  | ~true~           | the requested durable effect did not take effect and NOTHING retries it automatically            | every reply where no repair is owed; it is never ~false~                           | ~lane:1152,687,888,927,972,1070,1078~; ~lane:74-78~ |
+| ~status~           | string           | detach only: ~"intent_withdrawn"~, ~"withdrawal_failed"~, and in legacy mode ~"detached"~ / ~"already_detached"~ | attach replies                                                       | ~lane:958,970,698,703~                     |
+| ~pane_registered~  | boolean          | a successful durable withdrawal: whether a daemon pane CHILD was registered and has therefore been stopped | every other reply                                                       | ~lane:959,992-1008~; ~FD:322~              |
+| ~missing~          | array of string  | ~durable_metadata_missing~ only: every missing field, in the fixed order ~agent~, ~project~, ~project_dir~, ~project_inbox~ | every other reply                                          | ~lane:750,771,793-802~; ~R:160-179~        |
+| ~error~            | string           | every ~ok: false~ reply; one of the closed vocabulary below                                      | every ~ok: true~ reply                                                             | ~lane:469,1055,1068~                       |
+| ~coordinator_error~| string           | the two coordinator failures that carry a diagnostic: a fence release that could not be acknowledged, and a fenced child stop that failed | otherwise                                        | ~lane:1069,1040~                           |
+| ~body_error~       | string or null   | the fence-update failure, carrying the body reply's own ~error~ when the body itself failed      | see OQ-1: at ~ff8650e~ it is present as ~null~ when the body succeeded              | ~lane:1067~                                |
+
+~pane_registered~ describes the daemon child only. A detach never kills a tmux
+pane, and a record withdrawn with no running child is the ordinary post-restart
+shape, not an error (~lane:992-995~; ~FD:307-324,496-500~).
+
+*** The record a successful durable attach commits
+Not a wire member, but the reason the wire exists: the committed record is the
+exact thirteen-key ~AiPair.PaneIntentStore.Record~ — ~schema_version~,
+~pane_id~, ~agent~, ~classifier~, ~project~, ~project_dir~, ~project_inbox~,
+~tmux_session~, ~session_gen~, ~cwd~, ~command~, ~pane_pid~, ~updated_at~
+(~record.ex:27-30,43-45~; ~lane:852-868~). Three rules bind it to the wire:
+
+- ~session_gen~ is the generation READ BACK from the session's marker, never the
+  value this boot offered (~lane:1139~; G1 ~RED:3146~, G2 ~RED:3180~, G8
+  ~RED:3545~; ~scope:57-60~).
+- ~project~, ~project_dir~ and ~project_inbox~ come from the configured
+  ~:project_binding~, never from the request or from a record
+  (~lane:778-786~; ~scope:74-77~), and ~project_inbox~ must equal the store's own
+  root (~record.ex:54-55~).
+- ~tmux_session~, ~cwd~, ~command~ and ~pane_pid~ come from ONE census row and
+  nowhere else; an unobservable pane is refused rather than recorded with a
+  fabricated field (~lane:849-868,1164-1176~).
+
+FIRST OWNER WINS: when a state machine already runs for the pane, the record
+carries ITS agent and classifier, not the second caller's (~lane:819-833~).
+
+** Closed error vocabulary
+:PROPERTIES:
+:CUSTOM_ID: error-vocabulary
+:END:
+These are the only ~error~ strings a durable-mode attach or detach reply may
+carry. A reader may switch on them; a producer may not add to them without a new
+revision of this contract.
+
+*** Fence refusals (attach and detach, legacy-shaped frames included)
+The body never ran and nothing was touched. The reply is exactly ~ok~,
+~pane_id~, ~error~ (~lane:1054-1055~).
+
+| ~error~                    | When                                                                                  | Source                                                  |
+|----------------------------+-----------------------------------------------------------------------------------------+---------------------------------------------------------|
+| ~"coordinator_unavailable"~ | no Coordinator is registered, or it did not answer admission                          | ~coordinator.ex:36,166-178~; C1 ~RED:3872-3880~         |
+| ~"pane_busy"~              | another transaction holds this pane's fence                                            | ~coordinator.ex:262,292~; B13 ~RED:2886-2892~; ~F:1119-1121~ |
+| ~"unresolved_operation"~   | the pane is fenced ~:unresolved~ from an earlier body that did not settle              | ~coordinator.ex:265,295~; C2 ~RED:4004-4007~            |
+
+*** Pre-effect refusals of a durable attach
+Nothing was started, nothing was written, no marker was touched
+(~lane:34-38~; G4 ~RED:3270-3275~, G5 ~RED:3310-3314~, A2 ~RED:3851-3853~).
+
+| ~error~                              | When                                                                                       | Extra members            | Source                                        |
+|--------------------------------------+----------------------------------------------------------------------------------------------+--------------------------+-----------------------------------------------|
+| ~"durable_metadata_missing"~         | ~agent~ or a ~:project_binding~ field is missing, empty, non-UTF-8, or (for the two paths) not absolute | ~missing~      | ~lane:750,771,793-806~; ~R:155-183~; ~F:967-991~ |
+| ~"durable_unavailable"~              | no store owner is registered under the binding's root, or this server holds no boot generation | none                   | ~lane:754-755,1111~; ~R:343-349~; ~F:993-1016~ |
+| ~"durable_pane_unobserved"~          | the census answered and holds no row for this pane id                                      | none                     | ~lane:1169~                                   |
+| ~"durable_observation_ambiguous"~    | the census answered with MORE THAN ONE row for this pane id; never resolved by taking the first | none                  | ~lane:1170~; A2 ~RED:3845-3849~; ~scope:137-138~ |
+| ~"durable_observation_unavailable"~  | the census could not be taken: the adapter errored, was stopped or did not answer          | none                     | ~lane:838-847,1174~                           |
+| ~"durable_observation_changed"~      | the fenced re-read of the census differed from the first                                   | none                     | ~lane:1131-1132,1186-1187~                    |
+| ~"marker_absent"~                    | the marker reader reports ~{:marker_absent}~ — the conditional write reported success and the read-back still found nothing | none | ~lane:1197~; ~marker.ex:176~     |
+| ~"marker_foreign"~                   | a usable marker owned by another root; the option is left byte-for-byte alone              | none                     | ~lane:1180,1196~; G4 ~RED:3262-3275~          |
+| ~"marker_malformed"~                 | a value is present and is not the documented marker object                                 | none                     | ~lane:1198~; ~marker.ex:218-289~              |
+| ~"marker_unavailable"~               | the marker SOURCE failed or could not be asked (~{:source_error, :marker, _}~ and ~{:source_unavailable, :marker}~ collapse here) | ~persist_outcome: "uncertain"~ | ~lane:1194-1195,1204~; G5 ~RED:3302-3308~ |
+| ~"marker_changed"~                   | the fenced re-read of the marker differed from the first                                   | none                     | ~lane:1133-1134,1188-1189,1200~               |
+| ~"session_mismatch"~                 | the marker names a session id other than the observed pane's                               | none                     | ~lane:1181,1199~                              |
+
+~marker_unavailable~ is the only pre-effect refusal that carries
+~persist_outcome~, and it carries ~"uncertain"~ because the daemon could not
+establish whether it may record at all — not because anything was written
+(~lane:1204~; G5 ~RED:3308~; the marker contract's reader table).
+
+*** Post-effect failures of a durable attach
+The pane child IS registered and alive; the record is not committed as asked.
+All carry ~repair_required: true~ and never ~persisted~.
+
+| ~error~                    | When                                                                                        | Members beyond ~ok~/~pane_id~/~error~                          | Source                                      |
+|----------------------------+-------------------------------------------------------------------------------------------------+-----------------------------------------------------------------+---------------------------------------------|
+| ~"durable_write_failed"~   | ~PaneIntentStore.put/2~ answered a typed failure                                            | ~persist_outcome~, ~persist_stage~, ~repair_required~           | ~lane:1145-1153,1207-1214~; A1 ~RED:3725-3729~, A1b ~RED:3791-3798~ |
+| ~"durable_store_timeout"~  | the ~put~ call did not answer within the store's call deadline                               | ~persist_outcome: "uncertain"~, ~persist_stage: "put"~, ~repair_required~ | ~lane:1074-1083,1216~; C2 ~RED:3986-3997~ |
+| ~"coordinator_unavailable"~ | the body completed and the fence release could NOT be acknowledged                          | the body reply's own members except ~persisted~, plus ~coordinator_error~, ~repair_required~, and ~body_error~ (OQ-1) | ~lane:1057-1071~; C2 ~RED:4047-4061~ |
+
+The last row is the one place where ~error: "coordinator_unavailable"~ does NOT
+mean "nothing happened": the persistence outcome is the KNOWN one the body
+reached (~"committed"~), reported beside a separate coordinator failure. Owner
+loss is never reported as unknown persistence (C2 ~RED:4048,4060-4061~;
+~scope:177-183~).
+
+*** Durable detach
+| ~error~ / ~status~              | When                                                                                     | Members                                                                             | Source                                     |
+|---------------------------------+--------------------------------------------------------------------------------------------+---------------------------------------------------------------------------------------+--------------------------------------------|
+| ~status: "intent_withdrawn"~    | the record was deleted; the child, if any, was then stopped                               | ~ok: true~, ~pane_id~, ~status~, ~pane_registered~, ~persisted: true~, ~persist_outcome: "committed"~ | ~lane:952-962~; B13 ~RED:3004-3005~; ~FD:318-324~ |
+| ~"pane_not_found"~              | the store ANSWERED and holds no record for this pane                                      | ~persist_outcome: "skipped"~; no ~repair_required~, no ~persisted~                     | ~lane:912-918~; ~FD:333-342~               |
+| ~"durable_unavailable"~         | no store owner, an unusable binding, or no boot generation on this server                 | ~persist_outcome: "uncertain"~, ~repair_required: true~                                | ~lane:680-688,880-890,896-900~; ~FD:345-358~ |
+| ~"durable_lookup_failed"~       | the store was reached and the read FAILED; whether a record exists is unknown             | ~persist_outcome: "uncertain"~, ~repair_required: true~                                | ~lane:920-928,934-942~                     |
+| ~"durable_store_timeout"~       | the ~list~ or ~delete~ call did not answer within the deadline                             | ~persist_outcome: "uncertain"~, ~persist_stage: "list"~ or ~"delete"~, ~repair_required: true~ | ~lane:940,988,1074-1083~            |
+| ~"durable_withdrawal_failed"~   | ~PaneIntentStore.delete/2~ answered a typed failure                                       | ~status: "withdrawal_failed"~, ~persist_outcome~, ~persist_stage~, ~repair_required: true~ | ~lane:964-974,979-990~; ~FD:395-399~   |
+| ~"coordinator_unavailable"~ with ~persist_outcome: "committed"~ | the record WAS deleted and the fenced child stop could not be completed | ~coordinator_error~, ~repair_required: true~                          | ~lane:1002-1006,1034-1043~                 |
+| fence refusals                  | as in the fence table above                                                               | ~ok~, ~pane_id~, ~error~ only                                                          | B13 ~RED:2886-2892~                        |
+
+~pane_not_found~ and ~durable_unavailable~ are kept apart deliberately. A lookup
+that succeeded and found nothing is an ANSWER; a store that could not be reached
+is not, and reporting it as ~pane_not_found~ would quote a store nobody read
+(~lane:63-70,881-882~; ~FD:337-341,357~).
+
+** ~persist_outcome~ (closed union)
+:PROPERTIES:
+:CUSTOM_ID: persist-outcome
+:END:
+| Value          | Means                                                                                              | Source                                     |
+|----------------+--------------------------------------------------------------------------------------------------------+--------------------------------------------|
+| ~"committed"~  | the store reported the commit complete. The only value that may accompany ~persisted: true~         | ~lane:1143,961~                            |
+| ~"unchanged"~  | the commit failed BEFORE the atomic rename; the previously committed bytes are intact               | ~store.ex:31-33,614~; A1 ~RED:3727~; ~FD:397~ |
+| ~"uncertain"~  | the rename failed or something after it did, the call did not answer, or the store could not be reached: the committed bytes are UNKNOWN | ~store.ex:31-38,549,553~; A1b ~RED:3793~; C2 ~RED:3988~ |
+| ~"skipped"~    | detach only: the store answered, held no such record, and nothing was attempted                     | ~lane:917~; ~FD:340~                       |
+
+~"unchanged"~ and ~"uncertain"~ are the store's own ~outcome~ field rendered as
+text (~store.ex:80~; ~lane:985,1213~). An ~"uncertain"~ outcome additionally
+POISONS the store owner, which then fails every call until it is stopped and
+restarted (~store.ex:35-38,189-193~) — so a second request after an uncertain
+reply is expected to fail too, and that is not a new defect.
+
+** ~persist_stage~ (open-ended; see OQ-2)
+:PROPERTIES:
+:CUSTOM_ID: persist-stage
+:END:
+~persist_stage~ names WHERE the failure was observed. Two disjoint groups:
+
+- The API-CALL BOUNDARY, named by the server itself when the store did not
+  answer: ~"put"~, ~"list"~, ~"delete"~ (~lane:1216,940,988,1081~). These name
+  the unanswered call and nothing more: a timed-out ~put~ is ~"put"~, never an
+  inferred filesystem stage, because no filesystem stage was observed (C2
+  ~RED:3989-3993~).
+- The STORE's own stage atom, rendered as text when the store answered a typed
+  failure (~lane:985,1213~; ~store.ex:77-82~). Those observed in the store
+  source on main are ~ownership~, ~validation~, ~path~, ~permission~, ~read~,
+  ~create~, ~write~, ~file_sync~, ~rename~, ~directory_sync~ and ~poisoned~
+  (~store.ex:148,166,174,240-246,260-263,281,298-300,319-320,338-341,349-350,358,376-379,393-394,458-461,495-498,507,523,527,549,553,192~).
+
+The store's type is ~stage: atom()~ (~store.ex:78~), and its moduledoc calls the
+set closed (~store.ex:30-31~) without enumerating it in any function. A reader
+must therefore treat an unrecognised ~persist_stage~ as diagnostic text and act
+on ~persist_outcome~, which IS closed. Whether S9 should instead map unknown
+stages onto a closed wire set is OQ-2.
+
+** Fence and ordering rules
+:PROPERTIES:
+:CUSTOM_ID: ordering
+:END:
+1. **One fence per pane, for everything that mutates it.** In durable mode every
+   attach and detach — durable-flagged or legacy-shaped — runs inside
+   ~Coordinator.transaction(pane_id, body)~ (~lane:733-739,676,1025-1045~), the
+   same fence boot reconciliation takes (~scope:42-44,105-109~). A body result
+   is ~{:ok, reply}~ or ~{:unresolved, cause}~; nothing is completed by default
+   (~coordinator.ex:63-108~; ~scope:216-222~).
+2. **Refuse before any effect.** The metadata gate, the store lookup, the census
+   and the marker all run before a state machine is started and before anything
+   is written, so a refusal leaves nothing half-done (~lane:34-38,1119-1134~;
+   G4/G5/A2 as cited).
+3. **Marker before start.** ~Marker.ensure~ offers this boot's generation ONLY
+   when the marker is absent, then ~Marker.read~ decides what is recorded
+   (~lane:1124-1129~; ~scope:55-62~). A present same-owner marker is used
+   unchanged with zero writes (G2 ~RED:3182-3183~, G8 ~RED:3547-3548~).
+4. **Attach: start the pane, THEN put the record.** A store failure after the
+   start leaves the live pane registered and replies ~ok: false~ with
+   ~repair_required: true~ and no ~persisted~ (~lane:1135-1154~;
+   ~scope:121-127~). An unrecorded live pane is preferred over an orphan record
+   (C2 ~RED:3999-4000~).
+5. **Detach: delete the record, THEN stop the child.** The mirror image, for the
+   same reason: a withdrawal whose durable half failed leaves no daemon-side
+   effect to explain (~lane:944-951,952-962~; B13 ~RED:3004-3017~).
+6. **Revalidate under the fence.** The census and the marker are read again
+   inside the transaction and must agree with the first reads, or the request is
+   refused ~durable_observation_changed~ / ~marker_changed~ (~lane:1131-1134~).
+7. **No second paste, and no send of any kind.** Neither path sends text to a
+   pane: attach starts a child and detach stops one (~lane:1085-1102,996-1008~).
+   Nothing in this contract queues, pastes or retries a payload, and nothing here
+   retries the durable operation itself (~lane:74-78~).
+8. **The admitting coordinator is pinned.** The release goes to the pid that
+   admitted the body, never to whatever is registered under the name at release
+   time (~coordinator.ex:163-171,269-280~; C2 ~RED:4025-4043~).
+9. **Ordering across panes is not serialised.** The fence serialises a pane, not
+   the daemon: attaches on different panes proceed independently (~F:1142-1174~).
+
+** What a client may conclude
+:PROPERTIES:
+:CUSTOM_ID: client-conclusions
+:END:
+| Reply                                                        | The client may conclude                                                                                     | The client may NOT conclude                                     |
+|--------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------+-------------------------------------------------------------------|
+| ~ok: true~ with ~persisted: true, persist_outcome: "committed"~ | the pane is attached AND the intent is on disk; a later boot will see it                                     | that the pane will be restored to service — restoration lands panes in quarantine (~scope:36-38~) |
+| ~ok: true~ with ~status: "intent_withdrawn"~                  | the record is gone; ~pane_registered~ says whether a daemon child was stopped                                | that the tmux pane was killed (~lane:992-995~)                    |
+| ~ok: false~ with a fence refusal                              | nothing happened; retrying later is safe                                                                    | anything about the store, marker or pane state                     |
+| ~ok: false~ with a pre-effect refusal                         | nothing was started, written or overwritten; the named cause is the actual cause                            | that the pane is unattached — an EARLIER attach may have attached it |
+| ~ok: false~ with ~repair_required: true, persist_outcome: "unchanged"~ | the previously committed bytes are intact; for a detach, the recorded intent survives and WILL be reasserted at the next boot | that the daemon will fix it: nothing retries      |
+| ~ok: false~ with ~repair_required: true, persist_outcome: "uncertain"~ | the committed bytes are unknown and the store owner is poisoned until restarted                     | either presence or absence of the record                          |
+| ~ok: false~ with ~persist_outcome: "committed"~               | persistence DID complete; the failure reported is the coordinator's                                          | that the record is missing                                        |
+| ~error: "durable_unavailable"~                                | this daemon is not recording attachments (or cannot reach its store)                                        | that no record exists — nothing was read                          |
+| ~error: "pane_not_found"~ with ~persist_outcome: "skipped"~   | the store was read and holds no record for this pane                                                        | that no pane child is running — this is a store answer             |
+| a reply with NO ~persist_outcome~ and no ~persisted~          | the daemon is in legacy mode and the durability question was never asked                                    | that durability failed                                            |
+
+A non-zero CLI exit is driven by ~ok: false~ alone, so no durable request that
+was not honoured may answer ~ok: true~ (~F:936-939~).
+
+** Unchanged legacy behaviour
+:PROPERTIES:
+:CUSTOM_ID: unchanged-legacy
+:END:
+With ~:durable_attachments~ not literally ~true~:
+
+- ~attach_pane~ takes ~attach_pane/3~ unfenced and replies exactly today's
+  ~%{ok, pane_id, started, state, agent, classifier}~ (plus ~fallback~), with NO
+  ~persisted~, ~persist_outcome~, ~persist_stage~ or ~repair_required~
+  (~main:387-410,533-565~; ~lane:725-728~; C1 ~RED:3888-3891~; ~F:1176-1190~).
+- ~detach_pane~ replies exactly today's ~pane_not_found~ or
+  ~%{ok: true, pane_id, status: "detached" | "already_detached"}~, with none of
+  those members (~main:611-627~; ~lane:690-706~; C1 ~RED:3893-3899~;
+  ~FD:543-554~).
+- A frame that carries ~"durable": true~ to a legacy-mode daemon is REFUSED, not
+  silently attached: ~durable_metadata_missing~ when metadata is missing,
+  otherwise ~durable_unavailable~, and nothing is started
+  (~lane:760-773~; ~R:146-194~). This is the one behaviour change a legacy-mode
+  deployment sees, and only for a frame that asked for durability — a key no
+  client sends today, because ~attach_payload/3~ omits it unless asked
+  (~client.ex:605-615~).
+- ~ping~, ~send~ and ~pane_status~ are untouched by this contract in both modes
+  (~main:227-231,255-285~).
+
+*** The fifteen frozen v1 fixtures are untouched
+NS-39.A.001 forbids adding fields to the frozen v1 fixture set and requires its
+lexical ~filename~-NUL-bytes-NUL SHA-256 to stay exact. This contract adds
+nothing to ~test/fixtures/contracts/ipc/v1~ and changes no byte in it:
+
+- That set covers ~ping~, ~send~ and ~pane_status~ only. ~attach_pane~ and
+  ~detach_pane~ have NO frozen v1 fixture today — the audit states this and the
+  directory listing confirms it — so there is no frozen attach or detach reply
+  for a durable member to be added to.
+- Every member this contract introduces (~durable~ on the request; ~persisted~,
+  ~persist_outcome~, ~persist_stage~, ~repair_required~, ~pane_registered~,
+  ~missing~, ~coordinator_error~, ~body_error~, and the new ~error~ and ~status~
+  strings) appears only on an attach or detach reply, and only in durable mode.
+  No ~ping~, ~send~ or ~pane_status~ reply gains a member.
+- The NEW fixtures live under ~test/fixtures/contracts/ipc/durable~, a separate
+  directory with its own ~CONTRACT_HASH~. The v1 hash globs only
+  ~test/fixtures/contracts/ipc/v1/*.json~, so a new directory cannot change it
+  (~test/ai_pair/contracts/ipc_contract_hash_test.exs~).
+- ~test/ai_pair/contracts/ipc_contract_hash_test.exs~ additionally pins the v1
+  set's literal hash, its count of fifteen and its exact filenames, so a change
+  to the fixtures AND their ~CONTRACT_HASH~ together still fails.
+
+** Not promised
+:PROPERTIES:
+:CUSTOM_ID: not-promised
+:END:
+- Member order or whitespace in any reply: readers parse JSON. The fixtures pin
+  the bytes the repository's encoder produces; only the decoded object is
+  contractual.
+- The shape or wording of any diagnostic string: ~coordinator_error~ is
+  ~inspect/1~ output (~lane:1069,1040~), and a store failure's ~reason~ never
+  reaches the wire at all.
+- That ~pane_id~ is echoed on a frame that carried none: the two
+  ~missing pane_id~ refusals carry no ~pane_id~ (~main:248-253,300-305~).
+- Any relationship between a durable reply and the boot report or the session
+  marker beyond the ones stated: those are the
+  [[file:boot-report.org][boot report]] and
+  [[file:tmux-session-marker.org][marker]] contracts.
+- Anything about IPC v2: durable attach and detach are v1-only, and subscription
+  remains out of scope (~ipc-v1.org~, "Planned protocol version 2 changes";
+  ~scope:369-371~).
+- Release from quarantine: a restored pane is registered quarantined, and
+  nothing in this contract releases one (~scope:36-38~).
+- Idempotence of a repeated durable attach beyond FIRST OWNER WINS: the second
+  call reports ~started: false~ and re-commits a record carrying the first
+  owner's identity (~lane:819-833,459-466~). No RED row asserts what the
+  ~updated_at~ of that re-commit should be.
+- Any ordering guarantee between two frames on DIFFERENT panes.
+- That a ~persist_stage~ outside the list above will not appear (OQ-2).
+
+** Open questions for the S9 review
+:PROPERTIES:
+:CUSTOM_ID: open-questions
+:END:
+- OQ-1 ~body_error~ on a fence-update failure. ~ff8650e~ sets it to the body
+  reply's ~error~ (~lane:1067~), which is ~nil~ — encoded as JSON ~null~ — when
+  the body SUCCEEDED, the exact case C2 measures (~RED:4047-4061~). No RED row
+  asserts the member either way. A null-valued error member contradicts the
+  absence-is-the-discriminator rule used everywhere else in this contract. S9
+  must decide whether to omit it when the body carried no error; the fixture
+  ~attach.error.fence_update_failed.json~ pins the ~ff8650e~ shape until then,
+  and changing it changes this contract's hash.
+- OQ-2 the ~persist_stage~ set. The store's ~stage~ is typed ~atom()~
+  (~store.ex:78~) and reaches the wire verbatim. Should S9 pass it through (and
+  document the set as advisory, as here), or map unknown stages to a closed wire
+  vocabulary?
+- OQ-3 ~durable_store_timeout~ versus the RED. C2 asserts the timed-out attach
+  reply's ~persist_outcome~, ~persist_stage~ and ~repair_required~ and asserts
+  only that ~error != "durable_unavailable"~ (~RED:3986-3997~); the exact string
+  ~"durable_store_timeout"~ comes from ~lane:1078~ and from no assertion. It is
+  frozen here because a closed vocabulary needs a name, but it is the one attach
+  error string with no RED row behind it.
+- OQ-4 capability advertisement. ~ping~ at v2 advertises only
+  ~"delivery_reconcile"~ (~delivery.ex:36~). Should a durable daemon advertise
+  its mode, so a client learns it without provoking a refusal?
+- OQ-5 the second census read. ~lane:1131-1132~ re-observes and refuses
+  ~durable_observation_changed~ on ANY difference, including a changed
+  ~pane_pid~ of the same pane. No RED row exercises it, and the scope says only
+  "any change between snapshot and effect refuses naming the changed source"
+  for RECONCILIATION (~scope:105-109~). Whether attach should compare the whole
+  observation or only identity fields is undecided.
+- OQ-6 legacy-mode refusal of an explicit durable request. ~R:146-194~ requires
+  it and this contract adopts it, but it is a behaviour change for a legacy
+  deployment that starts sending the key. No RED row in the reviewed RED covers
+  it; the evidence is the R successor alone.
+
+** Fixtures
+:PROPERTIES:
+:CUSTOM_ID: fixtures
+:END:
+Each file under ~test/fixtures/contracts/ipc/durable~ is one frame as the
+repository's JSON encoder produces it: compact, one trailing newline. Dynamic
+values use the IPC fixture placeholder convention — ~<pane_id>~, ~<agent>~,
+~<classifier>~, ~<state>~ and ~<detail>~ for diagnostic text.
+
+| Fixture                                          | Frame                                                                     | Source                                   |
+|--------------------------------------------------+-----------------------------------------------------------------------------+------------------------------------------|
+| ~request.attach.legacy.json~                     | request: attach with an agent, no ~durable~ key                            | ~client.ex:605-609~; T1 ~RED:4100-4104~  |
+| ~request.attach.durable.json~                    | request: durable attach with an agent                                      | T1 ~RED:4106-4111~; ~RED:4171-4178~      |
+| ~request.attach.durable_no_agent.json~           | request: durable attach with NO ~agent~ key at all                         | T1 ~RED:4116-4120~                       |
+| ~request.detach.json~                            | request: detach                                                            | ~main:287~; ~client.ex:590-592~          |
+| ~attach.ok.committed.json~                       | durable attach committed, child started by this call                       | ~lane:1143~; ~F:1137-1139~               |
+| ~attach.ok.committed.already_started.json~       | the same, where a child was already running (FIRST OWNER WINS)             | ~lane:456-466,819-833~                   |
+| ~attach.error.coordinator_unavailable.json~      | fence refusal: no coordinator                                              | C1 ~RED:3875-3877~                       |
+| ~attach.error.pane_busy.json~                    | fence refusal: another holder                                              | ~F:1119-1121~                            |
+| ~attach.error.unresolved_operation.json~         | fence refusal: the pane is fenced unresolved                               | ~coordinator.ex:265,295~; C2 ~RED:4004~  |
+| ~attach.error.durable_metadata_missing.json~     | metadata gate, every field missing, in the fixed order                     | ~lane:793-802~; ~R:160-179~              |
+| ~attach.error.durable_unavailable.json~          | no store owner under the binding's root                                    | ~R:343-349~; ~F:1012-1014~               |
+| ~attach.error.durable_pane_unobserved.json~      | census answered, no row for this pane                                      | ~lane:1169~                              |
+| ~attach.error.durable_observation_ambiguous.json~ | census answered with two rows for one pane id                             | A2 ~RED:3845-3849~                       |
+| ~attach.error.durable_observation_unavailable.json~ | census could not be taken                                                | ~lane:1174~                              |
+| ~attach.error.durable_observation_changed.json~  | the fenced re-read differed                                                | ~lane:1187~                              |
+| ~attach.error.marker_absent.json~                | write reported success, read-back found nothing                            | ~lane:1197~; ~marker.ex:176~             |
+| ~attach.error.marker_foreign.json~               | a usable marker owned elsewhere                                            | G4 ~RED:3262~                            |
+| ~attach.error.marker_malformed.json~             | a present value that is not a marker                                       | ~lane:1198~                              |
+| ~attach.error.marker_changed.json~               | the fenced marker re-read differed                                         | ~lane:1189,1200~                         |
+| ~attach.error.marker_unavailable.json~           | the marker source failed or could not be asked                             | G5 ~RED:3302-3308~                       |
+| ~attach.error.session_mismatch.json~             | the marker names another session                                           | ~lane:1181,1199~                         |
+| ~attach.error.durable_write_failed.unchanged.json~ | post-start ~put~ failure before the rename                               | A1 ~RED:3725-3729~                       |
+| ~attach.error.durable_write_failed.uncertain.json~ | post-start ~put~ failure after the rename                                | A1b ~RED:3791-3798~                      |
+| ~attach.error.durable_store_timeout.json~        | the ~put~ call outlived its deadline                                       | C2 ~RED:3986-3994~                       |
+| ~attach.error.fence_update_failed.json~          | body committed, fence release unacknowledged (carries OQ-1's ~body_error~) | C2 ~RED:4047-4055~; ~lane:1057-1071~     |
+| ~detach.ok.intent_withdrawn.json~                | record deleted, then the registered child stopped                          | B13 ~RED:3004-3005~; ~FD:320-322~        |
+| ~detach.error.pane_busy.json~                    | reconciliation holds the fence                                             | B13 ~RED:2887-2890~                      |
+| ~detach.error.coordinator_unavailable.json~      | fence refusal: no coordinator                                              | C1 ~RED:3878-3879~                       |
+| ~detach.error.coordinator_unavailable.committed.json~ | the record WAS deleted; the fenced child stop failed                  | ~lane:1002-1006,1034-1043~               |
+| ~detach.error.pane_not_found.skipped.json~       | the store answered and holds no such record                                | ~FD:333-341~                             |
+| ~detach.error.durable_unavailable.json~          | no store owner, or no boot generation                                      | ~FD:352-357~; ~lane:680-688~             |
+| ~detach.error.durable_lookup_failed.json~        | the store was reached and the read failed                                  | ~lane:920-928~                           |
+| ~detach.error.durable_store_timeout.json~        | the ~delete~ call outlived its deadline                                    | ~lane:988,1074-1083~                     |
+| ~detach.error.durable_withdrawal_failed.json~    | ~delete~ answered a typed failure before the rename                        | ~FD:395-399~                             |
+| ~legacy.attach.ok.json~                          | LEGACY mode attach: no durability member at all                            | ~main:533-552~; ~F:1185-1189~            |
+| ~legacy.detach.ok.json~                          | LEGACY mode detach                                                         | ~main:619~; C1 ~RED:3894-3899~           |
+
+The two ~legacy.*~ fixtures are in this directory because the frozen v1 set may
+not grow (NS-39.A.001); they describe main's CURRENT behaviour and exist so the
+byte-identity claim above is checkable rather than asserted.
+
+The producer of every other fixture arrives with S9. Until then the fixture test
+pins the bytes, checks the closed shapes and vocabularies above off the frozen
+documents with the repository's JSON decoder (rejecting duplicate object keys),
+and checks the three request fixtures against the real
+~AiPair.CLI.Client.attach_payload/3~, which IS on main. When S9 lands, the reply
+fixtures are to be regenerated through the daemon and compared after placeholder
+substitution, as the IPC v2 fixture test does.
+
+** Hash
+:PROPERTIES:
+:CUSTOM_ID: hash
+:END:
+~CONTRACT_HASH~ pins the fixture bytes under the IPC v1 rule
+([[file:ipc-v1.org][ipc-v1.org]], "Hash"): lowercase SHA-256 over, for each
+~*.json~ file in byte-sorted filename order, ~filename~, one NUL byte, the exact
+file bytes and one NUL byte. The documentation file and ~CONTRACT_HASH~ itself
+are not hash inputs.
