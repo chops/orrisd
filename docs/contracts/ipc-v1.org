@@ -74,6 +74,22 @@ pins the same bytes). The hash is lowercase SHA-256 over this byte sequence:
 
 The documentation file and ~CONTRACT_HASH~ itself are not hash inputs.
 
+** Paired revision
+:PROPERTIES:
+:CUSTOM_ID: paired-revision
+:END:
+The fixtures this document pins were measured byte-identical to
+~test/fixtures/contracts/ipc/v1/~ in the orris consumer at revision
+~cab4565b9246666fc4cc86d729e664a15e6229f0~ on 2026-09-18, with both
+~CONTRACT_HASH~ files reading
+~f1cacf8b53fdd1db37ec968e5476081250804e9c6a4d615215d47d9b77894213~.
+
+The two repositories' v1 DOCUMENTS were written independently and are not
+byte-identical; only the fixtures and their hash are. The v2 contract text is
+the other way round: [[./ipc-v2.org][the version 2 contract]] vendors the
+consumer document verbatim and pins its revision and digest, so the producer
+and the consumer read one text rather than two.
+
 ** Planned protocol version 2 changes
 :PROPERTIES:
 :CUSTOM_ID: planned-protocol-version-2-changes

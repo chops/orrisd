@@ -1,0 +1,207 @@
+#+options: ^:nil
+
+* ai-pair IPC contract v2, producer copy
+:PROPERTIES:
+:CUSTOM_ID: ai-pair-ipc-contract-v2-producer-copy
+:END:
+This repository is the PRODUCER of the version 2 frames. The contract text itself
+lives in the consumer repository, orris, and is vendored verbatim below rather
+than restated, because a restatement is a second contract that drifts silently.
+
+Until this file existed, orris shipped =docs/contracts/ipc-v2.org= and this
+repository shipped only the v2 fixture bytes, so the producer had no copy of the
+document whose frames it emits and no revision of the consumer was pinned in
+either direction. NS-01.A.001 asks for paired revisions and exchanged wire
+fixtures; the fixtures half was already provable here and the paired-revision
+half was not.
+
+** Paired revisions
+:PROPERTIES:
+:CUSTOM_ID: paired-revisions
+:END:
+- source_repository: orris
+- source_path: =docs/contracts/ipc-v2.org=
+- source_revision: =cab4565b9246666fc4cc86d729e664a15e6229f0=
+- source_sha256: =0263abf21b62cf70a1a63f6ca77c92ba8eca38aa2c62cb16967b4e6546ddbda3=
+- paired_fixture_dir: =test/fixtures/contracts/ipc/v2/=
+- paired_fixture_contract_hash: =78c2f64240c3c5c9da60425c65c498974a2a81c8adb3e68e0bef28613c1707dc=
+- paired_fixture_count: 16
+
+=source_sha256= is the digest of the vendored bytes exactly as delimited by the
+two sentinel comment lines below, which are the bytes of =source_path= at
+=source_revision=. It is pinned again in
+=test/ai_pair/contracts/vendored_ipc_v2_test.exs=, for the same reason the v1
+fixture hash is pinned twice: an edit that changed the copy and recomputed the
+digest in the same file would satisfy a self-comparison and still break the
+consumer that pins the original bytes.
+
+*** Measurement, 2026-09-18T10:16:00Z
+:PROPERTIES:
+:CUSTOM_ID: measurement-2026-09-18
+:END:
+Measured before vendoring, at orris =cab4565b= and ai-pair =4bb8123c29d38b29b0af1b2153907c1f57995262=:
+
+- =test/fixtures/contracts/ipc/v1/= and =test/fixtures/contracts/ipc/v2/= are
+  byte-identical across the two repositories (=diff -r=, no differences in
+  either set), and both =CONTRACT_HASH= files agree: v1
+  =f1cacf8b53fdd1db37ec968e5476081250804e9c6a4d615215d47d9b77894213=, v2
+  =78c2f64240c3c5c9da60425c65c498974a2a81c8adb3e68e0bef28613c1707dc=.
+- =docs/contracts/ipc-v2.org= did not exist in this repository at all.
+- =docs/contracts/ipc-v1.org= differs between the two repositories by sha256
+  (=f61b7209eb6e5f53a1dad24772a493d149fb94f502a2a2cf334f2e1faa259f29= here,
+  =485b0ec8ae851b104a03b7dbf5d4c5dc6c10da5400adb2aea695505fff08b545= there).
+  That asymmetry is NOT addressed by this slice: the two v1 documents were
+  written independently and reconciling them is a separate reviewed change in
+  both repositories.
+
+*** What the drift control can and cannot see
+:PROPERTIES:
+:CUSTOM_ID: what-the-drift-control-can-and-cannot-see
+:END:
+=vendored_ipc_v2_test.exs= fails when the vendored region is edited without
+updating both pins, when the pins disagree, when the pinned fixture hash stops
+matching the fixtures this repository ships, or when the fixture inventory named
+here stops matching the directory.
+
+It CANNOT see a change made in orris. Nothing in this repository can: the gate
+has no access to the other repository. A new orris revision is adopted by
+re-vendoring the bytes and updating =source_revision=, =source_sha256= and the
+pin in the test, which is one reviewed change rather than a silent divergence.
+Because the fixtures and their =CONTRACT_HASH= are byte-identical by design, a
+one-sided fixture edit already fails the other repository gate; this document
+adds the same property to the contract text.
+
+** Producer addenda
+:PROPERTIES:
+:CUSTOM_ID: producer-addenda
+:END:
+These statements are about THIS producer and are deliberately outside the
+vendored region, so that they cannot be mistaken for the consumer contract and
+cannot perturb its digest.
+
+- A duplicate and a conflict are two different reply shapes, and the vendored
+  text does not distinguish them. Admission answering =duplicate= produces an
+  OK reply, =ok: true= with =duplicate: true= beside the receipt view. Admission
+  answering =conflict= produces a NOT-OK reply, =ok: false= with
+  =error: "conflict"= and the identities the caller presented, carrying no
+  receipt view. A client that reads "ambiguous or conflict becomes durable
+  attention" must therefore handle two shapes, not one.
+- A v2 reply echoes =msg_id= and =pane_id= only when they pass the echo grammar.
+  An id that fails it is refused by name, =invalid_msg_id= or =invalid_pane_id=,
+  and the failing id is NOT echoed back. Both words are producer-emitted and
+  neither is named by the vendored text.
+- =not_delivered= is never answered as a duplicate, because admission opens the
+  next attempt instead. The producer applies no attempt ceiling of its own; the
+  retry bound is the consumer obligation the vendored text describes.
+
+# BEGIN VENDORED orris docs/contracts/ipc-v2.org
+#+options: ^:nil
+
+* ai-pair IPC contract, protocol version 2
+:PROPERTIES:
+:CUSTOM_ID: ai-pair-ipc-contract-protocol-version-2
+:END:
+** Implementation status
+:PROPERTIES:
+:CUSTOM_ID: implementation-status
+:END:
+The consumer side of this contract is delivered. ~AiOrchestrator.Dispatch.LocalPane~
+(~lib/ai_orchestrator/dispatch/local_pane.ex~) sends and reconciles with
+~protocol_version~ 2 and fails closed unless the ~ping~ capability preflight lists
+~delivery_reconcile~; ~AiOrchestrator.Dispatch.PaneClient~
+(~lib/ai_orchestrator/dispatch/pane_client.ex~) issues ~reconcile~ with
+~--protocol-version 2~, refuses a reply that lacks ~protocol_version~ 2
+(~protocol_version_unsupported~) and refuses a reply whose ~msg_id~ or ~pane_id~ echo does
+not match (~reply_identity_*~ / ~reply_pane_*~). The fixture bytes and
+~CONTRACT_HASH~ under ~test/fixtures/contracts/ipc/v2/~ are pinned by
+~test/contracts/ipc_v2_contract_hash_test.exs~ and exercised by
+~test/dispatch/ipc_v2_send_reply_test.exs~. The daemon that produces these frames
+is a separate project; whether a given daemon answers version 2 is discovered at
+runtime through the capability preflight, never assumed.
+
+Status: the fixture bytes in ~test/fixtures/contracts/ipc/v2/~ are the v2 reply
+shapes this repository pins, with their ~CONTRACT_HASH~ computed under the v1 hash
+rule (see ~ipc-v1.org~). The v1 set and its hash are untouched; v1 remains the wire
+until a client asks for version 2.
+
+** Framing and version
+:PROPERTIES:
+:CUSTOM_ID: framing-and-version
+:END:
+- A request that carries ~"protocol_version": 2~ is a v2 request. Every v2 reply
+  carries ~"protocol_version": 2~ and ~ok~, and every v2 reply to a message-bound
+  command echoes both ~msg_id~ and ~pane_id~. A reply without the version, or a v1
+  reply to a v2 request, is not a v2 answer and a client MUST refuse it.
+- ~ping~ with ~protocol_version~ 2 answers ~capabilities~, a list of tokens.
+  ~delivery_reconcile~ is the token that authorizes a client to send at all
+  (the client fails closed without it: it cannot ask what became of a send).
+- A v2 ~send~ MUST carry ~msg_id~ (the client's send id); the daemon hashes the
+  text it is given itself, so a send carries no payload hash and ~missing_msg_id~
+  is the refusal. ~reconcile~ carries the ~payload_hash~ (~sha256:~ + 64 lowercase
+  hex over the exact bytes) and is refused with ~missing_payload_hash~ without it.
+- ~reconcile~ carries ~msg_id~, ~payload_hash~, ~pane_id~; the answer is one of
+  exactly five ~outcome~ values: ~delivered~, ~queued~, ~absent~, ~ambiguous~,
+  ~conflict~. ~not_delivered~ is a stored status that answers ~absent~; ~pending~
+  answers ~ambiguous~ after the daemon's bounded wait. ~absent~ and ~conflict~
+  carry no receipt view; ~conflict~ echoes the identities the caller presented,
+  never the stored ones.
+
+** Send replies
+:PROPERTIES:
+:CUSTOM_ID: send-replies
+:END:
+| Fixture                          | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+|----------------------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| ~send.sent.json~                 | Pasted synchronously; ~status~ ~sent~.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ~send.queued.json~               | Accepted into the pane's bounded queue, not pasted; ~status~ ~queued~.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ~send.duplicate.<status>.json~   | Admission refused as a duplicate. ~duplicate: true~ beside the receipt view -- ~status~ (~pending~, ~queued~, ~delivered~, ~ambiguous~), ~delivery_attempt~, and the identities ~msg_id~, ~pane_id~, ~payload_hash~. Never a status string. A client MUST treat it exactly as a reconcile answer of the same status: ~delivered~ reconstructs the send, ~queued~ and ~pending~ are journaled as a queued send and converged by the client's bounded, budgeted reconciliation (the client neither waits inside the send nor admits a second attempt on its own), ~ambiguous~ is refused and never resent. A ~not_delivered~ receipt is never answered as a duplicate because admission opens a new attempt instead. |
+| ~send.error.conflict.json~       | Same ~msg_id~, different payload hash or pane: refused.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| ~send.error.missing_msg_id.json~ | A v2 send without its send id is refused before admission; the pane it named is echoed.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+
+** Reconcile replies
+:PROPERTIES:
+:CUSTOM_ID: reconcile-replies
+:END:
+~reconcile.<outcome>.json~ for the five outcomes; ~delivered~, ~queued~ and
+~ambiguous~ carry the receipt view (~status~, ~delivery_attempt~, identities).
+~absent~ comes in two shapes: no record at all (~reconcile.absent.json~, echoed
+identities only, which a client reads as attempt 0) and a stored absence
+(~reconcile.absent.not_delivered.json~: ~status~ ~not_delivered~ with the
+positive ~delivery_attempt~ it closed) -- the client's retry bound depends on
+that distinction, so a stored receipt without a positive attempt is refused.
+~conflict~ carries only the identities the caller presented.
+
+** Placeholders
+:PROPERTIES:
+:CUSTOM_ID: placeholders
+:END:
+~<msg_id>~, ~<pane_id>~, ~<payload_hash>~ and ~<version>~ are dynamic and are
+substituted by the consumer tests; everything else is exact bytes.
+# END VENDORED orris docs/contracts/ipc-v2.org
+
+* Paired fixture inventory
+:PROPERTIES:
+:CUSTOM_ID: paired-fixture-inventory
+:END:
+The sixteen files under =test/fixtures/contracts/ipc/v2/= that
+=paired_fixture_contract_hash= covers, in the byte order the hash rule uses:
+
+- =ping.ok.json=
+- =reconcile.absent.json=
+- =reconcile.absent.not_delivered.json=
+- =reconcile.ambiguous.json=
+- =reconcile.conflict.json=
+- =reconcile.delivered.json=
+- =reconcile.error.missing_payload_hash.json=
+- =reconcile.queued.json=
+- =send.duplicate.ambiguous.json=
+- =send.duplicate.delivered.json=
+- =send.duplicate.pending.json=
+- =send.duplicate.queued.json=
+- =send.error.conflict.json=
+- =send.error.missing_msg_id.json=
+- =send.queued.json=
+- =send.sent.json=
+
+=CONTRACT_HASH= itself is excluded from the digest, as the v1 hash rule in
+=ipc-v1.org= requires.
