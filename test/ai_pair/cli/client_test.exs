@@ -3,6 +3,7 @@ defmodule AiPair.CLI.ClientTest do
 
   alias AiPair.CLI.Client
   alias AiPair.Test.ReceiptBackedIPCServer, as: Server
+  alias AiPair.Test.RouteGuard
 
   describe "argv/0" do
     test "returns [] when AI_PAIR_ARGV_B64 is unset" do
@@ -338,7 +339,18 @@ defmodule AiPair.CLI.ClientTest do
   end
 
   describe "request/1 against a live IPC.Server" do
+    # TEST-CAPTURE CONTAINMENT, scoped to the only block that reaches a real
+    # daemon. Every `attach` here travels `IPC.Server.attach_pane/3`
+    # (`ipc/server.ex:387-391`), which supplies no `:capture_fn`, so the pane
+    # polls through `StateMachine.default_capture/1` (`state_machine.ex:246`,
+    # `:847-849`) against the registered `AiPair.Tmux`. That adapter is started
+    # with `[]` (`application.ex:32`), so `prepend_socket/2`
+    # (`tmux.ex:571-572`) emits no `-L` and `run_tmux/2` (`tmux.ex:543`) execs
+    # `tmux capture-pane` against the OPERATOR's default server. Measured
+    # before this fix: six `capture_pane` calls escaped from this block.
     setup do
+      RouteGuard.install!()
+
       tmp = Path.join(System.tmp_dir!(), "ai_pair_client_#{System.unique_integer([:positive])}")
       File.mkdir_p!(Path.join(tmp, "sock"))
       File.chmod!(Path.join(tmp, "sock"), 0o700)
@@ -386,7 +398,7 @@ defmodule AiPair.CLI.ClientTest do
 
     test "attach round-trips a successful payload through the daemon" do
       pane_id = "%cli-attach-#{System.unique_integer([:positive])}"
-      on_exit(fn -> AiPair.PaneSupervisor.stop_pane(pane_id) end)
+      :ok = RouteGuard.own_pane(pane_id)
 
       assert {:ok, %{"ok" => true, "pane_id" => ^pane_id, "started" => true, "state" => state}} =
                Client.request(%{"cmd" => "attach_pane", "pane_id" => pane_id})
@@ -396,7 +408,7 @@ defmodule AiPair.CLI.ClientTest do
 
     test "main(['attach', pane_id]) prints a JSON reply and returns 0" do
       pane_id = "%cli-main-attach-#{System.unique_integer([:positive])}"
-      on_exit(fn -> AiPair.PaneSupervisor.stop_pane(pane_id) end)
+      :ok = RouteGuard.own_pane(pane_id)
 
       out = ExUnit.CaptureIO.capture_io(fn -> assert Client.main(["attach", pane_id]) == 0 end)
       assert {:ok, %{"ok" => true, "started" => true}} = Jason.decode(String.trim(out))
@@ -404,7 +416,7 @@ defmodule AiPair.CLI.ClientTest do
 
     test "main(['attach', pane_id, '--agent', 'claude_code']) wires the fingerprint classifier" do
       pane_id = "%cli-attach-fp-#{System.unique_integer([:positive])}"
-      on_exit(fn -> AiPair.PaneSupervisor.stop_pane(pane_id) end)
+      :ok = RouteGuard.own_pane(pane_id)
 
       out =
         ExUnit.CaptureIO.capture_io(fn ->
@@ -447,17 +459,19 @@ defmodule AiPair.CLI.ClientTest do
 
     test "send to an attached pane returns a status envelope and exits 0/1 accordingly" do
       pane_id = "%cli-send-attached-#{System.unique_integer([:positive])}"
-      on_exit(fn -> AiPair.PaneSupervisor.stop_pane(pane_id) end)
+      :ok = RouteGuard.own_pane(pane_id)
 
       assert {:ok, %{"ok" => true}} =
                Client.request(%{"cmd" => "attach_pane", "pane_id" => pane_id})
 
       out =
         ExUnit.CaptureIO.capture_io(fn ->
-          # Real tmux is not running for this synthetic pane, so the SM
-          # rapidly transitions to :dead. Either an ok:true queued/sent
-          # envelope or an ok:false pane_dead envelope is acceptable —
-          # this test covers shape + exit-code mapping.
+          # The pane uses the product default capture, which the route guard
+          # refuses with status -2. `classify_error/1` (`tmux.ex:815-823`)
+          # reads that as "nonzero_exit", so the SM settles in :unknown rather
+          # than advancing the dead-pane reaper. Either an ok:true
+          # queued/sent envelope or an ok:false pane_dead envelope is
+          # acceptable — this test covers shape + exit-code mapping.
           rc = Client.main(["send", pane_id, "hello"])
           assert rc in [0, 1]
         end)
@@ -485,7 +499,7 @@ defmodule AiPair.CLI.ClientTest do
 
     test "pane_status against an attached pane returns the full envelope and exits 0" do
       pane_id = "%cli-pane-status-attached-#{System.unique_integer([:positive])}"
-      on_exit(fn -> AiPair.PaneSupervisor.stop_pane(pane_id) end)
+      :ok = RouteGuard.own_pane(pane_id)
 
       assert {:ok, %{"ok" => true}} =
                Client.request(%{
@@ -526,7 +540,7 @@ defmodule AiPair.CLI.ClientTest do
 
     test "main(['detach', pane_id]) round-trips a successful payload through the daemon" do
       pane_id = "%cli-detach-ok-#{System.unique_integer([:positive])}"
-      on_exit(fn -> AiPair.PaneSupervisor.stop_pane(pane_id) end)
+      :ok = RouteGuard.own_pane(pane_id)
 
       assert {:ok, %{"ok" => true}} =
                Client.request(%{"cmd" => "attach_pane", "pane_id" => pane_id})

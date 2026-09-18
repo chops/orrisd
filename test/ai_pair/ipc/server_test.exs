@@ -2,8 +2,25 @@ defmodule AiPair.IPC.ServerTest do
   use ExUnit.Case, async: false
 
   alias AiPair.Test.ReceiptBackedIPCServer, as: Server
+  alias AiPair.Test.RouteGuard
 
+  # TEST-CAPTURE CONTAINMENT. `IPC.Server.attach_pane/3` (`ipc/server.ex:387-391`)
+  # supplies neither `:capture_fn` nor `:paste_fn`, so every pane this file
+  # attaches polls through `StateMachine.default_capture/1`
+  # (`state_machine.ex:246`, `:847-849`), which addresses the REGISTERED
+  # `AiPair.Tmux` name. The application starts that adapter with `[]`
+  # (`application.ex:32`), so `socket_name` is nil, `prepend_socket/2`
+  # (`tmux.ex:571-572`) emits no `-L`, and `run_tmux/2` (`tmux.ex:543`) execs
+  # `tmux capture-pane` against the OPERATOR's own default server. Measured
+  # before this fix: twelve `capture_pane` calls escaped from this file alone.
+  #
+  # The guard takes the registered name for the duration of every row, so a
+  # default-routed call is refused and RECORDED instead of executed, and a row
+  # added later that reaches for the default route is refused the same way
+  # rather than silently escaping.
   setup do
+    RouteGuard.install!()
+
     tmp = Path.join(System.tmp_dir!(), "ai_pair_ipc_#{System.unique_integer([:positive])}")
     File.mkdir_p!(Path.join(tmp, "sock"))
     File.chmod!(Path.join(tmp, "sock"), 0o700)
@@ -108,7 +125,7 @@ defmodule AiPair.IPC.ServerTest do
 
     test "starts a pane and reports started:true with a state string", %{sock_path: sock_path} do
       pane_id = "%attach-#{System.unique_integer([:positive])}"
-      on_exit(fn -> AiPair.PaneSupervisor.stop_pane(pane_id) end)
+      :ok = RouteGuard.own_pane(pane_id)
 
       assert %{
                "ok" => true,
@@ -123,7 +140,7 @@ defmodule AiPair.IPC.ServerTest do
 
     test "second attach on the same pane reports started:false", %{sock_path: sock_path} do
       pane_id = "%attach-#{System.unique_integer([:positive])}"
-      on_exit(fn -> AiPair.PaneSupervisor.stop_pane(pane_id) end)
+      :ok = RouteGuard.own_pane(pane_id)
 
       assert %{"ok" => true, "started" => true} =
                send_frame(sock_path, %{"cmd" => "attach_pane", "pane_id" => pane_id})
@@ -134,7 +151,7 @@ defmodule AiPair.IPC.ServerTest do
 
     test "no agent → classifier:'stub' and agent:nil", %{sock_path: sock_path} do
       pane_id = "%attach-stub-#{System.unique_integer([:positive])}"
-      on_exit(fn -> AiPair.PaneSupervisor.stop_pane(pane_id) end)
+      :ok = RouteGuard.own_pane(pane_id)
 
       assert %{
                "ok" => true,
@@ -146,7 +163,7 @@ defmodule AiPair.IPC.ServerTest do
 
     test "known agent → classifier:'fingerprint:<agent>' and agent echoed", %{sock_path: sock_path} do
       pane_id = "%attach-fp-#{System.unique_integer([:positive])}"
-      on_exit(fn -> AiPair.PaneSupervisor.stop_pane(pane_id) end)
+      :ok = RouteGuard.own_pane(pane_id)
 
       assert %{
                "ok" => true,
@@ -163,7 +180,7 @@ defmodule AiPair.IPC.ServerTest do
 
     test "unknown agent falls back to stub with a fallback marker", %{sock_path: sock_path} do
       pane_id = "%attach-bad-agent-#{System.unique_integer([:positive])}"
-      on_exit(fn -> AiPair.PaneSupervisor.stop_pane(pane_id) end)
+      :ok = RouteGuard.own_pane(pane_id)
 
       assert %{
                "ok" => true,
@@ -195,7 +212,7 @@ defmodule AiPair.IPC.ServerTest do
       end)
 
       pane_id = "%attach-corrupt-#{System.unique_integer([:positive])}"
-      on_exit(fn -> AiPair.PaneSupervisor.stop_pane(pane_id) end)
+      :ok = RouteGuard.own_pane(pane_id)
 
       assert %{
                "ok" => true,
@@ -212,7 +229,7 @@ defmodule AiPair.IPC.ServerTest do
 
     test "duplicate attach reports the first attach's classifier metadata", %{sock_path: sock_path} do
       pane_id = "%attach-dup-#{System.unique_integer([:positive])}"
-      on_exit(fn -> AiPair.PaneSupervisor.stop_pane(pane_id) end)
+      :ok = RouteGuard.own_pane(pane_id)
 
       assert %{"ok" => true, "started" => true, "classifier" => "fingerprint:claude_code"} =
                send_frame(sock_path, %{
@@ -304,10 +321,8 @@ defmodule AiPair.IPC.ServerTest do
 
       Application.put_env(:ai_pair, :send_call_timeout_ms, 50)
 
-      on_exit(fn ->
-        Application.delete_env(:ai_pair, :send_call_timeout_ms)
-        AiPair.PaneSupervisor.stop_pane(pane_id)
-      end)
+      on_exit(fn -> Application.delete_env(:ai_pair, :send_call_timeout_ms) end)
+      :ok = RouteGuard.own_pane(pane_id)
 
       capture_fn = fn _ -> {:ok, "IDLE_MARKER"} end
 
@@ -369,7 +384,7 @@ defmodule AiPair.IPC.ServerTest do
       pane_id = "%send-queuefull-#{System.unique_integer([:positive])}"
       cap = AiPair.Pane.StateMachine.max_pending_sends()
 
-      on_exit(fn -> AiPair.PaneSupervisor.stop_pane(pane_id) end)
+      :ok = RouteGuard.own_pane(pane_id)
 
       capture_fn = fn _ -> {:ok, "BUSY_MARKER"} end
       paste_fn = fn _, _ -> :ok end
@@ -427,16 +442,19 @@ defmodule AiPair.IPC.ServerTest do
 
     test "after attach, send reports a status / queued / error envelope", %{sock_path: sock_path} do
       pane_id = "%send-attached-#{System.unique_integer([:positive])}"
-      on_exit(fn -> AiPair.PaneSupervisor.stop_pane(pane_id) end)
+      :ok = RouteGuard.own_pane(pane_id)
 
       assert %{"ok" => true} =
                send_frame(sock_path, %{"cmd" => "attach_pane", "pane_id" => pane_id})
 
       reply = send_frame(sock_path, %{"cmd" => "send", "pane_id" => pane_id, "text" => "hello"})
 
-      # Default capture talks to real tmux, so the SM rapidly transitions to
-      # :dead in test (no such pane) — but it may still be in :unknown when
-      # send arrives. Either is fine here; we only assert the envelope shape.
+      # The attached pane uses the product default capture, which the route
+      # guard refuses with status -2. `classify_error/1` (`tmux.ex:815-823`)
+      # reads that as "nonzero_exit", NOT "pane_not_found", so the state
+      # machine takes its non-`:pane_gone` branch and settles in :unknown
+      # rather than advancing the dead-pane reaper. The envelope shape is all
+      # this row asserts, and every alternative below stays reachable.
       assert %{"pane_id" => ^pane_id} = reply
 
       case reply do
@@ -480,7 +498,7 @@ defmodule AiPair.IPC.ServerTest do
       sock_path: sock_path
     } do
       pane_id = "%pane-status-stub-#{System.unique_integer([:positive])}"
-      on_exit(fn -> AiPair.PaneSupervisor.stop_pane(pane_id) end)
+      :ok = RouteGuard.own_pane(pane_id)
 
       assert %{"ok" => true} =
                send_frame(sock_path, %{"cmd" => "attach_pane", "pane_id" => pane_id})
@@ -501,7 +519,7 @@ defmodule AiPair.IPC.ServerTest do
 
     test "attached pane with known agent reports fingerprint classifier", %{sock_path: sock_path} do
       pane_id = "%pane-status-fp-#{System.unique_integer([:positive])}"
-      on_exit(fn -> AiPair.PaneSupervisor.stop_pane(pane_id) end)
+      :ok = RouteGuard.own_pane(pane_id)
 
       assert %{"ok" => true} =
                send_frame(sock_path, %{
@@ -546,7 +564,7 @@ defmodule AiPair.IPC.ServerTest do
 
     test "attached pane is detached and removed from the registry", %{sock_path: sock_path} do
       pane_id = "%detach-ok-#{System.unique_integer([:positive])}"
-      on_exit(fn -> AiPair.PaneSupervisor.stop_pane(pane_id) end)
+      :ok = RouteGuard.own_pane(pane_id)
 
       assert %{"ok" => true, "started" => true} =
                send_frame(sock_path, %{"cmd" => "attach_pane", "pane_id" => pane_id})
@@ -563,7 +581,7 @@ defmodule AiPair.IPC.ServerTest do
 
     test "second detach on a freshly detached pane reports pane_not_found", %{sock_path: sock_path} do
       pane_id = "%detach-twice-#{System.unique_integer([:positive])}"
-      on_exit(fn -> AiPair.PaneSupervisor.stop_pane(pane_id) end)
+      :ok = RouteGuard.own_pane(pane_id)
 
       assert %{"ok" => true} =
                send_frame(sock_path, %{"cmd" => "attach_pane", "pane_id" => pane_id})
