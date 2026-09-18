@@ -1,0 +1,265 @@
+#+options: ^:nil
+
+* tmux session marker contract (version 1)
+:PROPERTIES:
+:CUSTOM_ID: tmux-session-marker-contract-v1
+:END:
+This document freezes the durable format of the session ownership marker the
+daemon stores in a tmux session option, the closed vocabulary a reader reports
+about it, and what a consumer must and must not do with each outcome. The
+fixtures under ~test/fixtures/contracts/tmux-marker~ are pinned byte-for-byte
+by ~test/ai_pair/contracts/tmux_marker_contract_test.exs~.
+
+The format is the R04 S5 slice's (audit R04-BOOT-RESTORATION-SOURCE-GAP-AUDIT
+section 4, row S5, flagged CONTRACT-CHANGE). Every statement below cites the
+reviewed lane source at ~ff8650e~ (~lib/ai_pair/pane_restore/marker.ex~, cited
+as ~marker.ex:N~), the pure decision layer already on main
+(~lib/ai_pair/pane_restore/admission.ex~, ~admission.ex:N~), the reviewed RED
+(~56b5c7b:test/ai_pair/pane_restore/boot_wiring_test.exs~, ~RED:N~) or the
+successor scope (~phase0/orrisd-boot-wiring-scope.org~, ~scope:N~). Where none
+of them says something, this document says "not promised" rather than deciding.
+
+** Where the marker lives
+:PROPERTIES:
+:CUSTOM_ID: where-the-marker-lives
+:END:
+- The marker is the value of the tmux *session* user option
+  ~@ai_pair_session_incarnation~ (~marker.ex:5-6,49~; ~RED:1143~).
+- It is addressed by the session's stable id (~$N~, the ~session_id~ field of
+  a census observation), never by the reusable session name (~marker.ex:60~;
+  ~scope:46-53~; B14 ~RED:3020-3025~).
+- It lives and dies with the tmux session, not with any daemon process
+  (~marker.ex:6-9~). A restarted daemon finds its predecessor's marker; a
+  destroyed session takes the marker with it; a recreated session of the same
+  name starts without one (~RED:3045-3063~).
+- Reading is ~show-options -t <session_id> -v @ai_pair_session_incarnation~;
+  writing is ~set-option -o -t <session_id> @ai_pair_session_incarnation
+  <bytes>~ (~marker.ex:38-44,270-280~; G6 ~RED:3390-3391~). Both run inside
+  the tmux adapter's own process, so they are ordered against every other tmux
+  command the daemon issues (~marker.ex:255-259~).
+- On main (R04 S4, ~lib/ai_pair/tmux.ex~) the two calls are
+  ~AiPair.Tmux.show_options/3~ (the raw value plus trailing newline, failures
+  unclassified so the caller decides absent-versus-unaddressable against its
+  own vocabulary) and ~AiPair.Tmux.set_option_if_absent/4~, which runs
+  ~set-option -o~ and maps tmux's ~already set: <option>~ refusal to the typed
+  ~{:error, :option_exists}~, never to success; every other failure keeps the
+  adapter's ~%{cmd, status, stderr}~ map. A lost race is therefore
+  ~{:error, :option_exists}~ followed by the read-back that names the winner.
+- The ~session_id~ a caller addresses comes from the S4 census,
+  ~AiPair.Tmux.observe_panes/1~: its ~session_id~ field is the ~$~-prefixed id
+  framed raw by the format frozen at
+  ~test/fixtures/tmux/observe_panes.format~, with the raw listing and its
+  decoded rows pinned at ~test/fixtures/tmux/observe_panes.raw~ and
+  ~test/fixtures/tmux/observe_panes.expected.json~. The marker's own
+  ~session_id~ member is the same identifier.
+
+** Format
+:PROPERTIES:
+:CUSTOM_ID: format
+:END:
+The option value is one JSON object with exactly these four members and no
+others (~marker.ex:63-68,229-252~):
+
+| Member       | Type   | Value rule                                                                                       | Source                                       |
+|--------------+--------+--------------------------------------------------------------------------------------------------+----------------------------------------------|
+| ~version~    | number | the integer ~1~ exactly                                                                          | ~marker.ex:50,231~; G6 ~RED:3454~            |
+| ~owner_root~ | string | non-empty valid UTF-8 absolute path: the daemon inbox root that claimed the session              | ~marker.ex:239,293-299,313~; G6 ~RED:3452~   |
+| ~session_id~ | string | non-empty valid UTF-8; the tmux session id the writer addressed (~$N~)                           | ~marker.ex:60-61,239,311~; G6 ~RED:3453~     |
+| ~generation~ | string | decimal digits only, ~^[0-9]+$~; the boot incarnation the session was first claimed under        | ~marker.ex:52-55,315~; G6 ~RED:3449-3450~    |
+
+- The writer emits the four members through the repository JSON encoder with
+  no whitespace (~marker.ex:175-182~). Member order and whitespace are not
+  promised to readers: a reader parses JSON, it does not compare bytes.
+- ~show-options -v~ prints the value followed by one newline; a reader strips
+  trailing newlines before decoding (~marker.ex:209~). The stored value itself
+  carries none.
+- ~generation~ is the same shape ~AiPair.PaneIntentStore.Record~ requires of a
+  record's ~session_gen~ (~record.ex:41,222-230~), because Admission compares
+  the two as text (~admission.ex:416-423~). A generation a marker could carry
+  but a record could not would never match anything (~marker.ex:52-54~).
+- ~session_id~ is reported verbatim; the reader does not check it against the
+  session the option was read from (~marker.ex:108-111~). A marker naming a
+  different session is a usable marker that Admission refuses with
+  ~{:session_mismatch}~ (~admission.ex:432-444~; B14 ~RED:3095~), not a
+  malformed one.
+
+*** Generation minting
+The generation offered to an absent marker is minted once per durable daemon
+boot (~scope:55-62~): ~Marker.mint_generation/0~ decodes 16 cryptographically
+random bytes as an unsigned integer and renders it in decimal
+(~marker.ex:97-103~). It is entropy, never a clock or a process id
+(~scope:173-175~). The value actually recorded anywhere is always the
+generation read back from the session's marker after the conditional write,
+never the value offered (~scope:57-60~; G1/G2/G8 ~RED:3127,3152,3517~).
+
+*** Size bounds
+- A minted ~generation~ is between 1 and 39 decimal digits (the decimal form of
+  an unsigned 128-bit integer). The reader accepts any non-empty digit string
+  (~marker.ex:55~); no upper length bound and no rejection of leading zeros is
+  promised.
+- No bound on ~owner_root~ or ~session_id~ length, and no bound on the whole
+  option value, is promised by the lane. tmux's own option-value limits apply
+  and are not part of this contract.
+
+** Write discipline: set-if-absent, read back, never overwrite
+:PROPERTIES:
+:CUSTOM_ID: write-discipline
+:END:
+~Marker.ensure(server, session_id, owner_root: root, generation: g)~
+(~marker.ex:77-95~) is the only writer, and it writes only after observing
+absence:
+
+1. Read the marker (~marker.ex:141-142~).
+2. Present and same owner: return ~:ok~ without writing, whatever its
+   generation (~marker.ex:149~; G2 ~RED:3152~, G8 ~RED:3517~: zero successful
+   ~set-option~ argv). A restarted daemon never replaces an existing claim with
+   its new boot generation (~marker.ex:19-21~).
+3. Present and foreign: ~{:error, {:marker_foreign, other_root}}~, the option
+   untouched (~marker.ex:151-153~; G4 ~RED:3273-3275~).
+4. Malformed, or the read failed: the reader's finding is returned unchanged
+   and nothing is written (~marker.ex:145~).
+5. Absent: one ~set-option -o~ with the encoded desired marker
+   (~marker.ex:155-156,276-280~), then a read-back. The read-back decides the
+   result; the offered value is never taken as evidence of what tmux stored
+   (~marker.ex:158-166~). A same-owner winner is ~:ok~ (the loser of a race
+   adopts the winner's generation: G6 ~RED:3407-3414~); a foreign winner is
+   ~{:marker_foreign, _}~; an absent read-back after a write that reported
+   success is ~{:marker_absent}~, after a failed write is
+   ~{:source_error, :marker, error}~, and after an adapter that did not answer
+   is ~{:source_unavailable, :marker}~ (~marker.ex:168-173~).
+
+Two concurrent ensurers on one marker-less session therefore produce exactly
+one successful ~set-option~ (tmux refuses the second ~-o~ write, which the
+main adapter reports as ~{:error, :option_exists}~), both return success, and
+both read back the one winner (G6 ~RED:3332-3486~; ~scope:129-133~). The
+~ff8650e~ ~ensure~ predates that typed result and treats every write failure
+alike before reading back (~marker.ex:158-173~); S5 must accept
+~{:error, :option_exists}~ as the ordinary lost-race signal, and the read-back
+remains the only evidence of the winner.
+
+Boot reconciliation never calls ~ensure~: it reads existing markers and mints
+nothing (~scope:59-60~), and its report carries ~marker_writes: 0~
+(~reconciler.ex:64~; see the boot report contract).
+
+** Reader outcomes (closed vocabulary)
+:PROPERTIES:
+:CUSTOM_ID: reader-outcomes
+:END:
+~Marker.read/2~ returns ~{:ok, marker}~ or ~{:error, finding}~, where
+~finding~ is one of exactly five terms (~marker.ex:23-36,70-75~). Every
+finding is also an ~AiPair.PaneRestore.Admission~ marker finding
+(~admission.ex:132-134~), so a consumer passes it through unchanged. The IPC
+column is the exact ~error~ string the durable attach reply carries for that
+finding; those strings are asserted by the RED rows cited and belong to the
+S9 IPC contract, which this document does not define.
+
+| Outcome              | Reader term                        | Meaning                                                                                           | Source                                                       | IPC ~error~ (S9)                                        |
+|----------------------+------------------------------------+---------------------------------------------------------------------------------------------------+--------------------------------------------------------------+---------------------------------------------------------|
+| usable, same owner   | ~{:ok, marker}~ with ~owner_root == root~ | the session is claimed by this daemon's root                                                | ~marker.ex:136,149~; ~admission.ex:315-323~                   | reply ~ok: true~ (G1/G2 ~RED:3127,3152~)                |
+| ~marker_absent~      | ~{:error, {:marker_absent}}~       | ~show-options~ exited non-zero saying the option is unset (~invalid option~ / ~unknown option~)   | ~marker.ex:194-206~                                           | not asserted as a reply string; refuted as a cause in G4/G5 |
+| ~marker_foreign~     | ~{:error, {:marker_foreign, owner_root}}~ | a usable marker whose ~owner_root~ is another root                                         | ~marker.ex:151-153~; ~admission.ex:321~; G4 ~RED:3262~        | ~"marker_foreign"~ (G4 ~RED:3262-3268~)                 |
+| ~marker_malformed~   | ~{:error, {:marker_malformed, raw}}~ | present but not exactly the documented object (see below); ~raw~ is the trimmed option value    | ~marker.ex:208-252~; G7 ~RED:3504,3511~                       | not asserted by a RED row                               |
+| ~source_error~       | ~{:error, {:source_error, :marker, error}}~ | ~show-options~ ran and failed for any other reason; ~error~ is the adapter's diagnostic map | ~marker.ex:189,200-206~; B9 ~RED:4400-4432~                   | ~"marker_unavailable"~ (G5 ~RED:3302-3308~)             |
+| ~source_unavailable~ | ~{:error, {:source_unavailable, :marker}}~ | the adapter could not be asked: it is stopped, unregistered or did not answer in time      | ~marker.ex:190,260-274~                                       | ~"marker_unavailable"~ (the same G5 string, per ~scope:323-324~) |
+
+The task vocabulary's ~marker_unavailable~ covers the two bottom rows: the
+reader keeps them distinct (looked and failed, versus could not look), and the
+wire collapses them into one string with ~persist_outcome: "uncertain"~ (G5
+~RED:3308~).
+
+*** What is malformed
+Any of the following makes the marker ~{:marker_malformed, raw}~; the first
+two are decided before any shape check (~marker.ex:208-224~; ~scope:133~):
+- the value is not a JSON document (~marker.ex:221-223~);
+- any object key occurs more than once, at the top level (~marker.ex:211-219~;
+  G7 ~RED:3492-3512~ for the ~generation~ and ~owner_root~ variants). The lane
+  checks top-level keys; the four documented members are scalars, so nested
+  objects are malformed by shape anyway;
+- the document is not an object: an array wrapping the object included
+  (~marker.ex:252~; ~admission.ex:31-33,302-304~);
+- the member set is not exactly the four documented members: a missing member
+  or an unexpected extra member (~marker.ex:229-238,226-228~);
+- ~version~ is not the integer ~1~ (~marker.ex:231~; ~admission.ex:311~);
+- ~owner_root~ is not a non-empty UTF-8 absolute path, ~session_id~ is empty or
+  not UTF-8, or ~generation~ is not ~^[0-9]+$~ (~marker.ex:239,311-315~).
+
+Absence and unavailability are deliberately distinct: absence says there is no
+marker; unavailability says it is unknown whether there is one
+(~marker.ex:35-36~; ~admission.ex:27-30~).
+
+** Consumer obligations per outcome
+:PROPERTIES:
+:CUSTOM_ID: consumer-obligations
+:END:
+| Outcome              | Must                                                                                                   | Must not                                                                                       | Source                                                                   |
+|----------------------+--------------------------------------------------------------------------------------------------------+------------------------------------------------------------------------------------------------+--------------------------------------------------------------------------|
+| usable, same owner   | use ~generation~ exactly as read; record it as the pane's ~session_gen~                                | rewrite the marker; substitute the boot generation                                             | ~marker.ex:19-21,149~; G2 ~RED:3152~; G8 ~RED:3517~; ~scope:57-60~       |
+| ~marker_absent~      | at durable attach: offer the boot generation through ~ensure~ then read back; at boot reconciliation: refuse the pane with ~{:marker_absent}~ and retain its intent | write at boot; start a child; delete the record                            | G1 ~RED:3127~; B4 ~RED:2131-2159~; ~scope:59-60,267~                     |
+| ~marker_foreign~     | refuse before any effect and name the finding; leave the option byte-for-byte alone                    | overwrite, adopt or "repair" the marker; start a child; write a record                         | ~marker.ex:13-16~; G4 ~RED:3252-3275~                                     |
+| ~marker_malformed~   | refuse and report the finding                                                                          | repair, replace or partially use the marker                                                    | ~marker.ex:13-16,226-228~; G7 ~RED:3492-3512~                             |
+| ~source_error~       | refuse; report the marker source as failed, locating the session by its exact id in a boot report      | treat it as absence; write; start a child                                                      | ~marker.ex:35-36~; B9 ~RED:2462-2498~; G5 ~RED:3296-3314~                 |
+| ~source_unavailable~ | refuse; report ~persist_outcome: "uncertain"~ on the wire; at boot report ~{:source_unavailable, :marker}~ | treat it as absence; invent an observation the adapter never made                          | ~marker.ex:260-267~; G5 ~RED:3302-3314~; ~admission.ex:27-30~             |
+
+In every refusing outcome nothing is started, nothing is persisted and the
+option is not written (~RED:3270-3272,3309-3314~).
+
+** Not promised
+:PROPERTIES:
+:CUSTOM_ID: not-promised
+:END:
+- Member order, whitespace or any byte-level form of the stored value; only
+  the parsed object is contractual.
+- That the marker is unique per daemon boot, per project or per pane: it is
+  per tmux session, and one boot generation may appear on several sessions
+  each independently claimed during that boot (~scope:60-62~; G9 ~RED:3568~).
+- That ~session_id~ inside the marker equals the session it was read from
+  (~marker.ex:108-111~): consumers compare through Admission.
+- Any classification of ~source_error~ diagnostics: the adapter's error map
+  (~%{cmd, status, stderr}~, ~tmux.ex~ error type) is diagnostic text and its
+  shape is not part of this contract.
+- Any behaviour for a ~version~ other than ~1~: there is no compatibility
+  range; a different version is malformed today. A future version needs its
+  own contract and fixtures.
+- Adoption of a marker by ~Marker.adopt/3~ (~marker.ex:118-134~): it confirms an
+  existing same-owner claim and creates nothing; no RED row asserts it and no
+  consumer is defined for it here.
+- Any bound on option-value size beyond tmux's own.
+
+** Fixtures
+:PROPERTIES:
+:CUSTOM_ID: fixtures
+:END:
+Each file under ~test/fixtures/contracts/tmux-marker~ holds the exact bytes
+~show-options -v~ prints for that case (the value plus one newline). Session
+ids are the representative ~$3~; the owner root is the synthetic
+~/synthetic/inbox~ and the foreign owner ~/synthetic/elsewhere~ (G4
+~RED:3242~); the valid generation is a representative 39-digit mint.
+
+| Fixture                                   | Classification                      | Why                                                              |
+|-------------------------------------------+-------------------------------------+------------------------------------------------------------------|
+| ~marker.valid.json~                       | usable, same owner                  | the four members, ~version~ 1, owner ~/synthetic/inbox~          |
+| ~marker.foreign_owner.json~               | ~marker_foreign~ ~/synthetic/elsewhere~ | usable marker owned elsewhere (G4 ~RED:3240-3244~)           |
+| ~marker.malformed.not_json.json~          | ~marker_malformed~ (not JSON)       | ~marker.ex:221-223~                                              |
+| ~marker.malformed.duplicate_key.json~     | ~marker_malformed~ (duplicate key)  | G7 generation variant ~RED:3500-3501~                            |
+| ~marker.malformed.duplicate_owner_root.json~ | ~marker_malformed~ (duplicate key) | G7 owner_root variant ~RED:3507-3508~                          |
+| ~marker.malformed.not_object.json~        | ~marker_malformed~ (shape)          | an array wrapping the object (~admission.ex:31-33~)              |
+| ~marker.malformed.wrong_version.json~     | ~marker_malformed~ (shape)          | ~version~ 2 (~marker.ex:231~)                                    |
+| ~marker.malformed.missing_field.json~     | ~marker_malformed~ (shape)          | no ~generation~ (~marker.ex:229-238~)                            |
+| ~marker.malformed.extra_key.json~         | ~marker_malformed~ (shape)          | an unexpected fifth member (~marker.ex:226-228,238~)             |
+
+The byte-level reader (~Marker.read/2~) arrives with S5. Until then the
+fixture test pins the bytes and this table, and checks every unique-key
+fixture against the pure decision layer already on main,
+~Admission.admit/4~, which must reach the same finding; the not-JSON and
+duplicate-key fixtures are asserted at the decoder boundary only. When S5
+lands, the same fixtures are to be fed through ~Marker~'s decoder verbatim.
+
+** Hash
+:PROPERTIES:
+:CUSTOM_ID: hash
+:END:
+~CONTRACT_HASH~ pins the fixture bytes under the IPC v1 rule
+([[file:ipc-v1.org][ipc-v1.org]], "Hash"): lowercase SHA-256 over, for each
+~*.json~ file in byte-sorted filename order, ~filename~, one NUL byte, the exact
+file bytes and one NUL byte. The documentation file and ~CONTRACT_HASH~ itself
+are not hash inputs.
