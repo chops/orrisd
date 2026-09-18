@@ -31,3 +31,7 @@ tmux_pane_id:test/fixtures/tmux/observe_panes.raw:615238498192d8ed68a7eae30a2f86
 tmux_pane_id:test/fixtures/tmux/observe_panes.expected.json:4d168e3198f6944867c08aa6cca9355a1a9d91d5c277b9cc5729eee61be92a49 # R04-S4 frozen strict-census expected row 0 synthetic pane id
 tmux_pane_id:test/fixtures/tmux/observe_panes.expected.json:fddcee834ded5330d9c0061cc4d38e2fdaaaa87c4b15388eabd4a6ee3c4da1e0 # R04-S4 frozen strict-census expected row 1 synthetic pane id
 tmux_pane_id:test/fixtures/tmux/observe_panes.expected.json:79f37d0ac5857e54d79c60f612553890ec29ae3605435af2c1bcef1293494d6b # R04-S4 frozen strict-census expected row 2 synthetic pane id
+tmux_pane_id:test/ai_pair/ipc/durable_contract_fixture_test.exs:2e6306e919aa7ba80b9d271f5cb4f3a08fb09e1812a4d0cf760419eea3f205f1 # R04-S9 synthetic fixture pane id, the durable attach and detach subject of every reply fixture
+tmux_pane_id:test/ai_pair/ipc/durable_contract_fixture_test.exs:533546af1461c01da643d7f214afb28806fe5d8b6a9edd144eb1aef15196e8f2 # R04-S9 synthetic census row for a DIFFERENT pane, proving the unobserved refusal is not resolved from another row
+tmux_pane_id:test/ai_pair/pane_restore/durable_ipc_red_test.exs:e2ed57f6cc200fa1d17a8e459baea585bd9889868a48440d96b230688463742a # R04-S9 synthetic fixture pane id, the subject of the S9-tagged RED rows
+tmux_pane_id:test/ai_pair/pane_restore/durable_ipc_red_test.exs:fddcee834ded5330d9c0061cc4d38e2fdaaaa87c4b15388eabd4a6ee3c4da1e0 # R04-S9 synthetic census row for a DIFFERENT pane in the unobserved-refusal row
