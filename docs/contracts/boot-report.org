@@ -1,0 +1,272 @@
+#+options: ^:nil
+
+* Boot report contract
+:PROPERTIES:
+:CUSTOM_ID: boot-report-contract
+:END:
+This document freezes the on-disk boot report a durable daemon boot publishes
+at ~<root>/state/boot-report.json~, the closed vocabularies it carries, and what
+a reader may rely on. The fixtures under ~test/fixtures/contracts/boot-report~
+are pinned byte-for-byte by ~test/ai_pair/contracts/boot_report_contract_test.exs~.
+
+The format is the R04 S8 slice's (audit R04-BOOT-RESTORATION-SOURCE-GAP-AUDIT
+section 4, row S8, flagged CONTRACT-CHANGE; section 6 listed the schema as
+UNKNOWN, resolved here by reading the writer). Every statement cites the
+reviewed lane source at ~ff8650e~ (~lib/ai_pair/pane_restore/boot.ex~ as
+~boot.ex:N~, ~lib/ai_pair/pane_restore/reconciler.ex~ as ~reconciler.ex:N~),
+the pure decision layer on main (~lib/ai_pair/pane_restore/admission.ex~,
+~admission.ex:N~), the reviewed RED (~56b5c7b:test/ai_pair/pane_restore/boot_wiring_test.exs~,
+~RED:N~) or the successor scope (~phase0/orrisd-boot-wiring-scope.org~,
+~scope:N~). Where none of them says something, this document says "not
+promised" rather than deciding.
+
+** When and where it is written
+:PROPERTIES:
+:CUSTOM_ID: when-and-where
+:END:
+- Path: ~Path.join([root, "state", "boot-report.json"])~ where ~root~ is
+  ~Boot~'s ~root:~ option, the daemon inbox (~boot.ex:65~; B11 ~RED:2586~;
+  ~scope:76-77~). The ~state~ directory is created if missing (~boot.ex:30~).
+- Once per durable boot: ~AiPair.PaneRestore.Boot~ is a ~restart: :temporary~
+  child (~boot.ex:17~) that runs exactly one reconciliation attempt inside
+  ~init/1~ and writes the report there, before ~start_link~ returns
+  (~boot.ex:51-74~; READY-ON-RETURN, ~RED:1444-1446~; ~scope:165-168~). A
+  later crash of the child does not reconcile or write again (~boot.ex:13~).
+- Never in legacy mode: with ~:durable_attachments~ not literally ~true~ no
+  Boot child exists and no report file is written (B1 ~RED:1882~; ~scope:40-42~).
+- The writer is injectable (a module with ~write/2~ or a two-arity function,
+  ~boot.ex:1-4,125-133~); the production writer encodes the report as compact
+  JSON and appends one newline (~boot.ex:24-33~).
+- Write failure is logged at ~:error~ (~boot.ex:67-68~), surfaced as
+  ~report_write: {:error, term}~ from ~Boot.status/1~, and never fails the
+  boot: the report stays intact in memory and the IPC server still answers
+  (B11 ~RED:2585-2595~; ~scope:96-98~).
+- Never rewritten after publication: the child's state is fixed at ~init~ and
+  ~status/1~ only replies it (~boot.ex:70,77~). A coordinator effect that
+  completes after the deadline resolves its fence and is logged naming the
+  pane, and the published report is unchanged (B12b ~RED:2815-2818~;
+  ~scope:82-84~). A reconciliation result that arrives after the worker was
+  terminated at the deadline is logged and the timeout disposition retained
+  (~boot.ex:96-103~).
+
+*** Atomicity (required of S8, not implemented at ff8650e)
+The contract requires the production writer to publish atomically: write the
+encoded bytes to a temporary file in the same ~state~ directory and rename it
+onto ~boot-report.json~, so a reader never observes a partial document. The
+~ff8650e~ writer is a plain ~File.write/2~ (~boot.ex:31~) and does not meet
+this; closing that gap is part of the S8 slice and its review. Until S8
+lands, nothing on disk carries this format at all.
+
+** Top-level shape
+:PROPERTIES:
+:CUSTOM_ID: top-level-shape
+:END:
+The document is one JSON object with exactly these five members
+(~reconciler.ex:59-65~ for a settled reconciliation; ~boot.ex:105-111~ for a
+timed-out one):
+
+| Member               | Type            | Value rule                                                                                             | Source                                              |
+|----------------------+-----------------+--------------------------------------------------------------------------------------------------------+-----------------------------------------------------|
+| ~root~               | string          | the ~root~ Boot was given; absolute                                                                    | ~reconciler.ex:60~; ~boot.ex:106~                   |
+| ~panes~              | array           | one row per recorded intent row, in intent order; ~[]~ when intent could not be read or on timeout     | ~reconciler.ex:48-57~; ~boot.ex:107~; B5b/B9/B10    |
+| ~issues~             | array           | de-duplicated findings, see "Issues"                                                                   | ~reconciler.ex:62~; ~boot.ex:108~                   |
+| ~marker_observation~ | string or array | see "Marker observation"                                                                               | ~reconciler.ex:63,173,177~; ~boot.ex:109~           |
+| ~marker_writes~      | number          | the integer ~0~: reconciliation never writes a marker                                                  | ~reconciler.ex:64~; ~boot.ex:110~; ~scope:59-60~    |
+
+*** Encoding of Elixir terms
+The production writer maps the in-memory report to JSON as follows
+(~boot.ex:35-41~), and every nested value below is described in that encoded
+form:
+- maps become objects, keys as strings (atom keys are rendered by name);
+- lists become arrays;
+- tuples become arrays of their elements in order, so a finding
+  ~{:scope_mismatch, "project"}~ is ~["scope_mismatch","project"]~ and a
+  bare-tag finding ~{:marker_absent}~ is ~["marker_absent"]~;
+- pids and references become their ~inspect~ text;
+- atoms become strings (~true~, ~false~ and ~null~ as JSON literals); numbers
+  and strings are unchanged.
+
+Member order and whitespace inside the document are not promised; readers
+parse JSON.
+
+** Pane rows
+:PROPERTIES:
+:CUSTOM_ID: pane-rows
+:END:
+Every element of ~panes~ is an object with exactly these five members
+(~reconciler.ex:206-227~):
+
+| Member         | Type                 | Value rule                                                                                                          | Source                                               |
+|----------------+----------------------+---------------------------------------------------------------------------------------------------------------------+------------------------------------------------------|
+| ~pane_id~      | string or null       | the record's ~pane_id~; ~null~ only when the intent row was not an object (a producer defect)                       | ~reconciler.ex:69,275-276~                           |
+| ~status~       | string               | ~"observed_quarantined"~ or ~"refused"~                                                                             | ~reconciler.ex:209,222~; B3 ~RED:2113~; B4 ~RED:2154~ |
+| ~refusals~     | array                | ~[]~ when quarantined; otherwise one or more findings from the refusal vocabulary below                             | ~reconciler.ex:210,223~; B3 ~RED:2115~               |
+| ~undischarged~ | array or string      | the four prerequisites Admission never discharges, in order; the string ~"unknown"~ when Admission produced no decision for the row | ~admission.ex:60-65,345~; ~reconciler.ex:87,211,224~ |
+| ~dispatchable~ | boolean              | always ~false~: a quarantined pane is registered, not restored                                                      | ~reconciler.ex:212,225~; ~scope:36-38~               |
+
+~"observed_quarantined"~ means the pane's child was started in quarantine
+through the real ~PaneSupervisor~ request under the coordinator fence, after a
+second read of intent, census and marker agreed with the first
+(~reconciler.ex:104-131,179-204~; B3 ~RED:2093-2121~). Its state machine
+reports ~quarantined: true~, refuses ~send_text~ with ~{:error,
+:pane_quarantined}~ and has pasted nothing (B3 ~RED:2117-2121~). Release from
+quarantine is outside this contract (~scope:369-371~).
+
+~"refused"~ means no child was started for that row and its record was
+retained: reconciliation has no write path to the intent store (B4/B6
+~RED:2157-2158,2193-2194~; B3 ~RED:2123-2127~).
+
+*** Refusal vocabulary (closed)
+A refusal is an array whose first element is one of the following heads.
+The Admission heads are its decision refusals (~admission.ex:139-151~); the
+Reconciler adds three execution refusals (~scope:111-119~).
+
+| Head                     | Shape                                | Meaning / when                                                                        | Source                                                    |
+|--------------------------+--------------------------------------+---------------------------------------------------------------------------------------+-----------------------------------------------------------|
+| ~config_invalid~         | ~[head, field]~                      | the configured binding is unusable; ~field~ one of ~binding project project_dir project_inbox~ | ~admission.ex:206-217,356~                        |
+| ~source_unavailable~     | ~[head, role]~                       | ~role~ ~intent~, ~live~ or ~marker~ could not be queried                              | ~admission.ex:229,305~; ~reconciler.ex:156,248~           |
+| ~source_error~           | ~[head, role, reason]~               | the source was queried and failed; ~reason~ diagnostic                                | ~admission.ex:230-231,306~; ~reconciler.ex:249~           |
+| ~duplicate~              | ~[head, role]~                       | the pane appears twice in ~intent~ or ~live~                                          | ~admission.ex:365-366,382~                                |
+| ~scope_mismatch~         | ~[head, field]~                      | the record's ~project~, ~project_dir~ or ~project_inbox~ differs from the binding; ~field~ is the record key as text | ~admission.ex:372-376~; B8a/B8b ~RED:2300,2337~ |
+| ~live_absent~            | ~[head]~                             | the recorded pane is not in the census                                                | ~admission.ex:383~; B6 ~RED:2192~                          |
+| ~conflicting~            | ~[head, "live"]~                     | the live pane disagrees with the record on pid, command, cwd or session name          | ~admission.ex:100-105,399-406~                             |
+| ~marker_absent~          | ~[head]~                             | the pane's session carries no marker                                                  | ~admission.ex:292~; B4 ~RED:2156~                          |
+| ~marker_malformed~       | ~[head, raw]~                        | the marker is present and not one; ~raw~ is the observed value                        | ~admission.ex:298,304~; ~reconciler.ex:255~                |
+| ~marker_foreign~         | ~[head, owner_root]~                 | the marker is owned by another root                                                   | ~admission.ex:321~                                         |
+| ~generation_mismatch~    | ~[head]~                             | the record's ~session_gen~ differs from the marker's ~generation~                     | ~admission.ex:416-428~                                     |
+| ~session_mismatch~       | ~[head]~                             | the marker's ~session_id~ differs from the live pane's session id                     | ~admission.ex:432-444~; B14 ~RED:3095~                     |
+| ~fence_refused~          | ~[head, admission_error]~            | the coordinator refused the pane's fence; ~admission_error~ is ~"pane_busy"~, ~"unresolved_operation"~ or ~"coordinator_unavailable"~ | ~reconciler.ex:93-95~; B13 ~RED:2993~; ~scope:111-119~ |
+| ~source_changed~         | ~[head, role]~                       | the fenced re-read of ~intent~, ~live~ or ~marker~ differed from the snapshot         | ~reconciler.ex:113-124,134-135~; B7 ~RED:2252-2259~        |
+| ~quarantine_unavailable~ | ~[head, reason]~                     | the fenced ~start_child~ request did not start the pane; ~reason~ diagnostic          | ~reconciler.ex:200-202,216-217~                            |
+
+A refusal never carries the pane id: the row already locates it
+(~admission.ex:138-151~; B8a ~RED:2265-2271~). A fence refusal is never
+mistaken for an Admission finding (~scope:116-119~; B13 ~RED:2987-2996~).
+
+** Issues
+:PROPERTIES:
+:CUSTOM_ID: issues
+:END:
+~issues~ is the de-duplicated (~reconciler.ex:62~) concatenation of, in order:
+source findings for ~intent~ then ~live~ (~reconciler.ex:46,247-249~);
+per-session marker findings (~reconciler.ex:161-175~); then every pane's
+Admission issues and execution issues in intent order
+(~reconciler.ex:80-87,101~). A timed-out boot carries exactly one issue
+(~boot.ex:108~). Each issue is an array whose head is one of:
+
+| Head                     | Shape                                        | Meaning / when                                                                                   | Source                                               |
+|--------------------------+----------------------------------------------+--------------------------------------------------------------------------------------------------+------------------------------------------------------|
+| ~source_unavailable~     | ~[head, role]~                               | ~["source_unavailable","intent"]~ when the store call exited; ~"live"~ when the census adapter did | ~reconciler.ex:234-235,243-245,248~; B10 ~RED:2524-2527~ |
+| ~source_error~           | ~[head, role, reason]~                       | the store or census answered an error; B5b: ~["source_error","intent",{"reason":"induced",...}]~ | ~reconciler.ex:231-232,241-242,249~; B5b ~RED:2361~  |
+| ~session_issue~          | ~["session_issue","marker", session_id, finding]~ | that session's marker could not be used; ~session_id~ exact; ~finding~ an Admission marker finding (~marker_absent~, ~marker_malformed~, ~marker_foreign~, ~source_error~, ~source_unavailable~) | ~reconciler.ex:167-171~; B9 ~RED:2489-2497,4251-4268~ |
+| ~config_invalid~         | ~[head, field]~                              | as in refusals, reported once                                                                    | ~admission.ex:199,214~                               |
+| ~duplicate~              | ~[head, role, pane_id]~                      | pane recorded or observed twice                                                                  | ~admission.ex:245~                                   |
+| ~scope_mismatch~         | ~[head, pane_id, field]~                     | located projection of the refusal                                                                | ~admission.ex:458~; B8a ~RED:2268-2270~              |
+| ~live_absent~            | ~[head, pane_id]~                            | located projection                                                                               | ~admission.ex:460~                                   |
+| ~conflicting~            | ~[head, "live", pane_id]~                    | located projection                                                                               | ~admission.ex:459~                                   |
+| ~generation_mismatch~    | ~[head, pane_id]~                            | located projection                                                                               | ~admission.ex:461~                                   |
+| ~session_mismatch~       | ~[head, pane_id]~                            | located projection                                                                               | ~admission.ex:462~; B14 ~RED:3020-3025~              |
+| ~marker_absent~ / ~marker_malformed~ / ~marker_foreign~ | as in refusals                | reported once at report level for the pane's marker source, without a pane id                  | ~admission.ex:199,332-334,471-473~                   |
+| ~fence_update_failed~    | ~[head, pane_id, reason]~                    | the body completed (child started) but the fence release could not be acknowledged             | ~reconciler.ex:97-102~                               |
+| ~reconciliation_timeout~ | ~[head, deadline_ms]~                        | the worker did not settle within ~deadline_ms~ (default 10000) and was terminated and joined   | ~boot.ex:52,89-113~; B12a ~RED:2647-2657~            |
+
+~panes: []~ with ~issues: []~ is correct only when every source answered
+(~scope:101-103~); a failed source is never collapsed into an empty report
+(~admission.ex:34-36~).
+
+** Marker observation
+:PROPERTIES:
+:CUSTOM_ID: marker-observation
+:END:
+~marker_observation~ says whether per-session markers were read at all
+(~reconciler.ex:161-177~):
+
+| Value                              | Meaning                                                                                       | Source                                   |
+|------------------------------------+-----------------------------------------------------------------------------------------------+------------------------------------------|
+| ~"unobserved"~                     | the census was unavailable or failed, so no session id was learned and no marker was queried; also the value of a timed-out report | ~reconciler.ex:177~; ~boot.ex:109~; B10 ~RED:2529-2530~ |
+| ~"not_applicable"~                 | the census succeeded and listed no session                                                    | ~reconciler.ex:173~; ~scope:288-289~     |
+| ~["observed", {session_id: source}]~ | one entry per session id in the census; each ~source~ is the marker source for that session | ~reconciler.ex:165,173~                  |
+
+Each per-session ~source~ is one of (~reconciler.ex:251-259~, encoded):
+~["observed", marker]~ with ~marker~ the four-member marker object of the
+[[file:tmux-session-marker.org][marker contract]]; ~["observed","absent"]~;
+~["observed", raw]~ with ~raw~ the malformed value as read;
+~"unavailable"~; or ~["error", reason]~ with ~reason~ the adapter's diagnostic
+map.
+
+Markers are read per session enumerated from the census; there is no global
+marker query and no invented session (~scope:283-289~).
+
+** What readers may rely on
+:PROPERTIES:
+:CUSTOM_ID: readers
+:END:
+- The file, when present, describes exactly one boot's single reconciliation
+  attempt and is never updated afterwards; a newer boot of the same root
+  replaces it wholesale.
+- Every pane row is either quarantined-and-registered or refused-and-retained;
+  no row means a pane was restored to service, deleted, or released
+  (~scope:36-38~; B13 ~RED:2904-2911~).
+- Every refusal and issue head is from the closed vocabularies above; the
+  heads are stable strings, and a reader may switch on them.
+- A ~session_issue~ names its session by exact id in the marker role, never by
+  prefix (B9 ~RED:2492-2497~).
+- ~marker_writes~ is ~0~.
+
+** Not promised
+:PROPERTIES:
+:CUSTOM_ID: not-promised
+:END:
+- Any member other than the five above. In particular the ~ff8650e~ writer
+  emits no ~version~, ~boot_generation~, ~started_at~, ~finished_at~,
+  ~deadline_ms~ (other than inside the ~reconciliation_timeout~ issue),
+  reconciliation outcome or write outcome. The reconciliation outcome
+  (~{:completed, worker}~ or ~{:timed_out, %{worker, joined: true}}~) and the
+  write outcome (~:ok~ or ~{:error, term}~) are exposed only in-process by
+  ~Boot.status/1~ (~boot.ex:70,77~; ~RED:1444-1556~; ~scope:165-170~), never
+  on disk. Adding a ~version~ member is an open question for the S8 review;
+  until it is decided, readers treat the five-member object as version-less.
+- Member order, whitespace or any byte-level form of the document.
+- The shape of any ~reason~ payload (~source_error~, ~quarantine_unavailable~,
+  ~fence_update_failed~, ~["error", reason]~): diagnostic, not machine-readable.
+- That the file exists after a boot whose writer failed (B11), or in legacy
+  mode (B1), or before S8 lands.
+- That a quarantined row's child is still alive when the file is read: the
+  report is the boot-time observation, not the current pane state. Late
+  coordinator effects (B12b) change process state, never the file.
+- Any ordering of ~issues~ beyond the concatenation order stated above, or of
+  the ~marker_observation~ object's members.
+
+** Fixtures
+:PROPERTIES:
+:CUSTOM_ID: fixtures
+:END:
+Each file under ~test/fixtures/contracts/boot-report~ is one report as the
+production writer publishes it (compact, one trailing newline). Dynamic values
+use the IPC fixture placeholder convention: pane ids are ~<pane_id>~ /
+~<pane_a>~ .. ~<pane_f>~, the root is ~/synthetic/inbox~, session ids are the
+representative ~$2~ .. ~$6~, and diagnostic strings are ~<detail>~,
+~<tmux_bin>~ and ~<socket_name>~.
+
+| Fixture                                    | Scenario                                                                                                                                     | RED analogue                    |
+|--------------------------------------------+----------------------------------------------------------------------------------------------------------------------------------------------+---------------------------------|
+| ~boot-report.clean.json~                   | one agreeing pane quarantined; ~issues: []~; the session's marker observed                                                                    | B3 ~RED:2113-2115~              |
+| ~boot-report.refusals_and_issues.json~     | one quarantined pane and five refusals: ~marker_absent~ (session ~$4~), ~live_absent~ with the marker source unavailable, ~scope_mismatch~ on ~project~, ~fence_refused~ ~pane_busy~, ~session_mismatch~ (session ~$6~ marker names ~$2~); a ~session_issue~ for ~$5~ whose ~show-options~ failed | B4, B6, B8a, B13, B14, B9      |
+| ~boot-report.deadline_expired.json~        | the timed-out report: empty panes, ~["reconciliation_timeout",10000]~, ~"unobserved"~                                                          | B12a ~RED:2653-2657~; ~boot.ex:105-111~ |
+
+The producer arrives with S7/S8. Until then the fixture test pins the bytes and
+checks the closed shapes and vocabularies above off the frozen documents with
+the repository JSON decoder, rejecting duplicate object keys. When S8 lands,
+the same fixtures are to be regenerated through the production writer from
+reports built by the Reconciler and compared after placeholder substitution,
+as the IPC v2 fixture test does.
+
+** Hash
+:PROPERTIES:
+:CUSTOM_ID: hash
+:END:
+~CONTRACT_HASH~ pins the fixture bytes under the IPC v1 rule
+([[file:ipc-v1.org][ipc-v1.org]], "Hash"): lowercase SHA-256 over, for each
+~*.json~ file in byte-sorted filename order, ~filename~, one NUL byte, the exact
+file bytes and one NUL byte. The documentation file and ~CONTRACT_HASH~ itself
+are not hash inputs.
