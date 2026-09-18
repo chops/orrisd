@@ -247,12 +247,15 @@ ids are the representative ~$3~; the owner root is the synthetic
 | ~marker.malformed.missing_field.json~     | ~marker_malformed~ (shape)          | no ~generation~ (~marker.ex:229-238~)                            |
 | ~marker.malformed.extra_key.json~         | ~marker_malformed~ (shape)          | an unexpected fifth member (~marker.ex:226-228,238~)             |
 
-The byte-level reader (~Marker.read/2~) arrives with S5. Until then the
-fixture test pins the bytes and this table, and checks every unique-key
-fixture against the pure decision layer already on main,
-~Admission.admit/4~, which must reach the same finding; the not-JSON and
-duplicate-key fixtures are asserted at the decoder boundary only. When S5
-lands, the same fixtures are to be fed through ~Marker~'s decoder verbatim.
+The byte-level reader is ~Marker.read/2~ (R04 S5,
+~lib/ai_pair/pane_restore/marker.ex~). The fixture test pins the bytes and
+this table, feeds every fixture verbatim through ~Marker~ (a scripted
+~show-options~ prints the fixture bytes; ~Marker.ensure/3~ as
+~/synthetic/inbox~ must answer the table's class from that one read and
+write nothing), and independently checks every unique-key fixture against
+the pure decision layer, ~Admission.admit/4~, which must reach the same
+finding; the not-JSON and duplicate-key fixtures are also asserted at the
+decoder boundary, the boundary ~Marker~ decides them at.
 
 ** Hash
 :PROPERTIES:
