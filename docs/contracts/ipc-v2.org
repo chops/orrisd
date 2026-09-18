@@ -21,8 +21,8 @@ half was not.
 :END:
 - source_repository: orris
 - source_path: =docs/contracts/ipc-v2.org=
-- source_revision: =cab4565b9246666fc4cc86d729e664a15e6229f0=
-- source_sha256: =0263abf21b62cf70a1a63f6ca77c92ba8eca38aa2c62cb16967b4e6546ddbda3=
+- source_revision: =e5da392ea0b26d89bea6e72d58e1e952a48b7600=
+- source_sha256: =8bfdc102e8c37cb0399f169030d9bf37ff37aff2d14299b09e2325fb276bb32b=
 - paired_fixture_dir: =test/fixtures/contracts/ipc/v2/=
 - paired_fixture_contract_hash: =78c2f64240c3c5c9da60425c65c498974a2a81c8adb3e68e0bef28613c1707dc=
 - paired_fixture_count: 16
@@ -53,6 +53,27 @@ Measured before vendoring, at orris =cab4565b= and ai-pair =4bb8123c29d38b29b0af
   That asymmetry is NOT addressed by this slice: the two v1 documents were
   written independently and reconciling them is a separate reviewed change in
   both repositories.
+
+*** Adoption of orris e5da392e, 2026-09-18T11:29:00Z
+:PROPERTIES:
+:CUSTOM_ID: adoption-e5da392e
+:END:
+The vendored bytes above were re-taken from orris =e5da392e=, which added the
+"Identity grammars and their refusals" section and nothing else; the earlier
+=cab4565b= region is otherwise unchanged, measured by =diff= of the two regions.
+That section is why the re-vendoring happened here rather than later: it states
+which of this repository's two =pane_id= predicates GOVERNS, and the producer
+change in the same branch reconciles them.
+
+Measured at adoption:
+
+- The vendored region digests to =8bfdc102e8c37cb0399f169030d9bf37ff37aff2d14299b09e2325fb276bb32b=,
+  which is the sha256 of =docs/contracts/ipc-v2.org= at orris =e5da392e=.
+- Neither =test/fixtures/contracts/ipc/v1/= nor =test/fixtures/contracts/ipc/v2/=
+  moved: both =CONTRACT_HASH= values are the ones the measurement above records,
+  and =diff -r= against the consumer worktree at =e5da392e= reports no
+  differences in either set. So the paired fixture pins below are carried
+  forward rather than restated from a new measurement.
 
 *** What the drift control can and cannot see
 :PROPERTIES:
@@ -86,10 +107,16 @@ cannot perturb its digest.
   =error: "conflict"= and the identities the caller presented, carrying no
   receipt view. A client that reads "ambiguous or conflict becomes durable
   attention" must therefore handle two shapes, not one.
-- A v2 reply echoes =msg_id= and =pane_id= only when they pass the echo grammar.
-  An id that fails it is refused by name, =invalid_msg_id= or =invalid_pane_id=,
-  and the failing id is NOT echoed back. Both words are producer-emitted and
-  neither is named by the vendored text.
+- =invalid_msg_id= and =invalid_pane_id= are now named by the vendored text, in
+  "Identity grammars and their refusals". Until orris =e5da392e= they were not,
+  and this addendum carried them; what it carries instead is the producer fact
+  that text asks for. This daemon has ONE =pane_id= predicate,
+  =AiPair.Delivery.ReceiptLog.valid_pane?/1=, and the echo consults that same
+  function rather than a second regex of its own, so a pane id this daemon
+  echoes is a pane id it can store. The divergence the vendored text describes
+  ("a daemon whose echo predicate is wider than its storage predicate will echo
+  a pane id it then refuses") existed here and was measured on three hyphenated
+  classes before it was closed.
 - =not_delivered= is never answered as a duplicate, because admission opens the
   next attempt instead. The producer applies no attempt ceiling of its own; the
   retry bound is the consumer obligation the vendored text describes.
@@ -145,6 +172,26 @@ until a client asks for version 2.
   answers ~ambiguous~ after the daemon's bounded wait. ~absent~ and ~conflict~
   carry no receipt view; ~conflict~ echoes the identities the caller presented,
   never the stored ones.
+
+** Identity grammars and their refusals
+:PROPERTIES:
+:CUSTOM_ID: identity-grammars-and-their-refusals
+:END:
+- ~msg_id~ is ~snd_~ followed by exactly 64 lowercase hex characters (the
+  SEND-ID-1 digest; the minting rule is the client's, the grammar is shared).
+- ~pane_id~ is ~%~ followed by 1..128 characters from ~[a-zA-Z0-9_]~. This is the
+  GOVERNING grammar: it is the one the daemon's receipt record is keyed by, so a
+  pane id outside it cannot be stored and therefore cannot be delivered. A daemon
+  whose echo predicate is wider than its storage predicate will echo a pane id it
+  then refuses; the two predicates are one grammar and a daemon reconciles them on
+  its own side.
+- An identity that fails its grammar is refused ~invalid_msg_id~ or
+  ~invalid_pane_id~ BEFORE admission. The daemon drops the echo for the identity
+  it could not read -- there is nothing safe to echo -- so these replies carry at
+  most the other identity, and a client MUST NOT require an echo before naming
+  them. They are request errors, facts about the request the client built, and are
+  distinct from ~missing_msg_id~ / ~missing_pane_id~, which say the field was
+  absent rather than malformed.
 
 ** Send replies
 :PROPERTIES:

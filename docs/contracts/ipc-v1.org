@@ -80,7 +80,7 @@ The documentation file and ~CONTRACT_HASH~ itself are not hash inputs.
 :END:
 The fixtures this document pins were measured byte-identical to
 ~test/fixtures/contracts/ipc/v1/~ in the orris consumer at revision
-~cab4565b9246666fc4cc86d729e664a15e6229f0~ on 2026-09-18, with both
+~e5da392ea0b26d89bea6e72d58e1e952a48b7600~ on 2026-09-18, with both
 ~CONTRACT_HASH~ files reading
 ~f1cacf8b53fdd1db37ec968e5476081250804e9c6a4d615215d47d9b77894213~.
 

@@ -31,8 +31,8 @@ defmodule AiPair.Contracts.VendoredIPCV2Test do
   @begin_sentinel "# BEGIN VENDORED orris docs/contracts/ipc-v2.org"
   @end_sentinel "# END VENDORED orris docs/contracts/ipc-v2.org"
 
-  @orris_revision "cab4565b9246666fc4cc86d729e664a15e6229f0"
-  @orris_sha256 "0263abf21b62cf70a1a63f6ca77c92ba8eca38aa2c62cb16967b4e6546ddbda3"
+  @orris_revision "e5da392ea0b26d89bea6e72d58e1e952a48b7600"
+  @orris_sha256 "8bfdc102e8c37cb0399f169030d9bf37ff37aff2d14299b09e2325fb276bb32b"
   @fixture_hash "78c2f64240c3c5c9da60425c65c498974a2a81c8adb3e68e0bef28613c1707dc"
   @v1_fixture_hash "f1cacf8b53fdd1db37ec968e5476081250804e9c6a4d615215d47d9b77894213"
 
@@ -89,14 +89,42 @@ defmodule AiPair.Contracts.VendoredIPCV2Test do
     end
 
     test "the producer addenda stay outside the region so they cannot change its digest" do
-      [preamble, _] = String.split(File.read!(@doc_path), @begin_sentinel, parts: 2)
+      preamble = preamble()
+
+      # The addenda are producer statements. Naming one of them inside the region
+      # would mean the consumer document had been edited here, which the digest row
+      # would catch -- but only after the fact, and only if the pins were not
+      # recomputed at the same time. This row says it structurally.
+      for producer_only <- ["Producer addenda", "ReceiptLog.valid_pane?/1", "paired_fixture_count"] do
+        assert String.contains?(preamble, producer_only)
+
+        refute String.contains?(vendored_region(), producer_only),
+               "#{producer_only} is a producer statement and belongs outside the vendored region"
+      end
+    end
+
+    test "the region states the pane grammar that governs this producer" do
+      region = vendored_region()
+
+      # WHY THIS IS PINNED. `AiPair.IPC.Delivery` echoes an identity only when the
+      # identity predicate accepts it, and `Delivery.IPCIdentityGrammarTest` asserts
+      # that the echo decision and the storage decision are the same decision. That
+      # is a choice between two possible grammars, and it is this sentence -- not a
+      # preference -- that makes it the right one. A re-vendoring that dropped the
+      # sentence would leave the source change unexplained, so it fails here.
+      assert String.contains?(region, "** Identity grammars and their refusals")
+
+      assert String.contains?(
+               region,
+               "~pane_id~ is ~%~ followed by 1..128 characters from ~[a-zA-Z0-9_]~. This is the"
+             )
+
+      assert String.contains?(region, "GOVERNING grammar")
 
       for token <- ~w(invalid_msg_id invalid_pane_id) do
-        assert String.contains?(preamble, token),
-               "#{token} is producer-emitted and unnamed by the consumer text; the addendum " <>
-                 "is where it belongs"
-
-        refute String.contains?(vendored_region(), token)
+        assert String.contains?(region, token),
+               "#{token} was carried by the producer addenda until orris e5da392e named it; " <>
+                 "a region without it means the addendum, not the contract, is the source"
       end
     end
   end
@@ -143,6 +171,11 @@ defmodule AiPair.Contracts.VendoredIPCV2Test do
     [_preamble, rest] = String.split(File.read!(@doc_path), @begin_sentinel <> "\n", parts: 2)
     [region, _tail] = String.split(rest, @end_sentinel <> "\n", parts: 2)
     region
+  end
+
+  defp preamble do
+    [preamble, _] = String.split(File.read!(@doc_path), @begin_sentinel, parts: 2)
+    preamble
   end
 
   # `- <key>: =<value>=` inside the paired-revision block.
