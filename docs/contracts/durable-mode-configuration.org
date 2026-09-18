@@ -1,0 +1,513 @@
+#+options: ^:nil
+
+* Durable-mode configuration contract
+:PROPERTIES:
+:CUSTOM_ID: durable-mode-configuration-contract
+:END:
+This document freezes the six ~:ai_pair~ application-environment keys that switch
+the daemon from its legacy composition to the durable one, the supervision order
+the durable branch requires and why each edge exists, the rules that make a
+durable boot fail closed, and the guarantee that with durability off the legacy
+composition is unchanged. The tables under
+~test/fixtures/contracts/durable-mode-config~ are pinned byte-for-byte by
+~test/ai_pair/contracts/durable_mode_configuration_test.exs~.
+
+The behaviour is the R04 S10 slice's (audit
+R04-BOOT-RESTORATION-SOURCE-GAP-AUDIT section 4, row S10, flagged
+CONTRACT-CHANGE; it is the last of that audit's four CONTRACT-CHANGE
+prerequisites). The producer is not on main: main's
+~lib/ai_pair/application.ex~ has no durable branch, reads none of these six keys
+and starts exactly the eight legacy children (~main:27-36~). Three of the six
+already have a reader on main — ~AiPair.IPC.Server~ reads
+~:durable_attachments~, ~:project_binding~ and ~:tmux_server~ once S9 landed —
+and three (~:pane_intent_store_fs~, ~:pane_intent_store_module~,
+~:boot_generation~ as an environment key) have no reader at all until S10.
+
+*Enabling any of these keys in the installed configuration, and restarting the
+installed daemon, are reserved to Charles.* See "Installed activation".
+
+** Citation key
+:PROPERTIES:
+:CUSTOM_ID: citation-key
+:END:
+Every rule below cites a line of reviewed source or a RED-row assertion. Where
+none of them says something, this document says "not promised" or records an
+open question rather than deciding.
+
+| Tag              | File                                                                                       |
+|------------------+--------------------------------------------------------------------------------------------|
+| ~lane:N~         | ~ff8650e:lib/ai_pair/application.ex~ (the reviewed integration, SOURCE GO only)             |
+| ~main:N~         | ~lib/ai_pair/application.ex~ at this repository's main                                      |
+| ~RED:N~          | ~56b5c7b:test/ai_pair/pane_restore/boot_wiring_test.exs~ (the reviewed RED)                 |
+| ~scope:N~        | ~phase0/orrisd-boot-wiring-scope.org~ r10 in the planning repository                        |
+| ~server.ex:N~ ~boot.ex:N~ ~store.ex:N~ ~record.ex:N~ ~fs.ex:N~ ~coordinator.ex:N~ ~marker.ex:N~ ~reconciler.ex:N~ ~admission.ex:N~ | the modules of that name on main (~store.ex~ is ~lib/ai_pair/pane_intent_store.ex~, ~server.ex~ is ~lib/ai_pair/ipc/server.ex~) |
+
+** The one switch
+:PROPERTIES:
+:CUSTOM_ID: the-switch
+:END:
+Durable mode is ~Application.get_env(:ai_pair, :durable_attachments) == true~, a
+literal ~true~ and nothing else (~lane:42~; ~server.ex:741~; ~scope:40-44~).
+Everything else in this document is conditional on that one comparison.
+
+The comparison is made in two places with two different lifetimes, and the
+difference is contractual:
+
+- ~AiPair.Application.start/2~ reads it ONCE, while building the child list
+  (~lane:41-43~). The supervision tree a daemon runs is therefore decided at
+  boot and never changes.
+- ~AiPair.IPC.Server~ re-reads it for every dispatch (~server.ex:741~; the
+  durable attach/detach contract, "The mode gate"), so the request path can be
+  switched off on a running daemon.
+
+A daemon started legacy and then given ~:durable_attachments = true~ at runtime
+therefore has a durable REQUEST path with no Coordinator, no store and no boot
+generation. Its ~IPC.Server~ was constructed with ~boot_generation: nil~
+(~server.ex:1017~), so every durable attach answers ~durable_unavailable~ and
+every legacy-shaped attach and detach answers ~coordinator_unavailable~ (C1
+~RED:3860-3891~). Nothing is corrupted and nothing is silently degraded, but the
+daemon serves refusals until it is restarted. Durability is a restart-scoped
+deployment decision, not a runtime toggle.
+
+** The six keys
+:PROPERTIES:
+:CUSTOM_ID: the-six-keys
+:END:
+All six live under the ~:ai_pair~ application environment. None has a
+command-line or environment-variable spelling, and this contract does not add
+one. The frozen table is
+~test/fixtures/contracts/durable-mode-config/configuration.keys.json~.
+
+*** ~:durable_attachments~
+| Property        | Value                                                                                          | Source                                  |
+|-----------------+--------------------------------------------------------------------------------------------------+-----------------------------------------|
+| Type            | any term; only the literal ~true~ is durable                                                    | ~lane:42~; ~server.ex:741~              |
+| Default         | absent                                                                                          | ~main~ never reads it                   |
+| Absent          | legacy composition, legacy request path                                                         | B1 ~RED:1882-1921~; ~scope:40-42~       |
+| Any other value | identical to absent; ~false~, ~nil~, ~"true"~ and ~1~ are all legacy, and none is an error       | ~lane:42~; ~server.ex:741~; [[file:durable-attach-detach.org][the durable IPC contract]], "The mode gate" |
+| Who may set it  | the installed daemon configuration (reserved, see "Installed activation"); a test through ~Application.put_env/3~ | ~RED:1936,2372,3582~    |
+
+*** ~:project_binding~
+| Property   | Value                                                                                                             | Source                                    |
+|------------+---------------------------------------------------------------------------------------------------------------------+-------------------------------------------|
+| Type       | a map with EXACTLY the three keys ~project~, ~project_dir~, ~project_inbox~; ~project~ non-empty valid UTF-8, the two paths absolute | ~admission.ex:208-217~; ~server.ex:782-787,795-808~ |
+| Default    | none; there is no fallback binding                                                                                  | ~lane:71~                                 |
+| Absent     | boot SUCCEEDS. Reconciliation refuses every recorded pane with ~{:config_invalid, :binding}~ and starts no child; every durable attach answers ~durable_metadata_missing~ | ~admission.ex:217,356~; ~server.ex:795-804~ |
+| Malformed  | the same, located: a map of three keys with a bad field yields ~{:config_invalid, field}~ for that field; any other term yields ~{:config_invalid, :binding}~ | ~admission.ex:208-217~ |
+| Who may set it | the installed daemon configuration (reserved); a test                                                           | ~RED:1940-1944~                           |
+
+The binding is the ONLY source of a record's ~project~, ~project_dir~ and
+~project_inbox~; they are never taken from the request or from an existing
+record (~scope:74-77~; the durable attach/detach contract). An unusable binding
+is not a fact about any pane, so no other refusal is manufactured from it
+(~admission.ex:354-356~).
+
+*** ~:tmux_server~
+| Property   | Value                                                                              | Source                                |
+|------------+--------------------------------------------------------------------------------------+---------------------------------------|
+| Type       | a ~GenServer.server()~: a registered name, a pid, or a ~{:via, _, _}~ tuple         | ~server.ex:1132~; ~lane:70~           |
+| Default    | ~AiPair.Tmux~                                                                      | ~lane:70~; ~server.ex:1132~           |
+| Absent     | the daemon's own ~{AiPair.Tmux, []}~ child is the census and marker adapter         | ~lane:70,97~                          |
+| Set        | that server is the adapter for the boot census, every marker read and write, and the reconciliation callbacks; the default ~{AiPair.Tmux, []}~ child is STILL started and simply unused by the durable path | ~lane:80-89,97,100~; G9 ~RED:3583~ |
+| Unreachable | no boot failure. The census answers ~{:source_unavailable, :live}~, ~marker_observation~ is ~"unobserved"~, every pane is refused, and a durable attach answers ~durable_observation_unavailable~ | ~reconciler.ex:177,243-245~; B10 ~RED:2502~ |
+| Who may set it | tests and fixtures; an installed daemon has no reason to override it and doing so is reserved | G9 ~RED:3583~; B5b ~RED:2373~    |
+
+*** ~:pane_intent_store_fs~
+| Property  | Value                                                                                                   | Source                                |
+|-----------+-----------------------------------------------------------------------------------------------------------+---------------------------------------|
+| Type      | an ~AiPair.PaneIntentStore.Fs.handle()~, the pair ~{module, state}~                                      | ~fs.ex:61-64~; ~store.ex:94~          |
+| Default   | ~AiPair.PaneIntentStore.Fs.default()~, which is ~{AiPair.PaneIntentStore.Fs.SystemFs, nil}~              | ~lane:73~; ~fs.ex:61~; ~scope:190-191~ |
+| Absent    | the real filesystem                                                                                      | ~fs.ex:61~                             |
+| Set       | forwarded verbatim as the store child's ~fs:~ option; nothing else in the daemon consults it              | ~lane:73-74~; ~store.ex:94~            |
+| Malformed | the store child fails at its first ~Fs~ call and BOOT FAILS CLOSED; a handle that is not a two-element tuple raises inside the store's own ~start_link~ | B5a ~RED:1981-2023~; ~fs.ex:64~ |
+| Who may set it | tests and fixtures only. An installed daemon overriding its filesystem seam is outside this contract | B5a ~RED:1997~; ~scope:192-194~   |
+
+*** ~:pane_intent_store_module~
+| Property | Value                                                                                                      | Source                                  |
+|----------+--------------------------------------------------------------------------------------------------------------+-----------------------------------------|
+| Type     | a module exporting ~start_link/1~                                                                           | ~lane:72,76~; ~store.ex:92-93~          |
+| Default  | ~AiPair.PaneIntentStore~                                                                                    | ~lane:72~; ~scope:196~                  |
+| Set      | that module is started as the ONE durable store child, with the SAME ~[root: inbox, fs: ...]~ options        | ~lane:72-76~; ~scope:196-199~           |
+| Required of the module | it MUST register ~:global~ under ~{AiPair.PaneIntentStore, Path.expand(inbox)}~ and answer ~:list~ with ~{:ok, rows}~ and ~:put~ / ~:delete~ with the production shapes. S10 does not check this; a module that does not is a caller defect | ~scope:197-199~; B5b ~RED:2409-2410~ |
+| Who may set it | tests and fixtures only; reserved in an installed configuration                                        | B5b ~RED:2376~                          |
+
+The substituted module does NOT change the child's identity. The lane builds the
+spec from the real store — ~Supervisor.child_spec({AiPair.PaneIntentStore,
+store_opts}, [])~ — and replaces only its ~:start~ member with
+~{store_module, :start_link, [store_opts]}~ (~lane:75-76~). So the supervision
+child ~id~ stays ~AiPair.PaneIntentStore~ and the ~restart~ stays the store's own
+~:permanent~ whatever module is configured, which is what B5b relies on when it
+looks the child up by that id and finds the controlled store (~RED:2429~).
+
+*** ~:boot_generation~
+| Property        | Value                                                                                                   | Source                                     |
+|-----------------+-----------------------------------------------------------------------------------------------------------+--------------------------------------------|
+| Type            | a non-empty ASCII decimal string, ~^[0-9]+$~                                                             | ~lane:67-68~; ~server.ex:1019-1021~; ~marker.ex:52-55~ |
+| Default         | a fresh ~AiPair.PaneRestore.Marker.mint_generation/0~ per durable boot: 16 cryptographically random bytes as an unsigned integer in decimal | ~lane:62-63~; ~marker.ex:127-131~ |
+| Absent          | mint. ~Application.fetch_env/2~ answering ~:error~ is the ONLY absence                                    | ~lane:62-65~; ~scope:175~                  |
+| Present-invalid | BOOT FAILS CLOSED, before any child is started                                                            | ~lane:67-68~; G9 ~RED:3652-3663~           |
+| Who may set it  | tests and fixtures, to pin a known value; reserved in an installed configuration                          | G9 ~RED:3584~                              |
+
+**** The ~fetch_env~ rule
+Absence and a present-but-useless value are distinguished with
+~Application.fetch_env(:ai_pair, :boot_generation)~: ~:error~ means mint,
+~{:ok, value}~ means validate and fail closed if the value is not a decimal
+string (~lane:62-68~; ~scope:175~). The r8 proposal text spelled this
+~Application.get_env(...) || Marker.mint_generation()~ (~scope:210-211~); the
+ruling at ~scope:175~ governs, as ~scope:186-187~ states. The difference is
+observable: under ~get_env || mint~, an explicit ~nil~ or ~false~ would SILENTLY
+mint, whereas under ~fetch_env~ it is a present value that fails the decimal
+check and fails the boot. A configuration that names the key must name a usable
+value.
+
+**** What the generation is for
+The one validated value is passed to ~AiPair.IPC.Server~ as ~boot_generation:~
+(~lane:103~), which validates it again in durable mode (~server.ex:1013-1021~)
+and uses it for exactly one thing: the generation OFFERED to ~Marker.ensure~ when
+a pane's session marker is absent (~server.ex:1136-1139~; ~scope:57-59~). The
+value actually recorded is always the one read back from the marker
+(~server.ex:1149~; ~scope:57-60~). Boot reconciliation consumes existing markers
+and mints nothing: a durable boot over live marker-less sessions performs zero
+marker writes (~reconciler.ex:64~; B2 ~RED:1959~; G9 ~RED:3599~).
+
+The value is immutable for the life of the daemon and survives an ordinary
+restart of the ~IPC.Server~ child, because it was computed by ~Application~ and
+lives in that child's spec (~lane:103~; ~scope:176~).
+
+*** The inbox root is not one of these keys
+Every durable key is relative to the daemon inbox, which is resolved exactly as
+it is today by ~AiPair.Inbox.resolve!/0~ (~main:19~; ~lane:19~) from
+~:ai_pair, :inbox~, then ~AI_PAIR_INBOX~, then the default path (~main:50-54~).
+S10 changes nothing about that resolution. The inbox is the store child's
+~root:~, the ~Path.expand~ input to the store's ~:global~ key, ~Boot~'s ~root:~
+and therefore the boot report's directory (~lane:74,77,100~; ~boot.ex:191~).
+
+** Supervision order
+:PROPERTIES:
+:CUSTOM_ID: supervision-order
+:END:
+Both branches use ~Supervisor.start_link(children, strategy: :one_for_one, name:
+AiPair.Supervisor)~ (~main:38-39~; ~lane:29-30~), so children are started in list
+order and each child's ~start_link~ returns before the next one begins. The
+frozen tables are
+~test/fixtures/contracts/durable-mode-config/supervision.legacy.json~ and
+~supervision.durable.json~.
+
+*** Before any child: the generation
+The generation is fetched, minted if absent and validated BEFORE the child list
+is built (~lane:61-68~). A rejected ~:boot_generation~ therefore raises with no
+child started, no supervisor, no socket and no marker write ATTEMPTED — which is
+what G9 measures, counting marker argv through an external wrapper
+(~RED:3654-3663~). Validating it later, for instance only inside
+~IPC.Server.start_link/1~ where main already validates it (~server.ex:1019~),
+would let a whole reconciliation run and quarantine panes before the daemon
+failed.
+
+*** The durable child list
+Eleven children, in this order (~lane:92-104~). The three new ones are marked.
+
+| # | Child                                                                              | New | Source                |
+|---+--------------------------------------------------------------------------------------+-----+-----------------------|
+| 1 | ~{Registry, keys: :unique, name: AiPair.Registry}~                                   |     | ~lane:93~             |
+| 2 | ~{AiPair.Telemetry.OtelBridge, heartbeat_interval_ms: 60_000}~                       |     | ~lane:94~             |
+| 3 | ~{AiPair.PaneSupervisor, []}~                                                        |     | ~lane:95~             |
+| 4 | ~{AiPair.Inbox.StuckScanner, inbox: inbox}~                                          |     | ~lane:96~             |
+| 5 | ~{AiPair.Tmux, []}~                                                                  |     | ~lane:97~             |
+| 6 | ~{AiPair.PaneRestore.Coordinator, []}~                                               | yes | ~lane:98~             |
+| 7 | the store spec: id ~AiPair.PaneIntentStore~, start ~{configured module, :start_link, [root: inbox, fs: configured fs]}~ | yes | ~lane:74-76,99~ |
+| 8 | ~{AiPair.PaneRestore.Boot, store:, root:, tmux:, binding:, callbacks:}~               | yes | ~lane:100~            |
+| 9 | ~{Task.Supervisor, name: AiPair.IPC.ConnectionSupervisor}~                            |     | ~lane:101~            |
+|10 | ~{AiPair.Delivery.ReceiptStore, inbox: inbox}~                                        |     | ~lane:102~            |
+|11 | ~{AiPair.IPC.Server, inbox:, receipt_store:, boot_generation: generation}~            |     | ~lane:103~            |
+
+~Boot~'s ~store:~ is the name tuple ~{:global, {AiPair.PaneIntentStore,
+Path.expand(inbox)}}~, not a pid, so it resolves through ~:global~ at call time
+(~lane:77,100~). Its ~tmux:~ is the configured adapter and its ~callbacks:~ are
+the ~capture_fn~/~paste_fn~ pair BOUND to that same adapter, so a quarantined
+child started by reconciliation cannot route to the default adapter
+(~lane:79-90~; ~reconciler.ex:117-120~; ~scope:74-77~).
+
+*** Why each new edge exists
+Each row says what breaks if the edge is removed. Only the last column's cited
+rows are measurements; the rest are derived from the cited source.
+
+| Edge                          | Why                                                                                                                                                                   | What breaks without it                                                                                                                         | Source                                          |
+|-------------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------+--------------------------------------------------------------------------------------------------------------------------------------------------+-------------------------------------------------|
+| ~Registry~ before everything  | ~AiPair.PaneSupervisor.via_pane/1~ registers every pane child in ~AiPair.Registry~                                                                                      | a pane quarantined by reconciliation could not register, and ~whereis_pane~ would not find it                                                     | legacy order, unchanged ~main:28~; ~lane:93~    |
+| ~PaneSupervisor~ before ~Boot~ | reconciliation starts each quarantined child through a REAL ~{:start_child, spec}~ request to ~AiPair.PaneSupervisor~, sent by a coordinator-owned worker              | every admissible pane would be refused ~{:quarantine_unavailable, reason}~; the boot report would refuse everything while claiming every source answered | ~reconciler.ex:200-202~; ~scope:107-108~; B12b ~RED:2692~ |
+| ~AiPair.Tmux~ before ~Boot~   | ~:tmux_server~ defaults to ~AiPair.Tmux~, so the boot census and every marker read go through that child                                                                | the census would be ~{:source_unavailable, :live}~, ~marker_observation~ ~"unobserved"~, every pane refused — a boot that restores nothing and looks healthy | ~lane:70,97~; ~reconciler.ex:177,243-245~; B10 ~RED:2502~ |
+| ~Coordinator~ before the store and ~Boot~ | every mutating pane effect, reconciliation's included, runs inside one per-pane ~Coordinator.transaction/2~ fence                                           | ~transaction/2~ answers ~{:error, :coordinator_unavailable}~, so reconciliation refuses every pane ~{:fence_refused, :coordinator_unavailable}~ and nothing is restored | ~coordinator.ex:36~; ~scope:42-44,105-119~; C1 ~RED:3860~ |
+| the store before ~Boot~       | ~Boot~'s first act is the reconciliation snapshot ~:list~ against the store's ~:global~ name                                                                            | the call would exit ~:noproc~, reported as ~{:source_unavailable, :intent}~: the daemon would come up having reconciled nothing while every record sits on disk | ~lane:77,100~; ~reconciler.ex:234-235,248~; B5b ~RED:2405-2410~ |
+| ~Boot~ before ~IPC.Server~    | ~Boot.start_link/1~ is READY-ON-RETURN: it returns only after the one reconciliation attempt has settled and the report has been handed to the writer                   | see below                                                                                                                                        | ~boot.ex:17-23,181-183~; ~scope:165-168~; B5b ~RED:2417-2422~ |
+| ~ReceiptStore~ before ~IPC.Server~ | ~IPC.Server.start_link/1~ answers ~{:error, :receipt_store_unavailable}~ unless the receipt store is available                                                     | boot fails closed with a misleading cause                                                                                                         | ~server.ex:96-102~ (pre-existing legacy edge)   |
+| ~ConnectionSupervisor~ before ~IPC.Server~ | connection handler tasks run under it                                                                                                                     | accepted connections could not be handled                                                                                                        | ~server.ex:14-16~ (pre-existing legacy edge)    |
+
+**** The ~Boot~-before-~IPC.Server~ edge
+This is the load-bearing one and the only one the RED measures directly. Because
+a static ~:one_for_one~ supervisor starts children sequentially and ~Boot~ is
+ready on return, the listen socket is not created until reconciliation is done.
+B5b holds the boot-time ~:list~ and asserts that while it is held
+~AiPair.Supervisor~ is alive, ~AiPair.IPC.Server~ is NOT registered, nothing
+accepts on the socket path, and the socket FILE does not exist
+(~RED:2412-2422~); after the release the whole composition is present and ~ping~
+answers (~RED:2429-2432~).
+
+What breaks if ~IPC.Server~ starts first: a client attach could reach the daemon
+while the boot's single reconciliation is still running. The per-pane fence
+keeps that from corrupting anything — one of the two takes the pane and the
+other is refused ~pane_busy~ — but the outcome becomes timing-dependent: a pane
+a user just attached could be observed and quarantined by the same boot's
+reconciliation, or a pane reconciliation is about to quarantine could be refused
+to the user for reasons that describe a boot they cannot see. The rule is
+therefore stronger than "no corruption": no client may reach the daemon before
+the boot's one reconciliation attempt has settled.
+
+**** What ~Boot~ does NOT delay
+The deadline bounds the WAIT, not the work. A coordinator-owned effect worker
+accepted inside a fence is never terminated by ~Boot~; it outlives the deadline
+and keeps its pane fenced until its reply arrives, and the already-published
+report is not rewritten (~boot.ex:32-35,296-314~; B12b ~RED:2815-2818~;
+~scope:80-84~). So ~IPC.Server~ can start while an effect from reconciliation is
+still outstanding, and an attach on that pane is correctly refused
+~unresolved_operation~ until it settles.
+
+** Fail-closed rules
+:PROPERTIES:
+:CUSTOM_ID: fail-closed
+:END:
+*** What fails the boot
+| Condition                                              | Outcome                                                                                              | Source                                |
+|--------------------------------------------------------+--------------------------------------------------------------------------------------------------------+---------------------------------------|
+| ~:boot_generation~ present and not a decimal string     | ~ArgumentError~ raised before the child list is built; ~Application.start~ answers ~{:error, _}~, no supervisor, no marker attempt | ~lane:67-68~; G9 ~RED:3653-3663~ |
+| the store child fails to start                          | ~Supervisor.start_link~ aborts, already-started children are terminated, ~Application.start~ answers ~{:error, _}~, nothing serves, no socket is left behind | ~scope:70~; B5a ~RED:2006-2022~ |
+| the ~Coordinator~ child fails to start                  | the same                                                                                             | ~scope:70~ (M5); NO RED row measures it — see OQ-3 |
+| ~Boot~'s reconciliation worker CRASHES                  | ~Boot~ exits ~{:reconciliation_failed, reason}~ and the boot fails. A crash is not a source refusal and must never become a successful empty report | ~boot.ex:40-43,292-294~ |
+| ~Boot~ cannot join its own worker                       | ~Boot~ exits ~{:reconciliation_join_failed, worker}~                                                  | ~boot.ex:328-334~                     |
+| a caller defect in ~Boot~'s options (unknown key, missing required key, relative ~root~, non-positive ~deadline_ms~, a writer that does not export ~write/2~) | ~ArgumentError~ raised in the caller, so a composition defect never looks like a source failure | ~boot.ex:195-248~ |
+
+Failing closed means exactly what B5a asserts: no ~AiPair.Supervisor~, no
+~AiPair.IPC.Server~, no socket file and nothing accepting on the socket path
+(~RED:2015-2022~).
+
+*** What does NOT fail the boot
+| Condition                                               | Outcome                                                                                                 | Source                                    |
+|---------------------------------------------------------+-----------------------------------------------------------------------------------------------------------+-------------------------------------------|
+| ~:project_binding~ absent or malformed                   | boot succeeds; every pane refused ~{:config_invalid, field}~; every durable attach refused ~durable_metadata_missing~ | ~admission.ex:217,356~; ~server.ex:795-804~ |
+| any reconciliation SOURCE failure (intent, census, marker) | boot succeeds and the daemon answers ~ping~; the report names the failed source and unrestored intent is RETAINED | ~scope:99-103~; B5b ~RED:2429-2442~; B9, B10 |
+| the reconciliation deadline expires                      | boot succeeds; the timed-out report is published and the worker is terminated and joined                 | ~boot.ex:296-314~; B12a ~RED:2607~        |
+| the boot report cannot be written                        | boot succeeds; the failure is logged at ~:error~ and surfaced as ~Boot.status/1~'s ~report_write~         | ~boot.ex:264-266~; B11 ~RED:2536~         |
+| the configured ~:tmux_server~ is unreachable             | boot succeeds with an unobserved census                                                                  | ~reconciler.ex:177~; B10 ~RED:2502~       |
+
+The distinction is one rule: a source that answered "I failed" is a report entry;
+a process that crashed, or a configuration the daemon cannot act on at all, is a
+boot failure. A failed source is never collapsed into an empty successful report
+(~admission.ex:34-36~; ~scope:101-103~).
+
+** Contradictory configurations
+:PROPERTIES:
+:CUSTOM_ID: contradictions
+:END:
+These combinations are individually valid and jointly useless. None is detected
+by the lane; each is recorded here with its actual observable outcome so that a
+reader is not surprised, and the two that arguably SHOULD be refused are open
+questions.
+
+| Combination                                                                                | Actual outcome                                                                                                                                        | Source                                        |
+|--------------------------------------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------+-----------------------------------------------|
+| durable ~true~ with no ~:project_binding~                                                   | boot succeeds and serves; every durable attach is refused ~durable_metadata_missing~ listing ~project~, ~project_dir~, ~project_inbox~; reconciliation refuses every recorded pane. Legacy-shaped attach and detach still work, fenced | ~server.ex:795-804~; ~admission.ex:356~  |
+| ~:project_binding.project_inbox~ pointing somewhere other than the resolved inbox            | ASYMMETRIC. The store registers under the INBOX's key (~lane:77~) while durable attach looks the store up under the BINDING's ~project_inbox~ (~server.ex:814-819~), so every durable attach answers ~durable_unavailable~ — while boot reconciliation, which holds the inbox-keyed name tuple, works normally. A record would also fail ~Record~ validation, whose ~project_inbox~ must equal the store root | ~lane:77~; ~server.ex:815~; ~record.ex:54-55~ — OQ-1 |
+| ~:pane_intent_store_module~ set to a module that does not register under the store's ~:global~ key | boot succeeds (the child started); ~Boot~'s ~:list~ exits ~:noproc~ and the report carries ~{:source_unavailable, :intent}~; every durable attach answers ~durable_unavailable~ | ~scope:197-199~; ~server.ex:814-819~ — OQ-2 |
+| ~:tmux_server~ naming a process that does not exist                                          | boot succeeds; census unobserved, every pane refused, durable attach answers ~durable_observation_unavailable~                                            | ~reconciler.ex:243-245~; ~server.ex:840-847~  |
+| ~:boot_generation~ pinned while ~:durable_attachments~ is unset                              | the key is never fetched: a legacy boot does not enter the durable branch. ~IPC.Server~ likewise ignores an unvalidated one in legacy mode                | ~lane:41-44~; ~server.ex:1017~                |
+| ~:pane_intent_store_fs~ or ~:pane_intent_store_module~ set while durable is unset             | never read; legacy composition is unchanged                                                                                                              | ~lane:41-44~; B1 ~RED:1882~                   |
+
+** Legacy is byte-unchanged
+:PROPERTIES:
+:CUSTOM_ID: legacy-unchanged
+:END:
+With ~:durable_attachments~ not literally ~true~, the composition is exactly
+today's. The claim has a precise content: the same eight children, in the same
+order, with the same options, under the same strategy and supervisor name
+(~main:27-39~; ~lane:44-55~).
+
+| # | Child                                                          |
+|---+------------------------------------------------------------------|
+| 1 | ~{Registry, keys: :unique, name: AiPair.Registry}~               |
+| 2 | ~{AiPair.Telemetry.OtelBridge, heartbeat_interval_ms: 60_000}~   |
+| 3 | ~{AiPair.PaneSupervisor, []}~                                    |
+| 4 | ~{AiPair.Inbox.StuckScanner, inbox: inbox}~                      |
+| 5 | ~{AiPair.Tmux, []}~                                              |
+| 6 | ~{Task.Supervisor, name: AiPair.IPC.ConnectionSupervisor}~       |
+| 7 | ~{AiPair.Delivery.ReceiptStore, inbox: inbox}~                   |
+| 8 | ~{AiPair.IPC.Server, inbox: inbox, receipt_store: receipt_store}~ |
+
+~Supervisor.which_children/1~ reports them in the reverse of that order, which
+is the order B1 pins (~RED:1864-1873~; the ported B1 on main).
+
+And, positively: no ~AiPair.PaneRestore.Coordinator~ process, no store under
+~{AiPair.PaneIntentStore, Path.expand(inbox)}~, no ~AiPair.PaneRestore.Boot~
+process, no generation minted, no marker write attempted through the default
+adapter, and no ~<inbox>/state/boot-report.json~ (B1 ~RED:1899-1920~;
+~scope:40-42~). ~:boot_generation~ is not even fetched, so a legacy boot cannot
+fail on a malformed one.
+
+"Byte-unchanged" is a statement about the composition, not about the file: S10
+necessarily edits ~lib/ai_pair/application.ex~ to add the branch, and the lane
+moves the eight-entry literal into the ~else~ of a ~children/2~ helper
+(~lane:41-56~), which reindents it. What may not change is the eight entries,
+their order and their options. That is what
+~supervision.legacy.json~ pins and what the contract test checks against the
+source and against the running tree.
+
+** What a reader may conclude
+:PROPERTIES:
+:CUSTOM_ID: readers
+:END:
+| Observation                                                          | May conclude                                                                                              | May NOT conclude                                                                          |
+|----------------------------------------------------------------------+---------------------------------------------------------------------------------------------------------------+-----------------------------------------------------------------------------------------------|
+| ~:durable_attachments~ is not literally ~true~                        | the daemon starts the eight legacy children and writes nothing durable                                        | that durability is merely dormant on a RUNNING daemon — the IPC path re-reads the key       |
+| ~AiPair.PaneRestore.Boot~ is a child of ~AiPair.Supervisor~           | this daemon booted durable, and its one reconciliation attempt SETTLED before the IPC server started          | that anything was restored to service: restoration lands panes in quarantine only            |
+| ~AiPair.IPC.Server~ answers ~ping~ on a durable daemon                | the boot's reconciliation finished and its report was published or its write failure recorded                 | that reconciliation SUCCEEDED — sources may have failed and the report says so               |
+| ~Application.start~ answered ~{:error, _}~ in durable mode            | nothing serves: no supervisor, no IPC child, no socket                                                        | which child failed, without reading the error term                                           |
+| a boot report exists at ~<inbox>/state/boot-report.json~              | a durable boot of THAT inbox completed a reconciliation attempt                                               | that the current daemon wrote it; a newer boot replaces it wholesale                          |
+| ~:boot_generation~ was pinned and a record carries a different value  | the pane's session already carried a marker, and its generation was used unchanged                            | that the pin was ignored: the pin is only OFFERED, and only to a marker-less session          |
+| every durable attach answers ~durable_unavailable~                    | this daemon holds no store owner under the binding's root, or no boot generation                              | that the store is empty, or that the daemon is in legacy mode                                 |
+
+** Not promised
+:PROPERTIES:
+:CUSTOM_ID: not-promised
+:END:
+- Any environment-variable or command-line spelling of these keys. They are
+  application-environment keys and nothing else reads them.
+- Any validation of ~:project_binding~, ~:tmux_server~,
+  ~:pane_intent_store_module~ or ~:pane_intent_store_fs~ AT BOOT. Only
+  ~:boot_generation~ is validated by ~Application~ (~lane:67-68~); the other five
+  are consumed where they are used and report there. OQ-1 and OQ-2 ask whether
+  two of them should be checked earlier.
+- That a key set after boot takes effect. Only ~:durable_attachments~ is re-read
+  at runtime, and only by the IPC request path (~server.ex:741~); the supervision
+  tree and the boot generation are fixed at boot (~lane:42,61-68~).
+- Any ordering guarantee among the eight legacy children beyond the frozen list,
+  and any claim about their internal options beyond the literals shown. This
+  contract freezes WHICH children with WHICH options, not what each does with
+  them.
+- A ~:deadline_ms~ configuration key. ~Boot~ accepts the option and defaults it
+  to 10000 (~boot.ex:72,172-174~), but the lane passes no ~deadline_ms:~
+  (~lane:100~) and no environment key controls it. Adding one is out of scope
+  here — see OQ-4.
+- A ~:report_writer~ configuration key, for the same reason: ~Boot~ defaults to
+  its production writer (~boot.ex:209~) and the lane overrides nothing
+  (~lane:100~).
+- Anything about the boot report's own format, the marker format or the durable
+  IPC vocabulary: those are the [[file:boot-report.org][boot report]],
+  [[file:tmux-session-marker.org][marker]] and
+  [[file:durable-attach-detach.org][durable attach and detach]] contracts.
+- Release from quarantine, agent-identity attestation, IPC v2 subscription and
+  native session lifecycle: out of R04 scope entirely (~scope:369-371~).
+- Any behaviour of a second daemon booting durable against the same inbox. The
+  store refuses the second owner at stage ~:ownership~ (~store.ex:258-263~), so
+  the second boot fails closed by the store rule above, but no RED row measures
+  it and sole-daemon ownership is a PRECONDITION of the store, not something it
+  enforces (~store.ex:18-21~).
+
+** Installed activation
+:PROPERTIES:
+:CUSTOM_ID: installed-activation
+:END:
+*Setting any of these six keys in the installed daemon's configuration, and
+restarting the installed ~ai-pair~ daemon, are reserved to Charles. No slice
+performs either, and this contract authorises neither.*
+
+- Enabling ~:durable_attachments~, supplying ~:project_binding~, or setting any
+  other key of this contract in the installed configuration — through
+  home-manager, launchd, a release ~config/runtime.exs~ or any other installed
+  path — is an ACTIVATION step, not an implementation step. The audit lists it as
+  reserved (R04-BOOT-RESTORATION-SOURCE-GAP-AUDIT section 5, first entry).
+- Restarting the installed daemon so a configuration change takes effect is
+  equally reserved, and it is the ONLY way any of these keys takes effect: the
+  supervision tree is decided once per boot (~lane:42~).
+- The register's ~installed_live_compatibility~ class is HELD for NS-15.G.001,
+  NS-15.G.002 and NS-16.*; nothing here changes that, and S10 landing does not
+  close any of those controls.
+- The four keys ~:tmux_server~, ~:pane_intent_store_fs~,
+  ~:pane_intent_store_module~ and ~:boot_generation~ exist so that tests can
+  substitute a fixture adapter, a fault-injecting filesystem, a controlled store
+  and a pinned generation (~RED:1997,2376,3583-3584~). They are test seams. An
+  installed daemon setting any of them is outside this contract.
+- A durable boot performs real effects on the operator's machine: it takes a tmux
+  census, reads session options, starts quarantined pane children for recorded
+  intent and writes ~<inbox>/state/boot-report.json~. That is why activation is
+  reserved and why the RED runs against private fixture tmux servers rather than
+  the operator's (~scope:246~).
+
+** Open questions for the S10 review
+:PROPERTIES:
+:CUSTOM_ID: open-questions
+:END:
+- OQ-1 a binding whose ~project_inbox~ is not the resolved inbox. The store is
+  registered under the INBOX (~lane:77~) while durable attach resolves the store
+  under the BINDING's ~project_inbox~ (~server.ex:815~), so the two disagree
+  silently and every durable attach answers ~durable_unavailable~ while
+  reconciliation works. Should S10 refuse such a configuration at boot — the
+  daemon can compare the two values before starting anything — or is
+  ~durable_unavailable~ the honest answer? No RED row covers it. Refusing at boot
+  would be a fail-closed rule this contract does not currently state.
+- OQ-2 an unregistered ~:pane_intent_store_module~. ~scope:197-199~ makes global
+  registration a REQUIREMENT of the configured module but nothing checks it, and
+  the failure surfaces much later as ~{:source_unavailable, :intent}~ plus
+  ~durable_unavailable~. Should S10 verify the ~:global~ key is claimed after the
+  store child starts, and fail closed if it is not?
+- OQ-3 the Coordinator's fail-closed rule has no RED row. ~scope:70~ requires
+  that a durable store OR coordinator child start failure fails boot closed, and
+  B5a measures only the store (~RED:1981~). The Coordinator's ~start_link/1~ can
+  answer ~{:error, {:unknown_options, keys}}~ (~coordinator.ex:58-59~), which is
+  the only non-crash failure it has, and S10 passes ~[]~ (~lane:98~), so the case
+  may be unreachable in practice. Recorded rather than asserted.
+- OQ-4 no key controls the reconciliation deadline. ~Boot~'s ~deadline_ms~
+  defaults to 10000 (~boot.ex:72~) and the lane never passes one (~lane:100~), so
+  an installed daemon with a large store has no way to widen it and B12a's
+  timeout path would fire in production with no operator control. Should S10 add
+  a seventh key, or is a fixed 10 s deadline the contract?
+- OQ-5 ~:project_binding~ has no default and no derivation. The lane reads it and
+  passes it through even when ~nil~ (~lane:71,100~). A daemon whose inbox is
+  known could derive ~project_inbox~ from it, but ~scope:74-77~ forbids deriving
+  the binding from records and says nothing about deriving it from the inbox.
+  Left undecided.
+- OQ-6 the durable branch duplicates the seven shared children literally
+  (~lane:93-97,101-102~ versus ~lane:46-53~). Nothing keeps the two lists in
+  step, and a change to a shared child made in one branch only is exactly the
+  silent divergence the legacy claim forbids. Whether S10 should build the
+  durable list by SPLICING into the legacy one, rather than restating it, is a
+  structural question the review should settle; this contract's test pins the
+  legacy list precisely because the lane's shape makes divergence easy.
+
+** Fixtures
+:PROPERTIES:
+:CUSTOM_ID: fixtures
+:END:
+Each file under ~test/fixtures/contracts/durable-mode-config~ is a compact JSON
+document with one trailing newline, in the convention the sibling contracts use.
+
+| Fixture                     | Content                                                                                                                | Checked against                                                                                     |
+|-----------------------------+--------------------------------------------------------------------------------------------------------------------------+---------------------------------------------------------------------------------------------------|
+| ~configuration.keys.json~   | the six keys with type, default, absent behaviour, invalid behaviour and who may set them                               | the three defaults that EXIST on main (~Fs.default/0~, ~AiPair.Tmux~, ~AiPair.PaneIntentStore~), ~Marker.mint_generation/0~, and ~Admission.admit/4~ for the binding shape |
+| ~supervision.legacy.json~   | the eight legacy children in start order, their ~which_children~ order, and the eight normalised source lines           | the running legacy tree AND the whitespace-normalised text of ~lib/ai_pair/application.ex~          |
+| ~supervision.durable.json~  | the eleven durable children in start order, which three are new, and the eight ordering edges with their consequences   | the contract table itself, plus every named module's real ~child_spec/1~ (ids and restart types)    |
+
+The producer arrives with S10, so the durable composition is NOT regenerated
+here: its table is pinned as documentation, and the checks that can be made
+against main today — the three defaults, the generation shape, the binding
+validator, the child ids and restart types, the legacy child list and the legacy
+source text — are made. When S10 lands, the durable table is to be regenerated by
+booting the application durable under a fixture inbox and comparing
+~Supervisor.which_children/1~, as B2 and B5b do.
+
+** Hash
+:PROPERTIES:
+:CUSTOM_ID: hash
+:END:
+~CONTRACT_HASH~ pins the fixture bytes under the IPC v1 rule
+([[file:ipc-v1.org][ipc-v1.org]], "Hash"): lowercase SHA-256 over, for each
+~*.json~ file in byte-sorted filename order, ~filename~, one NUL byte, the exact
+file bytes and one NUL byte. The documentation file and ~CONTRACT_HASH~ itself
+are not hash inputs.
