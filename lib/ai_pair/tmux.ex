@@ -19,6 +19,33 @@ defmodule AiPair.Tmux do
   `error()` is `%{cmd: [String.t()], status: integer(), stderr: binary()}`.
   Raw `System.cmd/3` tuples never escape this module.
 
+  ## Two censuses
+
+  `list_panes/1` is the lossy census. It reports the fields the send path
+  needs, coerces what it can and drops a row it cannot read. Callers that
+  only need to address a pane keep using it unchanged.
+
+  `observe_panes/1` is the strict census, added beside the lossy one rather
+  than replacing it. It reports a session's stable id alongside its reusable
+  name, and it neither drops nor coerces: a row it cannot read wholly fails
+  the whole call with a typed reason. An unreadable census is never reported
+  as an empty one, because a caller deciding what a pane is cannot tell an
+  empty result from a census it failed to parse.
+
+  Both censuses use the same escaped-printable framing: every free-text field
+  has `%` and `|` percent-escaped by tmux before `|` joins the row, so the
+  field count of a row never depends on the locale tmux runs under or on the
+  bytes a field contains.
+
+  ## Session options
+
+  `show_options/3`, `set_option/4` and `set_option_if_absent/4` are the
+  session-option calls. They exist so that a caller storing state on a tmux
+  session has no reason to reach around this module and run `show-options` /
+  `set-option` itself: an operation that runs from its own caller is not
+  ordered by this process's mailbox, and a serialization point with an
+  exception does not serialize.
+
   ## Scope
 
   This module provides boundary primitives. Per-pane queueing, debounce,
@@ -32,6 +59,8 @@ defmodule AiPair.Tmux do
 
   @type pane_id :: String.t()
   @type buffer_name :: String.t()
+  @type target :: String.t()
+  @type option_name :: String.t()
   @type pane_info :: %{
           id: String.t(),
           session: String.t(),
@@ -42,8 +71,52 @@ defmodule AiPair.Tmux do
         }
   @type error :: %{cmd: [String.t()], status: integer(), stderr: binary()}
 
+  @typedoc """
+  One strictly parsed pane row. The key set is exact: consumers compare these
+  observations against independently recorded intent, and treat an unexpected,
+  missing or wrongly typed key as a defect in this producer.
+  """
+  @type observation :: %{
+          pane_id: String.t(),
+          session_id: String.t(),
+          session_name: String.t(),
+          window_index: non_neg_integer(),
+          pane_index: non_neg_integer(),
+          pane_pid: pos_integer(),
+          command: String.t(),
+          path: String.t()
+        }
+
+  @typedoc """
+  Why a census could not be read. Each reason names the offending field
+  verbatim rather than summarising it; `:row_arity` carries the expected
+  field count, the observed count, and the zero-based index of the row.
+  """
+  @type census_error ::
+          {:row_arity, pos_integer(), non_neg_integer(), non_neg_integer()}
+          | {:malformed_pid, String.t()}
+          | {:malformed_index, :window_index | :pane_index, String.t()}
+          | {:malformed_text, :pane_id | :session_id | :session_name | :command | :path, binary()}
+
   # tmux sanitizes literal tab separators in C locales; escape printable fields instead.
   @list_panes_format "\#{pane_id}|\#{s/%/%25/;s/[|]/%7C/:session_name}|\#{window_index}|\#{pane_index}|\#{pane_pid}|\#{s/%/%25/;s/[|]/%7C/:pane_current_command}"
+
+  # The strict census uses the same escaped-printable framing as @list_panes_format.
+  # A tab-separated format was measured to lose 24 rows to row-arity failures under
+  # the C locale; percent-escaping the free-text fields keeps the arity independent
+  # of the locale and of the field values. pane_id and session_id are tmux-minted
+  # (`%N`, `$N`) and can never contain the separator, so they are framed raw.
+  @observe_panes_format "\#{pane_id}|\#{session_id}|\#{s/%/%25/;s/[|]/%7C/:session_name}|\#{window_index}|\#{pane_index}|\#{pane_pid}|\#{s/%/%25/;s/[|]/%7C/:pane_current_command}|\#{s/%/%25/;s/[|]/%7C/:pane_current_path}"
+
+  # Stated, not derived from @observe_panes_format. Deriving it would make the
+  # format and the parser agree by construction, and an agreement that cannot
+  # fail proves nothing: a field added to the format without a matching parser
+  # clause must be caught as a disagreement, not discovered as a census in which
+  # every row has become unparseable.
+  @observation_arity 8
+
+  @decimal_format ~r/\A[0-9]+\z/
+  @option_exists_marker "already set: "
   @default_call_timeout_ms 5_000
   @capture_call_timeout_ms 1_000
 
@@ -180,6 +253,143 @@ defmodule AiPair.Tmux do
     )
   end
 
+  @doc """
+  The tmux `-F` format string of the strict census.
+
+  Its fields, in order, joined by `|`: pane id, session id, session name,
+  window index, pane index, pane pid, current command, current path. The
+  three free-text fields (session name, command, path) are emitted through
+  tmux's `s/%/%25/;s/[|]/%7C/` substitution and decoded by the parser in the
+  reverse order (the `|` escape first, then the `%` escape), exactly as
+  `list_panes/1` does.
+  """
+  @spec observe_format() :: String.t()
+  def observe_format, do: @observe_panes_format
+
+  @doc """
+  How many fields `observe_format/0` emits and `parse_observations/1` requires.
+
+  Stated independently of the format string so that the two are able to
+  disagree, and so that a disagreement is what fails.
+  """
+  @spec observation_arity() :: pos_integer()
+  def observation_arity, do: @observation_arity
+
+  @doc """
+  Takes a strict census of every pane on the server
+  (`list-panes -a -F <observe_format/0>`).
+
+  Reports each session's stable id (`$N`) as well as its reusable name, and
+  refuses to answer partially: if any row cannot be read wholly the entire
+  call is `{:error, census_error()}`, never a shorter list of the rows that
+  happened to parse. Empty output is `{:ok, []}`, a claim that the server has
+  no panes, which is a different claim from having failed to read it.
+
+  A failing tmux invocation returns the usual `{:error, error()}` map.
+  """
+  @spec observe_panes(GenServer.server()) ::
+          {:ok, [observation()]} | {:error, census_error()} | {:error, error()}
+  def observe_panes(server \\ __MODULE__) do
+    Tracer.with_span "tmux.observe_panes", %{kind: :internal, attributes: %{}} do
+      result = GenServer.call(server, :observe_panes, @default_call_timeout_ms)
+      annotate_observe(result)
+      result
+    end
+  end
+
+  @doc """
+  Parses raw `observe_format/0` output into observations.
+
+  No field is coerced. A pid field of `"12abc"` is
+  `{:error, {:malformed_pid, "12abc"}}` rather than the integer `12` that
+  `Integer.parse/1` yields from it, because a field that is only partly a
+  number identifies no process. A pane id that does not start with `%`, a
+  session id that does not start with `$`, and an empty or non-UTF-8 text
+  field are each `{:error, {:malformed_text, key, field}}`.
+  """
+  @spec parse_observations(binary()) :: {:ok, [observation()]} | {:error, census_error()}
+  def parse_observations(output) when is_binary(output) do
+    output
+    |> census_rows()
+    |> parse_rows(0, [])
+  end
+
+  @doc """
+  Reads one option's value from `target` (`show-options -t <target> -v <option>`).
+
+  The raw tmux output is reported verbatim, trailing newline included: a caller
+  that stores a structured value decodes it itself rather than having this
+  boundary guess at a shape it does not own.
+
+  The failure is reported unclassified. tmux exits 1 both for an option that is
+  unset and for a target it cannot address, and separates the two only in its
+  message, so which one happened is decided by the caller against its own
+  vocabulary; `-q` would erase the evidence that decision needs.
+  """
+  @spec show_options(target(), option_name(), GenServer.server()) ::
+          {:ok, binary()} | {:error, error()}
+  def show_options(target, option, server \\ __MODULE__) do
+    tmux_span("show_options", %{"tmux.target" => target, "tmux.option" => option}, fn ->
+      GenServer.call(server, {:show_options, target, option}, @default_call_timeout_ms)
+    end)
+  end
+
+  @doc """
+  Sets one option on `target` (`set-option -t <target> <option> <value>`).
+
+  Unconditional: writing a value identical to the stored one is still a write,
+  and nothing here suppresses it. A caller that must not rewrite an unchanged
+  value reads first and decides for itself.
+
+  The value is never recorded as a span attribute, only its size, since an
+  option value is caller data of unknown sensitivity.
+  """
+  @spec set_option(target(), option_name(), String.t(), GenServer.server()) ::
+          :ok | {:error, error()}
+  def set_option(target, option, value, server \\ __MODULE__) when is_binary(value) do
+    tmux_span(
+      "set_option",
+      %{
+        "tmux.target" => target,
+        "tmux.option" => option,
+        "tmux.value_bytes" => byte_size(value)
+      },
+      fn ->
+        GenServer.call(server, {:set_option, target, option, value}, @default_call_timeout_ms)
+      end
+    )
+  end
+
+  @doc """
+  Sets an option only when it is absent
+  (`set-option -o -t <target> <option> <value>`).
+
+  tmux refuses the write when the option already exists, exits non-zero and
+  reports `already set: <option>`; that refusal is returned as the typed
+  `{:error, :option_exists}` and is never reported as success. An existing
+  option is left unchanged; callers read the value back to learn which claim
+  won. Every other failure keeps the `{:error, error()}` map.
+  """
+  @spec set_option_if_absent(target(), option_name(), String.t(), GenServer.server()) ::
+          :ok | {:error, :option_exists} | {:error, error()}
+  def set_option_if_absent(target, option, value, server \\ __MODULE__) when is_binary(value) do
+    tmux_span(
+      "set_option_if_absent",
+      %{
+        "tmux.target" => target,
+        "tmux.option" => option,
+        "tmux.value_bytes" => byte_size(value)
+      },
+      fn ->
+        GenServer.call(
+          server,
+          {:set_option_if_absent, target, option, value},
+          @default_call_timeout_ms
+        )
+      end
+    )
+  end
+
   # ===== GenServer =====
 
   @impl true
@@ -221,6 +431,22 @@ defmodule AiPair.Tmux do
     {:reply, do_display_message(state, pane_id, message), state}
   end
 
+  def handle_call(:observe_panes, _from, state) do
+    {:reply, do_observe_panes(state), state}
+  end
+
+  def handle_call({:show_options, target, option}, _from, state) do
+    {:reply, do_show_options(state, target, option), state}
+  end
+
+  def handle_call({:set_option, target, option, value}, _from, state) do
+    {:reply, do_set_option(state, target, option, value), state}
+  end
+
+  def handle_call({:set_option_if_absent, target, option, value}, _from, state) do
+    {:reply, do_set_option_if_absent(state, target, option, value), state}
+  end
+
   # ===== Implementation =====
 
   defp do_list_panes(state) do
@@ -229,6 +455,42 @@ defmodule AiPair.Tmux do
     case run_tmux(state, args) do
       {:ok, output} -> {:ok, parse_pane_list(output)}
       {:error, _} = err -> err
+    end
+  end
+
+  defp do_observe_panes(state) do
+    args = ["list-panes", "-a", "-F", @observe_panes_format]
+
+    case run_tmux(state, args) do
+      {:ok, output} -> parse_observations(output)
+      {:error, _} = err -> err
+    end
+  end
+
+  defp do_show_options(state, target, option) do
+    run_tmux(state, ["show-options", "-t", target, "-v", option])
+  end
+
+  defp do_set_option(state, target, option, value) do
+    discard_ok(run_tmux(state, ["set-option", "-t", target, option, value]))
+  end
+
+  defp do_set_option_if_absent(state, target, option, value) do
+    case run_tmux(state, ["set-option", "-o", "-t", target, option, value]) do
+      {:ok, _} -> :ok
+      {:error, err} -> classify_conditional_set(err)
+    end
+  end
+
+  # tmux answers a `-o` write over an existing option with `already set: <option>`
+  # on stderr and a non-zero exit. That exact refusal is the typed result; any
+  # other failure (unknown target, missing binary) keeps the raw map so the
+  # caller can tell a lost race from an unreachable session.
+  defp classify_conditional_set(%{status: status, stderr: stderr} = err) do
+    if status > 0 and String.contains?(stderr, @option_exists_marker) do
+      {:error, :option_exists}
+    else
+      {:error, err}
     end
   end
 
@@ -344,6 +606,120 @@ defmodule AiPair.Tmux do
     end
   end
 
+  # ===== Strict census =====
+
+  # A trailing newline terminates the final row rather than starting an empty
+  # one, so exactly one is removed. Everything else that occupies a line is
+  # treated as a row: a blank line is reported as a row of the wrong width
+  # rather than skipped, because skipping it would shorten the census silently.
+  defp census_rows(""), do: []
+
+  defp census_rows(output) do
+    output
+    |> strip_row_terminator()
+    |> String.split("\n")
+  end
+
+  defp strip_row_terminator(output) do
+    if String.ends_with?(output, "\n") do
+      binary_part(output, 0, byte_size(output) - 1)
+    else
+      output
+    end
+  end
+
+  defp parse_rows([], _index, acc), do: {:ok, Enum.reverse(acc)}
+
+  defp parse_rows([row | rest], index, acc) do
+    case parse_row(String.split(row, "|"), index) do
+      {:ok, observation} -> parse_rows(rest, index + 1, [observation | acc])
+      {:error, _failure} = error -> error
+    end
+  end
+
+  # Field order here is the field order of @observe_panes_format, and the two
+  # are kept in step by @observation_arity rather than by inspection. The three
+  # free-text fields are percent-decoded with the same codec as list_panes/1;
+  # pane_id and session_id are framed raw by the format and read raw here.
+  defp parse_row(
+         [pane_id, session_id, session_name, window_index, pane_index, pane_pid, command, path],
+         _index
+       ) do
+    with {:ok, id} <- prefixed_field(:pane_id, "%", pane_id),
+         {:ok, session} <- prefixed_field(:session_id, "$", session_id),
+         {:ok, name} <- text_field(:session_name, decode_pane_field(session_name)),
+         {:ok, window} <- index_field(:window_index, window_index),
+         {:ok, pane} <- index_field(:pane_index, pane_index),
+         {:ok, pid} <- pid_field(pane_pid),
+         {:ok, cmd} <- text_field(:command, decode_pane_field(command)),
+         {:ok, cwd} <- text_field(:path, decode_pane_field(path)) do
+      {:ok,
+       %{
+         pane_id: id,
+         session_id: session,
+         session_name: name,
+         window_index: window,
+         pane_index: pane,
+         pane_pid: pid,
+         command: cmd,
+         path: cwd
+       }}
+    end
+  end
+
+  defp parse_row(fields, index) do
+    {:error, {:row_arity, @observation_arity, length(fields), index}}
+  end
+
+  # Presence is checked, because an empty field is a field tmux did not answer,
+  # and so is UTF-8 validity, because every consumer records these as text.
+  # Nothing more about the shape of a name, command or path is assumed.
+  defp text_field(key, field) do
+    if field != "" and String.valid?(field) do
+      {:ok, field}
+    else
+      {:error, {:malformed_text, key, field}}
+    end
+  end
+
+  # tmux mints pane ids as `%N` and session ids as `$N`. Only the sigil is
+  # checked: a caller comparing ids against recorded intent owns the rest.
+  defp prefixed_field(key, sigil, field) do
+    with {:ok, value} <- text_field(key, field) do
+      if String.starts_with?(value, sigil) and byte_size(value) > byte_size(sigil) do
+        {:ok, value}
+      else
+        {:error, {:malformed_text, key, value}}
+      end
+    end
+  end
+
+  defp index_field(key, field) do
+    case decimal(field) do
+      {:ok, value} -> {:ok, value}
+      :error -> {:error, {:malformed_index, key, field}}
+    end
+  end
+
+  # `Integer.parse/1` reads "12abc" as 12, and that 12 is then indistinguishable
+  # from a pid read correctly. The whole field must be the number, and 0 is no
+  # process.
+  defp pid_field(field) do
+    case decimal(field) do
+      {:ok, value} when value > 0 -> {:ok, value}
+      {:ok, 0} -> {:error, {:malformed_pid, field}}
+      :error -> {:error, {:malformed_pid, field}}
+    end
+  end
+
+  defp decimal(field) do
+    if Regex.match?(@decimal_format, field) do
+      {:ok, String.to_integer(field)}
+    else
+      :error
+    end
+  end
+
   # Generic wrapper for tmux ops without bespoke attribute helpers.
   # `capture`/`paste` keep their own `annotate_*` because they record
   # extra payload-shape attrs (bytes, line_count) that aren't useful
@@ -366,6 +742,52 @@ defmodule AiPair.Tmux do
     Tracer.set_attribute("tmux.exit_status", err.status)
     Tracer.set_attribute("tmux.error_class", classify_error(err))
     Tracer.set_status(:error, short_error(err))
+  end
+
+  # A refused conditional write is a typed outcome rather than an invocation
+  # failure: tmux exited 1 by design, so the class names the refusal.
+  defp annotate_tmux_result({:error, :option_exists}) do
+    Tracer.set_attribute("tmux.exit_status", 1)
+    Tracer.set_attribute("tmux.error_class", "option_exists")
+    Tracer.set_status(:error, "tmux exit=1: option already set")
+  end
+
+  defp annotate_observe({:ok, observations}) do
+    Tracer.set_attribute("tmux.exit_status", 0)
+    Tracer.set_attribute("census.pane_count", length(observations))
+  end
+
+  defp annotate_observe({:error, err}) when is_map(err) do
+    Tracer.set_attribute("tmux.exit_status", err.status)
+    Tracer.set_attribute("tmux.error_class", classify_error(err))
+    Tracer.set_status(:error, short_error(err))
+  end
+
+  # An unreadable census is not a failed invocation: tmux exited 0 and we could
+  # not read what it printed, so the kind of the typed reason is recorded
+  # instead of an exit status. An unrecognised reason raises here rather than
+  # being flattened into a generic error, which is how a new reason gets annotated.
+  defp annotate_observe({:error, failure}), do: annotate_census_failure(failure)
+
+  defp annotate_census_failure({:row_arity, expected, got, row}) do
+    census_error("row_arity", "row #{row} has #{got} fields, expected #{expected}")
+  end
+
+  defp annotate_census_failure({:malformed_pid, field}) do
+    census_error("malformed_pid", "pane_pid is not a positive decimal: #{inspect(field)}")
+  end
+
+  defp annotate_census_failure({:malformed_index, key, field}) do
+    census_error("malformed_index", "#{key} is not a decimal index: #{inspect(field)}")
+  end
+
+  defp annotate_census_failure({:malformed_text, key, field}) do
+    census_error("malformed_text", "#{key} is empty or not valid text: #{inspect(field)}")
+  end
+
+  defp census_error(kind, detail) do
+    Tracer.set_attribute("census.error_kind", kind)
+    Tracer.set_status(:error, "tmux census unreadable: #{detail}")
   end
 
   defp annotate_capture({:ok, output}) do

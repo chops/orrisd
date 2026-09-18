@@ -1,0 +1,1 @@
+#{pane_id}|#{session_id}|#{s/%/%25/;s/[|]/%7C/:session_name}|#{window_index}|#{pane_index}|#{pane_pid}|#{s/%/%25/;s/[|]/%7C/:pane_current_command}|#{s/%/%25/;s/[|]/%7C/:pane_current_path}

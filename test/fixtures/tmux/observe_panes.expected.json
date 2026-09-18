@@ -1,0 +1,32 @@
+[
+  {
+    "pane_id": "%0",
+    "session_id": "$0",
+    "session_name": "main",
+    "window_index": 0,
+    "pane_index": 0,
+    "pane_pid": 4242,
+    "command": "zsh",
+    "path": "/synthetic/home/project"
+  },
+  {
+    "pane_id": "%7",
+    "session_id": "$3",
+    "session_name": "pair | %z name",
+    "window_index": 1,
+    "pane_index": 2,
+    "pane_pid": 31337,
+    "command": "bash -lc \"echo hi%7Cx%25y\"",
+    "path": "/synthetic/path with spaces/and|bar"
+  },
+  {
+    "pane_id": "%12",
+    "session_id": "$5",
+    "session_name": "café 日本\ttab 'q'",
+    "window_index": 0,
+    "pane_index": 0,
+    "pane_pid": 999,
+    "command": "vim",
+    "path": "/synthetic/über/路径"
+  }
+]

@@ -1,0 +1,3 @@
+%0|$0|main|0|0|4242|zsh|/synthetic/home/project
+%7|$3|pair %7C %25z name|1|2|31337|bash -lc "echo hi%257Cx%2525y"|/synthetic/path with spaces/and%7Cbar
+%12|$5|café 日本	tab 'q'|0|0|999|vim|/synthetic/über/路径
