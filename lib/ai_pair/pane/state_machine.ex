@@ -26,6 +26,33 @@ defmodule AiPair.Pane.StateMachine do
   Tests pass `:capture_fn`, `:paste_fn`, and `:classifier` to drive
   transitions deterministically without a real tmux server. Production
   defaults wrap `AiPair.Tmux`.
+
+  ## Quarantine
+
+  A pane started with a `:quarantine_token` is *quarantined*: it is a
+  restored pane whose binding to an agent has not been re-established, so
+  it must not be written to. Quarantine is derived from start options at
+  `init/1` rather than set by a runtime call, so a `restart: :transient`
+  replacement comes back quarantined from the same child spec.
+
+  Quarantine suppresses EFFECTS ONLY. It never suppresses observation and
+  never suppresses the processing of events:
+
+    * every dispatch entry point is refused with `{:error, :pane_quarantined}`
+      — refused, not queued, because queued work would paste the moment the
+      gate opened;
+    * the debounce timer is still armed, still delivered and still CONSUMED;
+      the drain handler declines to paste and leaves the queue intact. Going
+      quiet instead (cancelling the timer, dropping the event) would destroy
+      the evidence an operator needs to see that the pane is still running;
+    * `state/1`, `status/1`, `get_info/1` and `pending_count/1` keep
+      answering truthfully.
+
+  The token is the operator's secret — it is what proves who may later
+  release the quarantine. It is held but never surfaced: `status/1` exposes
+  only the boolean `:quarantined`, and the token is never logged and never
+  placed in telemetry metadata. No release API ships here; this is the
+  field and the gate.
   """
 
   @behaviour :gen_statem
@@ -40,6 +67,14 @@ defmodule AiPair.Pane.StateMachine do
   @type capture_fn :: (pane_id() -> {:ok, binary()} | {:error, term()})
   @type paste_fn :: (pane_id(), binary() -> :ok | {:error, term()})
 
+  # The quarantine token is the operator's secret: it is what will later
+  # authorize releasing the pane. `status/1` already withholds it, but that
+  # only covers the callers who go through `status/1`. Redacting at the
+  # struct covers the paths nobody asserts on -- `:sys.get_state/1`, crash
+  # dumps, SASL supervisor reports, and any error tuple carrying the state.
+  # The field is untouched and quarantine still derives from it at `init/1`;
+  # only its rendering is suppressed.
+  @derive {Inspect, except: [:quarantine_token]}
   defstruct [
     :pane_id,
     :receipt_store,
@@ -57,6 +92,7 @@ defmodule AiPair.Pane.StateMachine do
     :pane_gone_grace_ms,
     :pane_gone_since_ms,
     :recovery_candidate,
+    :quarantine_token,
     recovering_capture: false,
     pending_sends: :queue.new(),
     pane_gone_count: 0
@@ -103,6 +139,9 @@ defmodule AiPair.Pane.StateMachine do
     * `{:queued, pane_state()}` — pane is in a non-idle state (busy/dialog/
       unknown); will drain on the next idle transition
     * `{:error, :pane_dead}` — pane is gone, never coming back
+    * `{:error, :pane_quarantined}` — the pane is quarantined (see the
+      "Quarantine" section above). Refused outright: NOT enqueued, because
+      a queued send would paste as soon as the gate opened.
     * `{:error, {:paste_failed, reason}}` — pane was eligible but the
       injected `paste_fn` returned `{:error, reason}` (tmux failure,
       buffer write refused, etc.). The state machine stays alive; the
@@ -121,6 +160,7 @@ defmodule AiPair.Pane.StateMachine do
           :ok
           | {:queued, :debounce | pane_state()}
           | {:error, :pane_dead}
+          | {:error, :pane_quarantined}
           | {:error, {:paste_failed, term()}}
           | {:error, {:queue_full, pos_integer()}}
   def send_text(server, text, timeout \\ @send_call_default_timeout_ms, msg_id \\ nil)
@@ -175,12 +215,17 @@ defmodule AiPair.Pane.StateMachine do
   Combined snapshot for orchestrators: state + pending queue depth + the
   same metadata `get_info/1` returns. Single atomic call so `pending_count`
   is consistent with `state` at the moment the SM replies.
+
+  `:quarantined` reports the FACT of quarantine and never the token that
+  established it: the token is the operator's secret and is deliberately
+  absent from this map, so `inspect/1` of a snapshot cannot leak it.
   """
   @spec status(:gen_statem.server_ref()) :: %{
           agent: String.t() | nil,
           classifier_name: String.t() | nil,
           state: pane_state(),
-          pending_count: non_neg_integer()
+          pending_count: non_neg_integer(),
+          quarantined: boolean()
         }
   def status(server), do: :gen_statem.call(server, :status)
 
@@ -214,7 +259,13 @@ defmodule AiPair.Pane.StateMachine do
           opts,
           :pane_gone_grace_ms,
           Application.get_env(:ai_pair, :pane_gone_grace_ms, @default_pane_gone_grace_ms)
-        )
+        ),
+      # DERIVED FROM START OPTIONS, never from a runtime call. A
+      # `restart: :transient` replacement is started from the same child
+      # spec (pane_supervisor.ex), so it comes back quarantined without
+      # anyone re-quarantining it — which is the only way containment can
+      # survive a crash.
+      quarantine_token: Keyword.get(opts, :quarantine_token)
     }
 
     {:ok, :unknown, data, [{{:timeout, :poll}, 0, nil}]}
@@ -317,6 +368,20 @@ defmodule AiPair.Pane.StateMachine do
 
   # ----- idle debounce expired: drain queued sends -----
 
+  # THE GUARD IS HERE, AT THE HANDLER, AND NOT AT THE ARMING SITE. The
+  # debounce timer is still armed on entering :idle, still delivered, and
+  # still CONSUMED by this clause — the state machine keeps running and an
+  # observer can still see it processing its own timers. What is suppressed
+  # is the paste, not the event. Declining to arm the timer would suppress
+  # the event instead, which looks identical from outside to a wedged pane.
+  #
+  # The queue is left INTACT: these entries are not discharged, they are
+  # held, and `pending_count/1` keeps reporting them.
+  def handle_event(:state_timeout, :drain_pending, :idle, data)
+      when not is_nil(:erlang.map_get(:quarantine_token, data)) do
+    :keep_state_and_data
+  end
+
   def handle_event(:state_timeout, :drain_pending, :idle, data) do
     rest = drain_queue(data, data.pending_sends)
     {:keep_state, %{data | pending_sends: rest}}
@@ -342,7 +407,11 @@ defmodule AiPair.Pane.StateMachine do
       agent: data.agent,
       classifier_name: data.classifier_name,
       state: state,
-      pending_count: :queue.len(data.pending_sends)
+      pending_count: :queue.len(data.pending_sends),
+      # The BOOLEAN only. Putting the token here would surface the
+      # operator's secret to every status caller, every IPC reply built
+      # from one, and every `inspect/1` of a snapshot.
+      quarantined: quarantined?(data)
     }
 
     {:keep_state_and_data, [{:reply, from, info}]}
@@ -350,6 +419,29 @@ defmodule AiPair.Pane.StateMachine do
 
   def handle_event(:cast, :mark_dead, _state, data) do
     {:next_state, :dead, settle_dead_queue(data), []}
+  end
+
+  # ----- quarantine: every dispatch entry point is refused -----
+
+  # Placed AHEAD of all three send clauses so the refusal is reached before
+  # any state-dependent admission: before the receipt store is consulted
+  # (a refused send must not be admitted, or it would hold a receipt it can
+  # never discharge), and before the non-idle queueing path (queued work
+  # would paste the instant the pane reached idle, which is exactly the
+  # effect quarantine exists to prevent).
+  #
+  # Matching on the request TAG rather than on each shape keeps this single
+  # clause total over the dispatch surface: a fourth entry point cannot be
+  # added without either appearing in this list or failing to compile a
+  # reachable clause below it.
+  #
+  # The reply is TYPED and names the reason. A bare `{:error, :refused}` —
+  # or worse, a silent `:ok` with no paste — would leave an operator unable
+  # to tell a quarantined pane from a broken one.
+  def handle_event({:call, from}, request, _state, data)
+      when not is_nil(:erlang.map_get(:quarantine_token, data)) and is_tuple(request) and
+             elem(request, 0) in [:send_text, :send_untracked, :send_receipted] do
+    {:keep_state_and_data, [{:reply, from, {:error, :pane_quarantined}}]}
   end
 
   # ----- send_text per state -----
@@ -560,6 +652,11 @@ defmodule AiPair.Pane.StateMachine do
   end
 
   defp queue_full?(%{pending_sends: q}), do: :queue.len(q) >= @max_pending_sends
+
+  # Presence of the token IS the quarantine. Nothing reads the token's
+  # value; it is held so that a future release path can require it.
+  defp quarantined?(%{quarantine_token: nil}), do: false
+  defp quarantined?(%{quarantine_token: _token}), do: true
 
   defp settle_dead_queue(data) do
     remaining =
