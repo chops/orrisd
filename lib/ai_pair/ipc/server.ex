@@ -25,11 +25,59 @@ defmodule AiPair.IPC.Server do
   Command dispatch covers `ping`, `attach_pane`, `send`, `pane_status`,
   and `detach_pane` — each wrapped in an OTel span and re-routed to the
   appropriate pane via `AiPair.PaneSupervisor` / `AiPair.Pane.StateMachine`.
+
+  ## Durable attach
+
+  Contract: `docs/contracts/durable-attach-detach.org`. Durability is a
+  daemon-wide setting (`Application.get_env(:ai_pair, :durable_attachments) ==
+  true`, a literal `true` and nothing else), re-read for every dispatch, while
+  the boot generation is fixed once at server start. With the setting unset
+  every reply below is byte-for-byte the legacy one and no coordinator, marker
+  or store is consulted.
+
+  An `attach_pane` frame carrying `"durable": true` asks for the attachment to
+  be RECORDED as well as started. Three rules shape that path.
+
+  A durable request that cannot be honoured is refused BEFORE any effect. The
+  metadata gate, the store lookup, the pane fence, the pane observation and the
+  marker all run before a state machine is started and before anything is
+  written, so a refusal leaves nothing half-done to explain.
+
+  Nothing is invented to satisfy the record schema. A request with no agent is
+  refused rather than stored with a sentinel, and the fields describing the pane
+  itself are taken from ONE tmux census row or not taken at all — an
+  unobservable pane is refused, because a fabricated `pane_pid` is
+  indistinguishable to every later reader from one that was measured.
+
+  The first owner's identity wins. When a state machine already runs for the
+  pane, the record carries ITS agent and classifier, never the second caller's.
+
+  `persist_outcome` reports what the store said about disk. `persisted` is the
+  stronger claim and is emitted only where a commit was observed to complete.
+
+  ## Durable withdrawal
+
+  A `detach_pane` frame carries no durability flag, because withdrawal is not a
+  per-request choice: if this daemon records attachments at all, a detach that
+  left the record behind would be reasserted at the next boot.
+
+  Three answers are kept apart. A lookup that SUCCEEDED and found no record is
+  `"skipped"`. A lookup that could not answer at all — no store owner, or an
+  owner that refused the read — is `"uncertain"`, and it may not be spelled
+  `pane_not_found`, because reporting a store we could not reach as an
+  authoritative absence is exactly the collapse this boundary exists to prevent.
+
+  The record is withdrawn BEFORE the pane child is stopped, mirroring the attach
+  order: a withdrawal whose durable half failed leaves no daemon-side effect to
+  explain. `repair_required` means the requested effect did not take effect and
+  nothing retries it.
   """
 
   use GenServer
 
   alias AiPair.IPC.Delivery
+  alias AiPair.PaneRestore.Coordinator
+  alias AiPair.PaneRestore.Marker
 
   require Logger
   require OpenTelemetry.Tracer, as: Tracer
@@ -45,13 +93,18 @@ defmodule AiPair.IPC.Server do
   def start_link(opts) do
     name = Keyword.get(opts, :name, __MODULE__)
 
-    if Delivery.available?(Keyword.get(opts, :receipt_store)),
-      do: GenServer.start_link(__MODULE__, opts, name: name),
-      else: {:error, :receipt_store_unavailable}
+    if Delivery.available?(Keyword.get(opts, :receipt_store)) do
+      # The generation is validated HERE so a bad one raises in the caller
+      # rather than being reported as an opaque init failure, and it is fixed
+      # once: a later flip of `:durable_attachments` cannot manufacture one.
+      GenServer.start_link(__MODULE__, {opts, server_context!(opts)}, name: name)
+    else
+      {:error, :receipt_store_unavailable}
+    end
   end
 
   @impl true
-  def init(opts) do
+  def init({opts, context}) do
     Process.flag(:trap_exit, true)
     inbox = Keyword.fetch!(opts, :inbox)
     sock_path = Path.join(inbox, @sock_subpath)
@@ -60,7 +113,7 @@ defmodule AiPair.IPC.Server do
          :ok <- unlink_stale(sock_path),
          {:ok, listen_socket} <- :gen_tcp.listen(0, listen_opts(sock_path)),
          :ok <- File.chmod(sock_path, 0o600),
-         {:ok, acceptor} <- start_acceptor(listen_socket, Keyword.fetch!(opts, :receipt_store)) do
+         {:ok, acceptor} <- start_acceptor(listen_socket, context) do
       Logger.info("ai-pair IPC listening at #{sock_path}")
       {:ok, %{listen: listen_socket, sock_path: sock_path, acceptor: acceptor}}
     else
@@ -117,21 +170,21 @@ defmodule AiPair.IPC.Server do
     end
   end
 
-  defp start_acceptor(listen_socket, store) do
+  defp start_acceptor(listen_socket, context) do
     parent = self()
-    pid = :proc_lib.spawn_link(fn -> accept_loop(parent, listen_socket, store) end)
+    pid = :proc_lib.spawn_link(fn -> accept_loop(parent, listen_socket, context) end)
     {:ok, pid}
   end
 
-  defp accept_loop(parent, listen, store) do
+  defp accept_loop(parent, listen, context) do
     case :gen_tcp.accept(listen) do
       {:ok, client} ->
-        case spawn_handler(client, store) do
+        case spawn_handler(client, context) do
           {:ok, _handler_pid} -> :ok
           {:error, _reason} -> :gen_tcp.close(client)
         end
 
-        accept_loop(parent, listen, store)
+        accept_loop(parent, listen, context)
 
       {:error, :closed} ->
         :ok
@@ -141,10 +194,10 @@ defmodule AiPair.IPC.Server do
     end
   end
 
-  defp spawn_handler(client, store) do
+  defp spawn_handler(client, context) do
     case Task.Supervisor.start_child(AiPair.IPC.ConnectionSupervisor, fn ->
            receive do
-             :go -> handle_connection(client, store)
+             :go -> handle_connection(client, context)
            after
              @handler_recv_timeout_ms -> :gen_tcp.close(client)
            end
@@ -165,10 +218,10 @@ defmodule AiPair.IPC.Server do
     end
   end
 
-  defp handle_connection(client, store) do
+  defp handle_connection(client, context) do
     case :gen_tcp.recv(client, 0, @handler_recv_timeout_ms) do
       {:ok, frame} ->
-        :gen_tcp.send(client, handle_frame(frame, store))
+        :gen_tcp.send(client, handle_frame(frame, context))
         :gen_tcp.close(client)
 
       {:error, _reason} ->
@@ -176,7 +229,7 @@ defmodule AiPair.IPC.Server do
     end
   end
 
-  defp handle_frame(frame, store) do
+  defp handle_frame(frame, context) do
     case Jason.decode(frame) do
       {:ok, decoded} ->
         # Pull any W3C traceparent/tracestate the CLI injected so each
@@ -186,7 +239,7 @@ defmodule AiPair.IPC.Server do
         token = extract_remote_ctx(decoded)
 
         try do
-          dispatch_version(decoded, store)
+          dispatch_version(decoded, context)
         after
           if token, do: :otel_ctx.detach(token)
         end
@@ -214,15 +267,20 @@ defmodule AiPair.IPC.Server do
 
   defp extract_remote_ctx(_), do: nil
 
-  defp dispatch_version(params, store) when is_map(params) do
+  defp dispatch_version(params, %{receipt_store: store} = context) when is_map(params) do
     case Map.get(params, "protocol_version", 1) do
-      1 -> do_dispatch(Map.put(params, :receipt_store, store))
-      2 -> Jason.encode!(Delivery.dispatch(params, store))
-      _ -> Jason.encode!(Delivery.unsupported(params))
+      1 ->
+        do_dispatch(params |> Map.put(:receipt_store, store) |> Map.put(:durable_context, context))
+
+      2 ->
+        Jason.encode!(Delivery.dispatch(params, store))
+
+      _ ->
+        Jason.encode!(Delivery.unsupported(params))
     end
   end
 
-  defp dispatch_version(other, _store), do: do_dispatch(other)
+  defp dispatch_version(other, _context), do: do_dispatch(other)
 
   defp do_dispatch(%{"cmd" => "ping"}) do
     Tracer.with_span "ipc.ping", %{kind: :server} do
@@ -238,7 +296,7 @@ defmodule AiPair.IPC.Server do
       kind: :server,
       attributes: drop_nils(%{"pane.id" => pane_id, "pane.agent" => agent})
     } do
-      result = attach_pane(pane_id, agent, Map.fetch!(params, :receipt_store))
+      result = dispatch_attach(params, pane_id, agent)
       annotate_outcome(result)
       Tracer.set_attributes(drop_nils(attach_attrs(result)))
       Jason.encode!(result)
@@ -284,13 +342,13 @@ defmodule AiPair.IPC.Server do
     end
   end
 
-  defp do_dispatch(%{"cmd" => "detach_pane", "pane_id" => pane_id})
+  defp do_dispatch(%{"cmd" => "detach_pane", "pane_id" => pane_id} = params)
        when is_binary(pane_id) and pane_id != "" do
     Tracer.with_span "ipc.detach_pane", %{
       kind: :server,
       attributes: drop_nils(%{"pane.id" => pane_id})
     } do
-      result = detach_pane(pane_id)
+      result = detach_pane(pane_id, Map.fetch!(params, :durable_context))
       annotate_outcome(result)
       Tracer.set_attributes(drop_nils(detach_attrs(result)))
       Jason.encode!(result)
@@ -384,11 +442,13 @@ defmodule AiPair.IPC.Server do
     |> Map.new()
   end
 
-  defp attach_pane(pane_id, agent, store) when agent == nil or is_binary(agent) do
+  defp attach_pane(pane_id, agent, store, fenced \\ false)
+
+  defp attach_pane(pane_id, agent, store, fenced) when agent == nil or is_binary(agent) do
     resolved = resolve_classifier(agent)
     start_opts = build_start_opts(agent, resolved) |> Keyword.put(:receipt_store, store)
 
-    case AiPair.PaneSupervisor.start_pane(pane_id, start_opts) do
+    case start_registered_pane(pane_id, start_opts, fenced) do
       {:ok, pid} ->
         reply(pane_id, true, pane_state(pid), agent, resolved)
 
@@ -409,7 +469,7 @@ defmodule AiPair.IPC.Server do
     end
   end
 
-  defp attach_pane(pane_id, _agent, _store) do
+  defp attach_pane(pane_id, _agent, _store, _fenced) do
     %{ok: false, pane_id: pane_id, error: "agent must be a string"}
   end
 
@@ -608,7 +668,25 @@ defmodule AiPair.IPC.Server do
     end
   end
 
-  defp detach_pane(pane_id) do
+  defp detach_pane(pane_id, context) do
+    cond do
+      not durable_enabled?() -> legacy_detach(pane_id)
+      context.boot_generation == nil -> unavailable_detach(pane_id)
+      true -> lifecycle_transaction(pane_id, fn -> durable_detach(pane_id) end)
+    end
+  end
+
+  defp unavailable_detach(pane_id) do
+    %{
+      ok: false,
+      pane_id: pane_id,
+      error: "durable_unavailable",
+      persist_outcome: "uncertain",
+      repair_required: true
+    }
+  end
+
+  defp legacy_detach(pane_id) do
     case AiPair.PaneSupervisor.whereis_pane(pane_id) do
       :error ->
         %{ok: false, pane_id: pane_id, error: "pane_not_found"}
@@ -632,5 +710,524 @@ defmodule AiPair.IPC.Server do
     catch
       :exit, _ -> %{agent: nil, classifier_name: nil, state: :unknown}
     end
+  end
+
+  # ------------------------------------------------------------------ durable
+
+  # Mode is read for each dispatch, while the trusted boot generation is fixed.
+  # Disabling mode restores ordinary legacy behaviour on this same IPC server.
+  defp dispatch_attach(params, pane_id, agent) do
+    context = Map.fetch!(params, :durable_context)
+    explicit_durable = Map.get(params, "durable") == true
+
+    cond do
+      not durable_enabled?() ->
+        if explicit_durable,
+          do: disabled_durable_attach(pane_id, agent),
+          else: attach_pane(pane_id, agent, context.receipt_store)
+
+      context.boot_generation == nil ->
+        unavailable_attach(pane_id, agent, explicit_durable)
+
+      true ->
+        lifecycle_transaction(pane_id, fn ->
+          if explicit_durable,
+            do: durable_attach_enabled(pane_id, agent, context),
+            else: attach_pane(pane_id, agent, context.receipt_store, true)
+        end)
+    end
+  end
+
+  defp durable_enabled?, do: Application.get_env(:ai_pair, :durable_attachments) == true
+
+  # A server started in legacy mode never captured a durable generation. Later
+  # enabling the feature cannot manufacture one, even from a new env override.
+  # Explicit durable requests still receive their metadata errors first.
+  defp unavailable_attach(pane_id, agent, true) do
+    case durable_missing(agent, configured_binding()) do
+      [] ->
+        unavailable_attach(pane_id, agent, false)
+
+      missing ->
+        %{ok: false, pane_id: pane_id, error: "durable_metadata_missing", missing: missing}
+    end
+  end
+
+  defp unavailable_attach(pane_id, _agent, false),
+    do: %{ok: false, pane_id: pane_id, error: "durable_unavailable"}
+
+  # Preserve metadata validation and the store lookup in disabled mode. A store
+  # that happens to exist is not enrolment in durable lifecycle ownership.
+  # Neither outcome may consult Coordinator or mutate a marker, record or pane.
+  defp disabled_durable_attach(pane_id, agent) do
+    binding = configured_binding()
+
+    case durable_missing(agent, binding) do
+      [] ->
+        case durable_store(binding.project_inbox) do
+          :error -> unavailable_attach(pane_id, agent, false)
+          {:ok, _store} -> unavailable_attach(pane_id, agent, false)
+        end
+
+      missing ->
+        %{ok: false, pane_id: pane_id, error: "durable_metadata_missing", missing: missing}
+    end
+  end
+
+  # A binding that is not the exact three-field map is no binding. It is read as
+  # absent rather than partially adopted, so the missing fields are NAMED to the
+  # caller instead of being filled in from whatever happened to be configured.
+  defp configured_binding do
+    case Application.get_env(:ai_pair, :project_binding) do
+      %{project: project, project_dir: dir, project_inbox: inbox} ->
+        %{project: project, project_dir: dir, project_inbox: inbox}
+
+      _other ->
+        %{project: nil, project_dir: nil, project_inbox: nil}
+    end
+  end
+
+  # Every missing field is reported, not just the first one found: a caller
+  # repairing its request needs the whole list. "agent" appears whenever the
+  # request carried none, because the alternative — storing "unknown" in the one
+  # field whose entire purpose is an identity hint — is a lie the store would
+  # then make permanent.
+  defp durable_missing(agent, binding) do
+    checks = [
+      {"agent", durable_text?(agent)},
+      {"project", durable_text?(binding.project)},
+      {"project_dir", durable_path?(binding.project_dir)},
+      {"project_inbox", durable_path?(binding.project_inbox)}
+    ]
+
+    for {field, false} <- checks, do: field
+  end
+
+  defp durable_text?(value), do: is_binary(value) and value != "" and String.valid?(value)
+
+  defp durable_path?(value), do: durable_text?(value) and Path.type(value) == :absolute
+
+  # The store owner registers itself globally under its canonical root
+  # (`pane_intent_store.ex`, `claim_then_start/3`). No owner is not an empty
+  # store: it is no store at all, and the request is refused before a pane is
+  # started rather than started and then reported as unrecorded.
+  defp durable_store(root) do
+    case :global.whereis_name({AiPair.PaneIntentStore, Path.expand(root)}) do
+      :undefined -> :error
+      pid -> {:ok, pid}
+    end
+  end
+
+  # FIRST OWNER WINS. A running state machine is the identity the daemon
+  # actually holds, and `attach_pane/4` already reports it on a duplicate
+  # attach. Recording the second caller's agent instead would overwrite a fact
+  # with a claim no process ever carried, which defeats the reason the record is
+  # on disk at all.
+  defp durable_owner(pane_id, agent) do
+    case AiPair.PaneSupervisor.whereis_pane(pane_id) do
+      {:ok, pid} ->
+        info = pane_info(pid)
+        %{agent: info.agent, classifier: info.classifier_name || "stub"}
+
+      :error ->
+        %{agent: agent, classifier: durable_classifier(resolve_classifier(agent))}
+    end
+  end
+
+  defp durable_classifier({:ok, _classifier_fn, name}), do: name
+  defp durable_classifier({:fallback, _reason}), do: "stub"
+
+  defp census(adapter) do
+    case AiPair.Tmux.observe_panes(adapter) do
+      {:ok, observations} -> {:ok, observations}
+      {:error, _reason} -> :error
+    end
+  catch
+    # A stopped or unresponsive adapter means the query could not be made, which
+    # is not evidence about the pane either way.
+    :exit, _reason -> :error
+  end
+
+  # The pane facts come from ONE census row and nowhere else. There is no
+  # per-field fallback, because a record mixing measured and guessed fields is
+  # indistinguishable downstream from one that was wholly measured.
+  defp durable_record(pane_id, owner, binding, observation, generation) do
+    %{
+      "schema_version" => AiPair.PaneIntentStore.Record.version(),
+      "pane_id" => pane_id,
+      "agent" => owner.agent,
+      "classifier" => owner.classifier,
+      "project" => binding.project,
+      "project_dir" => binding.project_dir,
+      "project_inbox" => binding.project_inbox,
+      "tmux_session" => observation.session_name,
+      "session_gen" => generation,
+      "cwd" => observation.path,
+      "command" => observation.command,
+      "pane_pid" => observation.pane_pid,
+      "updated_at" => DateTime.to_iso8601(DateTime.utc_now())
+    }
+  end
+
+  # -------------------------------------------------------- durable withdrawal
+
+  # Only a literal `true` records attachments, so only the daemon-wide setting
+  # withdraws them. There is no `durable` key on a detach frame.
+  defp durable_detach(pane_id) do
+    case durable_detach_store() do
+      {:ok, store} ->
+        withdraw_intent(pane_id, store)
+
+      :error ->
+        # NOT `pane_not_found`. No owner is not an empty store; it is no store at
+        # all, and nothing may be claimed about disk in either direction.
+        %{
+          ok: false,
+          pane_id: pane_id,
+          error: "durable_unavailable",
+          persist_outcome: "uncertain",
+          repair_required: true
+        }
+    end
+  end
+
+  # A binding we cannot read gives us no root to look under, which is the same
+  # inability as a missing owner and is reported the same way — never as an
+  # absence we did not measure.
+  defp durable_detach_store do
+    inbox = configured_binding().project_inbox
+
+    if durable_path?(inbox), do: durable_store(inbox), else: :error
+  end
+
+  # The two refusals below differ in what was MEASURED, not in how they ended.
+  # `skipped` is an answer: the store was read and holds no such record, so
+  # nothing was attempted and nothing needs repair. `uncertain` is the absence of
+  # an answer. Collapsing them would report a store we never read as proof the
+  # pane was never recorded.
+  defp withdraw_intent(pane_id, store) do
+    case recorded_intent(store, pane_id) do
+      {:ok, true} ->
+        remove_intent(pane_id, store)
+
+      {:ok, false} ->
+        %{
+          ok: false,
+          pane_id: pane_id,
+          error: "pane_not_found",
+          persist_outcome: "skipped"
+        }
+
+      :unknown ->
+        %{
+          ok: false,
+          pane_id: pane_id,
+          error: "durable_lookup_failed",
+          persist_outcome: "uncertain",
+          repair_required: true
+        }
+    end
+  end
+
+  # A read that FAILED is not a read that found nothing. A poisoned owner and a
+  # call that exits both leave the record's existence unknown, and an unknown is
+  # propagated as one rather than defaulted to either side.
+  defp recorded_intent(store, pane_id) do
+    case AiPair.PaneIntentStore.list(store) do
+      {:ok, records} -> {:ok, Enum.any?(records, &(&1["pane_id"] == pane_id))}
+      {:error, _reason} -> :unknown
+    end
+  catch
+    :exit, {:timeout, _} -> throw({:store_timeout, :list})
+    :exit, _reason -> :unknown
+  end
+
+  # ORDER IS THE CONTRACT, as it is on attach. The record goes first and the pane
+  # child is stopped only after the store confirmed the commit, so a withdrawal
+  # whose durable half failed leaves no daemon-side effect behind to explain.
+  #
+  # `persisted` is emitted only here, where a commit was observed to complete.
+  # Both failure outcomes carry `persist_outcome` alone and say repair is
+  # required: the operator asked for a withdrawal that did not happen, and
+  # nothing retries it.
+  defp remove_intent(pane_id, store) do
+    case delete_intent(store, pane_id) do
+      :ok ->
+        %{
+          ok: true,
+          pane_id: pane_id,
+          status: "intent_withdrawn",
+          pane_registered: stop_registered_pane(pane_id),
+          persisted: true,
+          persist_outcome: "committed"
+        }
+
+      {:error, outcome, stage} ->
+        %{
+          ok: false,
+          pane_id: pane_id,
+          persist_stage: stage,
+          error: "durable_withdrawal_failed",
+          status: "withdrawal_failed",
+          persist_outcome: outcome,
+          repair_required: true
+        }
+    end
+  end
+
+  # A call that exits is an UNKNOWN result, never an unchanged one: the owner may
+  # have committed and then died.
+  defp delete_intent(store, pane_id) do
+    case AiPair.PaneIntentStore.delete(store, pane_id) do
+      :ok ->
+        :ok
+
+      {:error, %{outcome: outcome, stage: stage}} ->
+        {:error, Atom.to_string(outcome), Atom.to_string(stage)}
+    end
+  catch
+    :exit, {:timeout, _} -> throw({:store_timeout, :delete})
+    :exit, _reason -> {:error, "uncertain", "delete"}
+  end
+
+  # Reports whether a daemon pane CHILD was registered for this pane and has
+  # therefore been stopped. It describes the child only — a tmux pane is not
+  # killed by a detach — and a record withdrawn with no running child is the
+  # ordinary post-restart shape, not an error.
+  defp stop_registered_pane(pane_id) do
+    case AiPair.PaneSupervisor.whereis_pane(pane_id) do
+      :error ->
+        false
+
+      {:ok, pid} ->
+        case Coordinator.submit(pane_id, AiPair.PaneSupervisor, {:terminate_child, pid}, :infinity) do
+          {:ok, :ok} -> true
+          {:ok, {:error, :not_found}} -> false
+          {:error, reason} -> throw({:lifecycle_stop_failed, reason})
+        end
+    end
+  end
+
+  # ------------------------------------------------------------- the mode gate
+
+  defp server_context!(opts) do
+    durable = durable_enabled?()
+    generation = if durable, do: Keyword.fetch!(opts, :boot_generation), else: nil
+
+    if durable and not (is_binary(generation) and Regex.match?(~r/\A[0-9]+\z/, generation)) do
+      raise ArgumentError, "boot_generation must be a nonempty ASCII decimal string"
+    end
+
+    %{
+      receipt_store: Keyword.fetch!(opts, :receipt_store),
+      boot_generation: generation
+    }
+  end
+
+  # In durable mode EVERY mutating pane-lifecycle frame goes through the fence,
+  # legacy-shaped frames included: the fence is per pane, not per feature.
+  defp lifecycle_transaction(pane, fun) do
+    result =
+      Coordinator.transaction(pane, fn ->
+        try do
+          {:ok, fun.()}
+        catch
+          :throw, {:store_timeout, stage} ->
+            {:unresolved, {:store_timeout, stage}}
+
+          :throw, {:lifecycle_stop_failed, reason} ->
+            {:ok,
+             %{
+               ok: false,
+               pane_id: pane,
+               error: "coordinator_unavailable",
+               coordinator_error: inspect(reason),
+               repair_required: true,
+               persist_outcome: "committed"
+             }}
+        end
+      end)
+
+    case result do
+      {:ok, reply} ->
+        reply
+
+      {:unresolved, cause} ->
+        unresolved_reply(pane, cause)
+
+      {:error, reason} ->
+        %{ok: false, pane_id: pane, error: Atom.to_string(reason)}
+
+      {:fence_update_failed, body, reason} ->
+        reply =
+          case body do
+            {:ok, reply} -> reply
+            {:unresolved, cause} -> unresolved_reply(pane, cause)
+          end
+
+        # OQ-1 of the contract: `body_error` is emitted even when the body
+        # SUCCEEDED, where it is `nil` and encodes as JSON `null`. That is the
+        # shape `attach.error.fence_update_failed.json` pins, so it is what this
+        # producer emits; the contradiction with the contract's
+        # absence-is-the-discriminator rule is recorded, not silently resolved.
+        reply
+        |> Map.delete(:persisted)
+        |> Map.put(:ok, false)
+        |> Map.put(:body_error, Map.get(reply, :error))
+        |> Map.put(:error, "coordinator_unavailable")
+        |> Map.put(:coordinator_error, inspect(reason))
+        |> Map.put(:repair_required, true)
+    end
+  end
+
+  defp unresolved_reply(pane, {:store_timeout, stage}) do
+    %{
+      ok: false,
+      pane_id: pane,
+      error: "durable_store_timeout",
+      repair_required: true,
+      persist_outcome: "uncertain",
+      persist_stage: Atom.to_string(stage)
+    }
+  end
+
+  defp start_registered_pane(pane, opts, fenced) do
+    # A fenced caller already holds the shared Coordinator transaction, whose
+    # public submit API pins and reuses that holder's admitting incarnation.
+    if fenced do
+      sm_opts = [pane_id: pane, name: AiPair.PaneSupervisor.via_pane(pane)] ++ opts
+
+      spec =
+        {{AiPair.Pane.StateMachine, :start_link, [sm_opts]}, :transient, 5_000, :worker,
+         [AiPair.Pane.StateMachine]}
+
+      case Coordinator.submit(pane, AiPair.PaneSupervisor, {:start_child, spec}, :infinity) do
+        {:ok, result} -> result
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      AiPair.PaneSupervisor.start_pane(pane, opts)
+    end
+  end
+
+  defp durable_attach_enabled(pane, agent, context) do
+    binding = configured_binding()
+
+    case durable_missing(agent, binding) do
+      [] ->
+        case durable_store(binding.project_inbox) do
+          {:ok, store} -> durable_commit_enabled(pane, agent, binding, store, context)
+          :error -> %{ok: false, pane_id: pane, error: "durable_unavailable"}
+        end
+
+      missing ->
+        %{ok: false, pane_id: pane, error: "durable_metadata_missing", missing: missing}
+    end
+  end
+
+  defp durable_commit_enabled(pane, agent, binding, store, context) do
+    owner = durable_owner(pane, agent)
+    tmux = Application.get_env(:ai_pair, :tmux_server, AiPair.Tmux)
+
+    with {:ok, observed} <- observe_unique_pane(pane, tmux),
+         :ok <-
+           Marker.ensure(tmux, observed.session_id,
+             owner_root: binding.project_inbox,
+             generation: context.boot_generation
+           ),
+         {:ok, marker} <- Marker.read(tmux, observed.session_id),
+         :ok <- validate_attach_marker(marker, observed, binding),
+         {:ok, fresh} <- observe_unique_pane(pane, tmux),
+         :ok <- unchanged_attach_source(observed, fresh),
+         {:ok, fresh_marker} <- Marker.read(tmux, fresh.session_id),
+         :ok <- unchanged_attach_marker(marker, fresh_marker) do
+      reply = attach_pane(pane, agent, context.receipt_store, true)
+
+      if reply.ok do
+        record = durable_record(pane, owner, binding, fresh, fresh_marker.generation)
+
+        case persist_enabled(store, record) do
+          :ok ->
+            Map.merge(reply, %{persisted: true, persist_outcome: "committed"})
+
+          {:error, outcome, stage} ->
+            %{
+              ok: false,
+              pane_id: pane,
+              error: "durable_write_failed",
+              persist_outcome: outcome,
+              persist_stage: stage,
+              repair_required: true
+            }
+        end
+      else
+        reply
+      end
+    else
+      {:error, :observation, error} -> %{ok: false, pane_id: pane, error: error}
+      {:error, marker_error} -> marker_refusal(pane, marker_error)
+    end
+  end
+
+  defp observe_unique_pane(pane, tmux) do
+    case census(tmux) do
+      {:ok, rows} ->
+        case Enum.filter(rows, &(&1.pane_id == pane)) do
+          [observation] -> {:ok, observation}
+          [] -> {:error, :observation, "durable_pane_unobserved"}
+          _ambiguous -> {:error, :observation, "durable_observation_ambiguous"}
+        end
+
+      :error ->
+        {:error, :observation, "durable_observation_unavailable"}
+    end
+  end
+
+  defp validate_attach_marker(marker, observation, binding) do
+    cond do
+      marker.owner_root != binding.project_inbox -> {:error, {:marker_foreign, marker.owner_root}}
+      marker.session_id != observation.session_id -> {:error, {:session_mismatch}}
+      true -> :ok
+    end
+  end
+
+  defp unchanged_attach_source(same, same), do: :ok
+
+  defp unchanged_attach_source(_fresh, _snapshot),
+    do: {:error, :observation, "durable_observation_changed"}
+
+  defp unchanged_attach_marker(same, same), do: :ok
+  defp unchanged_attach_marker(_fresh, _snapshot), do: {:error, {:marker_changed}}
+
+  defp marker_refusal(pane, finding) do
+    error =
+      case finding do
+        {:source_error, :marker, _reason} -> "marker_unavailable"
+        {:source_unavailable, :marker} -> "marker_unavailable"
+        {:marker_foreign, _root} -> "marker_foreign"
+        {:marker_absent} -> "marker_absent"
+        {:marker_malformed, _raw} -> "marker_malformed"
+        {:session_mismatch} -> "session_mismatch"
+        {:marker_changed} -> "marker_changed"
+      end
+
+    reply = %{ok: false, pane_id: pane, error: error}
+
+    if error == "marker_unavailable",
+      do: Map.put(reply, :persist_outcome, "uncertain"),
+      else: reply
+  end
+
+  defp persist_enabled(store, record) do
+    case AiPair.PaneIntentStore.put(store, record) do
+      :ok ->
+        :ok
+
+      {:error, %{outcome: outcome, stage: stage}} ->
+        {:error, Atom.to_string(outcome), Atom.to_string(stage)}
+    end
+  catch
+    :exit, {:timeout, _} -> throw({:store_timeout, :put})
+    :exit, _reason -> {:error, "uncertain", "put"}
   end
 end
