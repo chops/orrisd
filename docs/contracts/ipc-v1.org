@@ -92,6 +92,57 @@ the other way round: [[./ipc-v2.org][the version 2 contract]] vendors the
 consumer document verbatim and pins its revision and digest, so the producer
 and the consumer read one text rather than two.
 
+*** What the v1 difference actually is, measured 2026-09-19
+:PROPERTIES:
+:CUSTOM_ID: v1-document-difference
+:END:
+Recorded here rather than left as a bare hash mismatch. Measured with ~diff -u~
+of this file against ~docs/contracts/ipc-v1.org~ at orris
+~3684f53e~ (that copy digests to
+~485b0ec8ae851b104a03b7dbf5d4c5dc6c10da5400adb2aea695505fff08b545~). The two
+texts differ in five places and agree everywhere else -- the whole "Framing and
+version" list, the whole fifteen-row fixture table and all four steps of the
+hash rule are byte-identical:
+
+1. Opening. This copy says the reply shapes are the ones "this daemon
+   produces". The consumer copy opens with an "Implementation status" section
+   naming ~AiOrchestrator.Dispatch.PaneClient~, ~lib/ai_orchestrator/dispatch/pane_client.ex~
+   and ~test/dispatch/pane_client_contract_test.exs~. Each statement is true of
+   the repository that makes it and false of the other.
+2. The ~queued~ / ~queue_full~ closing sentence. Here: consumer behaviour "is
+   defined by the consumer's own contract". There: "A later revision defines
+   consumer behavior for each outcome (see ~ipc-v2.org~)". Same fact, two
+   wordings.
+3. The first sentence of "Hash". Here it notes that the Orris consumer pins the
+   same bytes; there it names the fixture directory. The RULE itself is
+   identical, which resolves the earlier open question about whether only one
+   copy stated it.
+4. This "Paired revision" section exists only here. It is a producer statement
+   about the consumer, and could not be adopted by the consumer unchanged.
+5. "Planned protocol version 2 changes". Here v2 is described as implementing
+   explicit ~protocol_version~, capability advertisement, ~msg_id~ echo and
+   incompatible-peer rejection, with subscription reserved. There they are
+   "targets, not v1 facts" that "require a contract revision and fixtures
+   before implementation". Version 2 IS delivered on both sides -- the vendored
+   consumer text in [[./ipc-v2.org][the version 2 contract]] opens with "The
+   consumer side of this contract is delivered" -- so the consumer wording is
+   the one that is behind. Both agree subscription is not in v2.
+
+CLASSIFICATION: this is not one document lagging the other, and neither may be
+adopted wholesale. Differences 1 and 4 are repository-specific facts that would
+become FALSE statements if copied across; difference 5 is a real staleness, and
+it is in the OTHER repository, which this repository cannot fix. Differences 2
+and 3 are equivalent restatements with no disagreement in them.
+
+DECISION OWED, and deliberately not taken here: whether v1 should be restructured
+the way v2 was -- one authored text vendored verbatim with each repository's
+own statements outside a digested region -- and if so which repository authors
+it. That is a reviewed change in BOTH repositories, so a single-repository lane
+cannot make it; picking a winner unilaterally would delete true statements from
+one side. Until it is taken, the two v1 documents remain different texts and
+the fixtures, their ~CONTRACT_HASH~ and the hash rule remain the shared,
+verifiable part.
+
 ** Planned protocol version 2 changes
 :PROPERTIES:
 :CUSTOM_ID: planned-protocol-version-2-changes
