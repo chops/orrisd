@@ -2,7 +2,8 @@ defmodule AiPair.Delivery.IPCIdentityGrammarTest do
   @moduledoc """
   One `pane_id` grammar, on the echo and on the receipt alike.
 
-  `docs/contracts/ipc-v2.org` (vendored from orris `e5da392e`) states the grammar and
+  `docs/contracts/ipc-v2.org` (vendored from orris `3684f53e`; the sentences below
+  landed in the consumer at `e5da392e` and are unchanged since) states the grammar and
   which way the disagreement resolves:
 
   > `pane_id` is `%` followed by 1..128 characters from `[a-zA-Z0-9_]`. This is the

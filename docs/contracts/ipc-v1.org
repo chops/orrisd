@@ -80,9 +80,11 @@ The documentation file and ~CONTRACT_HASH~ itself are not hash inputs.
 :END:
 The fixtures this document pins were measured byte-identical to
 ~test/fixtures/contracts/ipc/v1/~ in the orris consumer at revision
-~e5da392ea0b26d89bea6e72d58e1e952a48b7600~ on 2026-09-18, with both
+~3684f53e93018edf10c16bee459af340607ab115~ on 2026-09-19, with both
 ~CONTRACT_HASH~ files reading
-~f1cacf8b53fdd1db37ec968e5476081250804e9c6a4d615215d47d9b77894213~.
+~f1cacf8b53fdd1db37ec968e5476081250804e9c6a4d615215d47d9b77894213~. The same
+was true at the previously pinned revision ~e5da392e~, and no commit between
+the two touches either repository's v1 fixtures or this document.
 
 The two repositories' v1 DOCUMENTS were written independently and are not
 byte-identical; only the fixtures and their hash are. The v2 contract text is

@@ -19,6 +19,14 @@ defmodule AiPair.Contracts.VendoredIPCV2Test do
   pinned value, or an inventory that no longer matches the directory. Adopting a new
   consumer revision is a deliberate re-vendoring that updates the revision, the digest
   and the pin below together.
+
+  SINCE orris `3684f53e` the vendored region itself declares a reciprocal pairing block
+  ("Paired producer copy") whose keys are spelled like this repository's own
+  (`paired_revision`, `paired_fixture_contract_hash`, `paired_fixture_count`) but which
+  speak about the other direction. Two rows below exist only because of that: `declared/1`
+  reads the PREAMBLE and requires exactly one declaration there, so a consumer key can
+  never answer for a producer key; and the structural row no longer uses
+  `paired_fixture_count` as a producer-only marker, because it is no longer one.
   """
 
   use ExUnit.Case, async: true
@@ -31,8 +39,8 @@ defmodule AiPair.Contracts.VendoredIPCV2Test do
   @begin_sentinel "# BEGIN VENDORED orris docs/contracts/ipc-v2.org"
   @end_sentinel "# END VENDORED orris docs/contracts/ipc-v2.org"
 
-  @orris_revision "e5da392ea0b26d89bea6e72d58e1e952a48b7600"
-  @orris_sha256 "8bfdc102e8c37cb0399f169030d9bf37ff37aff2d14299b09e2325fb276bb32b"
+  @orris_revision "3684f53e93018edf10c16bee459af340607ab115"
+  @orris_sha256 "939e09474dce6cf82af1dff19c8880b2c5148c6b2c4d4fb10da60fdf8a4a5be5"
   @fixture_hash "78c2f64240c3c5c9da60425c65c498974a2a81c8adb3e68e0bef28613c1707dc"
   @v1_fixture_hash "f1cacf8b53fdd1db37ec968e5476081250804e9c6a4d615215d47d9b77894213"
 
@@ -95,12 +103,47 @@ defmodule AiPair.Contracts.VendoredIPCV2Test do
       # would mean the consumer document had been edited here, which the digest row
       # would catch -- but only after the fact, and only if the pins were not
       # recomputed at the same time. This row says it structurally.
-      for producer_only <- ["Producer addenda", "ReceiptLog.valid_pane?/1", "paired_fixture_count"] do
+      #
+      # `paired_fixture_count` USED to be one of these markers and no longer is: at orris
+      # `3684f53e` the consumer text declares its own reciprocal block with that key. A
+      # marker must be producer-only in the CURRENT region, not in the one it was written
+      # against, so the list is three strings that no consumer text has any reason to
+      # carry: the addenda heading, a module function of this repository, and the
+      # producer declaration of which repository the source is.
+      for producer_only <- [
+            "** Producer addenda",
+            "ReceiptLog.valid_pane?/1",
+            "- source_repository: =orris="
+          ] do
         assert String.contains?(preamble, producer_only)
 
         refute String.contains?(vendored_region(), producer_only),
                "#{producer_only} is a producer statement and belongs outside the vendored region"
       end
+    end
+
+    test "a consumer pairing key inside the region never answers for a producer key" do
+      region = vendored_region()
+
+      # ANTI-VACUITY: the collision must really exist, or the rows below are a statement
+      # about a document shape that is not the one shipped here.
+      assert String.contains?(region, "** Paired producer copy")
+      assert String.contains?(region, "- paired_fixture_contract_hash: ~")
+      assert String.contains?(region, "- paired_fixture_count: ~16~")
+
+      # The consumer names THIS repository, and the producer names the consumer. Reading
+      # the whole file for `- <key>:` would let one stand in for the other; `declared/1`
+      # reads the preamble, so these values are the producer declarations and no others.
+      assert declared("paired_fixture_count") == "16"
+      assert declared("paired_fixture_contract_hash") == @fixture_hash
+      assert declared("source_revision") == @orris_revision
+
+      # And the region's own reciprocal pins are a SNAPSHOT of this repository, not a
+      # description of it: the producer document they digest is the one that existed
+      # before this revision re-vendored. Naming the fact here keeps a later reader from
+      # "repairing" the region to match the current file, which would break the digest.
+      assert String.contains?(region, "- paired_repository: ~orrisd~")
+      refute String.contains?(preamble(), "- paired_repository:")
     end
 
     test "the region states the pane grammar that governs this producer" do
@@ -178,13 +221,25 @@ defmodule AiPair.Contracts.VendoredIPCV2Test do
     preamble
   end
 
-  # `- <key>: =<value>=` inside the paired-revision block.
+  # `- <key>: =<value>=` inside the paired-revision block, read from the PREAMBLE only.
+  #
+  # Scoped deliberately. The vendored region declares the consumer's reciprocal block with
+  # keys of the same shape, so a whole-file read would resolve some keys by position --
+  # the answer would depend on which block comes first in the file rather than on which
+  # repository is speaking. Exactly one declaration is required, so a duplicated or
+  # deleted producer key fails here instead of silently resolving to the survivor.
   defp declared(key) do
     regex = Regex.compile!("^- " <> Regex.escape(key) <> ": =?([^=\n]+)=?$", "m")
 
-    case Regex.run(regex, File.read!(@doc_path)) do
-      [_, value] -> String.trim(value)
-      nil -> flunk("the document declares no #{key}")
+    case Regex.scan(regex, preamble()) do
+      [[_, value]] ->
+        String.trim(value)
+
+      [] ->
+        flunk("the document preamble declares no #{key}")
+
+      many ->
+        flunk("the document preamble declares #{key} #{length(many)} times: #{inspect(many)}")
     end
   end
 

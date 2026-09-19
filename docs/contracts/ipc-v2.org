@@ -19,10 +19,10 @@ half was not.
 :PROPERTIES:
 :CUSTOM_ID: paired-revisions
 :END:
-- source_repository: orris
+- source_repository: =orris=
 - source_path: =docs/contracts/ipc-v2.org=
-- source_revision: =e5da392ea0b26d89bea6e72d58e1e952a48b7600=
-- source_sha256: =8bfdc102e8c37cb0399f169030d9bf37ff37aff2d14299b09e2325fb276bb32b=
+- source_revision: =3684f53e93018edf10c16bee459af340607ab115=
+- source_sha256: =939e09474dce6cf82af1dff19c8880b2c5148c6b2c4d4fb10da60fdf8a4a5be5=
 - paired_fixture_dir: =test/fixtures/contracts/ipc/v2/=
 - paired_fixture_contract_hash: =78c2f64240c3c5c9da60425c65c498974a2a81c8adb3e68e0bef28613c1707dc=
 - paired_fixture_count: 16
@@ -34,6 +34,13 @@ two sentinel comment lines below, which are the bytes of =source_path= at
 fixture hash is pinned twice: an edit that changed the copy and recomputed the
 digest in the same file would satisfy a self-comparison and still break the
 consumer that pins the original bytes.
+
+These declarations are the PRODUCER half of the pairing and are read from this
+preamble only. Since orris =3684f53e= the vendored region carries the consumer
+half in its own "Paired producer copy" block, which declares keys of the same
+shape (=paired_revision=, =paired_fixture_contract_hash=, =paired_fixture_count=)
+about the other direction. A reader -- and the drift control -- must not take a
+declaration out of the region for a declaration of this repository.
 
 *** Measurement, 2026-09-18T10:16:00Z
 :PROPERTIES:
@@ -74,6 +81,67 @@ Measured at adoption:
   and =diff -r= against the consumer worktree at =e5da392e= reports no
   differences in either set. So the paired fixture pins below are carried
   forward rather than restated from a new measurement.
+
+*** Adoption of orris 3684f53e, 2026-09-19T00:29:22Z
+:PROPERTIES:
+:CUSTOM_ID: adoption-3684f53e
+:END:
+The pins above now name orris =3684f53e93018edf10c16bee459af340607ab115=, the
+consumer =origin/main= at this date. Nothing had failed meanwhile, and that is a
+property of the mechanism rather than luck: the pins named =e5da392e=, whose
+bytes cannot change, so the control kept answering about a fixed revision. What
+had gone stale is the PAIRING, and only a reading of the two documents could see
+it.
+
+Measured at adoption, with =git fetch origin= first in both repositories:
+
+- Fifteen orris commits separate =e5da392e= from =3684f53e=. Exactly ONE of them
+  touches =docs/contracts/ipc-v2.org=: =8264ce0= ("Name the producer copy this
+  contract is paired with"), and no commit in the range touches
+  =docs/contracts/ipc-v1.org=. The whole difference in the vendored bytes is the
+  new "Paired producer copy" section; =git diff e5da392e..3684f53e --
+  docs/contracts/ipc-v2.org= is that one insertion and nothing else.
+- The vendored region below digests to
+  =939e09474dce6cf82af1dff19c8880b2c5148c6b2c4d4fb10da60fdf8a4a5be5=, which is
+  the sha256 of =docs/contracts/ipc-v2.org= at orris =3684f53e=.
+- Neither fixture set moved. =diff -r= of =test/fixtures/contracts/ipc/v1/= and
+  =test/fixtures/contracts/ipc/v2/= against the consumer tree at =3684f53e=
+  reports no differences, and both =CONTRACT_HASH= files still read v1
+  =f1cacf8b53fdd1db37ec968e5476081250804e9c6a4d615215d47d9b77894213= and v2
+  =78c2f64240c3c5c9da60425c65c498974a2a81c8adb3e68e0bef28613c1707dc=. The
+  fixture pins are therefore carried forward, re-measured rather than copied.
+- The consumer block now inside the region names this repository at
+  =971f0a88af0ed9496210a2da0c291eaf35937556= and states
+  =paired_document_sha256= =a593e1eb1e5194dc0dc122fb15896240b6547a644c28ae388bb2a85a2a47a202=,
+  which is the digest of THIS file as it stood before this re-vendoring. Both
+  are snapshots the consumer took; neither is a statement about the file you are
+  reading now, and this adoption deliberately does not edit them, because the
+  region is the consumer's bytes.
+
+**** The reciprocal pin is now one revision behind, by construction
+:PROPERTIES:
+:CUSTOM_ID: reciprocal-pin-lag
+:END:
+The consumer pins =paired_document_sha256= over the WHOLE producer document,
+which includes this pairing block. Adopting a consumer revision therefore
+changes the digest the consumer pinned, exactly as adding the consumer block
+changed the digest this repository pinned. The two halves cannot both be
+current at the same instant: each adoption invalidates the other side's
+document digest, and the pair converges only if one side stops digesting the
+other side's whole file.
+
+What this repository owes nothing about, and what it does: the consumer half is
+the consumer's to move, and the orris-side re-pair at this producer revision is
+therefore OWED THERE, named here rather than silently left. Nothing fails while
+it is owed, for the same reason nothing failed here: a pinned revision's bytes
+never change.
+
+A cheaper shape is available to whoever makes that change and is recorded so the
+choice is deliberate: pinning the producer's vendored-region digest (a value
+this side reproduces from the consumer's own bytes, =source_sha256=) instead of
+the whole-document digest would be stable across producer addenda edits and
+would end the alternation. Choosing it is a consumer-side reviewed change, not
+this lane's.
 
 *** What the drift control can and cannot see
 :PROPERTIES:
@@ -120,6 +188,12 @@ cannot perturb its digest.
 - =not_delivered= is never answered as a duplicate, because admission opens the
   next attempt instead. The producer applies no attempt ceiling of its own; the
   retry bound is the consumer obligation the vendored text describes.
+- The "Paired producer copy" block inside the region is CONSUMER text about this
+  repository, not this repository speaking. Its =paired_revision= and
+  =paired_document_sha256= are the snapshot orris took at =3684f53e=; the
+  producer declarations that govern here are the ones in "Paired revisions"
+  above. The drift control reads the preamble for them, precisely so that a
+  consumer key of the same name cannot answer in their place.
 
 # BEGIN VENDORED orris docs/contracts/ipc-v2.org
 #+options: ^:nil
@@ -150,6 +224,51 @@ Status: the fixture bytes in ~test/fixtures/contracts/ipc/v2/~ are the v2 reply
 shapes this repository pins, with their ~CONTRACT_HASH~ computed under the v1 hash
 rule (see ~ipc-v1.org~). The v1 set and its hash are untouched; v1 remains the wire
 until a client asks for version 2.
+
+** Paired producer copy
+:PROPERTIES:
+:CUSTOM_ID: paired-producer-copy
+:END:
+The producer of these frames vendors this document VERBATIM, so that the daemon
+that emits the frames ships the contract text it emits them against instead of a
+restatement that drifts silently. The producer copy carries its own pairing
+block naming the consumer revision it was taken from; this block is the
+reciprocal half, so each repository names the other rather than only one
+direction being recorded.
+
+- paired_repository: ~orrisd~ (the ai-pair daemon; the producer of v2 frames)
+- paired_path: ~docs/contracts/ipc-v2.org~
+- paired_revision: ~971f0a88af0ed9496210a2da0c291eaf35937556~
+- paired_document_sha256: ~a593e1eb1e5194dc0dc122fb15896240b6547a644c28ae388bb2a85a2a47a202~
+- vendored_source_revision: ~e5da392ea0b26d89bea6e72d58e1e952a48b7600~
+- vendored_source_sha256: ~8bfdc102e8c37cb0399f169030d9bf37ff37aff2d14299b09e2325fb276bb32b~
+- paired_fixture_dir: ~test/fixtures/contracts/ipc/v2/~
+- paired_fixture_contract_hash: ~78c2f64240c3c5c9da60425c65c498974a2a81c8adb3e68e0bef28613c1707dc~
+- paired_fixture_count: ~16~
+
+~paired_document_sha256~ is the digest of the WHOLE producer document at
+~paired_revision~, which is the producer's pairing block, its producer addenda
+and the vendored region together. ~vendored_source_revision~ is the revision of
+THIS file whose bytes that copy vendors, and ~vendored_source_sha256~ its
+digest: the pairing is a pair of snapshots, and either side moves it by a
+deliberate re-pairing rather than by drifting.
+
+Adding this block changes this file, so the revision that carries it supersedes
+~vendored_source_revision~ as the consumer tip and the producer owes one
+re-vendoring: it re-takes these bytes and moves its ~source_revision~,
+~source_sha256~ and its own test pin together. Nothing breaks in the meantime.
+The producer's pins name a revision whose bytes are unchanged for ever, so its
+drift control keeps failing on a producer-side edit, and the fixtures and their
+~CONTRACT_HASH~ -- which are byte-identical in both repositories by design and
+pinned by ~test/contracts/ipc_v2_contract_hash_test.exs~ here -- were untouched
+by it.
+
+What the control here can see: that this document still names the paired
+revision, the paired digests, and the fixture hash the fixtures in this
+repository actually produce. What it CANNOT see is a change made in the producer
+repository, because this gate has no access to it -- the same stated limit the
+producer copy records in the other direction. A pairing that has gone stale is
+found by reading the two blocks, not by either gate.
 
 ** Framing and version
 :PROPERTIES:
