@@ -86,6 +86,13 @@ The fixtures this document pins were measured byte-identical to
 was true at the previously pinned revision ~e5da392e~, and no commit between
 the two touches either repository's v1 fixtures or this document.
 
+Re-measured on 2026-09-19 when adopting consumer
+~880e7a3f8117c79114384c5f7682a70d44580046~: the v1 fixture
+tree is ~c290afa11a973c7e32528b66c3d5bbd9c008def7~ in both repositories,
+unchanged from the previously paired consumer ~3684f53e~. This advances the
+named fixture snapshot only; the historical document comparison below remains
+about ~3684f53e~.
+
 The two repositories' v1 DOCUMENTS were written independently and are not
 byte-identical; only the fixtures and their hash are. The v2 contract text is
 the other way round: [[./ipc-v2.org][the version 2 contract]] vendors the

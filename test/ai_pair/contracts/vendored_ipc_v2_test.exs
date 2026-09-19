@@ -39,8 +39,8 @@ defmodule AiPair.Contracts.VendoredIPCV2Test do
   @begin_sentinel "# BEGIN VENDORED orris docs/contracts/ipc-v2.org"
   @end_sentinel "# END VENDORED orris docs/contracts/ipc-v2.org"
 
-  @orris_revision "3684f53e93018edf10c16bee459af340607ab115"
-  @orris_sha256 "939e09474dce6cf82af1dff19c8880b2c5148c6b2c4d4fb10da60fdf8a4a5be5"
+  @orris_revision "880e7a3f8117c79114384c5f7682a70d44580046"
+  @orris_sha256 "849589a85527357ed61643f50cdfe2a4ba32fec823e2dca28868ec77f44164cc"
   @fixture_hash "78c2f64240c3c5c9da60425c65c498974a2a81c8adb3e68e0bef28613c1707dc"
   @v1_fixture_hash "f1cacf8b53fdd1db37ec968e5476081250804e9c6a4d615215d47d9b77894213"
 
@@ -86,10 +86,13 @@ defmodule AiPair.Contracts.VendoredIPCV2Test do
       # ANTI-VACUITY. An extractor that silently returned "" would make the digest row a
       # statement about the empty string, and a second pair of sentinels would make
       # "the vendored region" ambiguous.
+      # Guard the actual delimiters, not prose: orris 880e7a3f line 92 legitimately
+      # says VENDORED-REGION, so the former word-level refute rejected valid bytes.
       assert occurrences(doc, @begin_sentinel) == 1
       assert occurrences(doc, @end_sentinel) == 1
       assert byte_size(region) > 2_000
-      refute String.contains?(region, "VENDORED")
+      refute String.contains?(region, @begin_sentinel)
+      refute String.contains?(region, @end_sentinel)
 
       for token <- ~w(protocol_version delivered queued absent ambiguous conflict) do
         assert String.contains?(region, token), "the vendored region does not mention #{token}"
