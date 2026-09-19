@@ -2,9 +2,82 @@ defmodule AiPair.IPC.Server do
   @moduledoc """
   Unix domain socket server. Listens at `$AI_PAIR_INBOX/sock/ai-pair.sock`.
 
-  This is the only IPC surface between the CLI binaries and the daemon.
-  No port, no network surface — access control is filesystem permissions
-  on the parent `sock/` directory (chmod 0700 by `AiPair.Inbox`).
+  ## Access control: there is none against a same-user process
+
+  This is the only IPC surface between the CLI binaries and the daemon. No port,
+  no network surface. The whole of its access control is filesystem permissions:
+  the parent `sock/` directory is chmod 0700 by `AiPair.Inbox` and the socket
+  file is chmod 0600 here immediately after bind.
+
+  Those two modes exclude every OTHER user on the host. They exclude NOTHING
+  from a process that already runs as the operator. Stated plainly, because the
+  wording this replaces named the mechanism without naming the adversary it
+  stops:
+
+  > Any process running as the operator has full daemon authority. It may
+  > `attach_pane`, `detach_pane`, ask `pane_status`, and `send` text up to
+  > `@max_send_text_bytes` into any live agent pane. The pane is an interactive
+  > agent CLI, so a `send` is keystroke injection into a running agent and can
+  > make it do anything that agent can do.
+
+  This daemon authenticates no caller. No frame in either protocol version
+  carries an actor, an identity, a token or a credential; `AiPair.IPC.Delivery`
+  validates the identity of the MESSAGE, never of the caller; and no
+  peer-credential check exists anywhere in `lib/`. Nothing here is a
+  vulnerability that a later commit forgot to fix — it is the trust model of a
+  local-first single-user harness, written down so that no reader mistakes
+  "0600" or "no network surface" for protection against a malicious local
+  process.
+
+  Two consequences a reader may NOT draw from the modes above: that a second
+  agent CLI the operator started for an unrelated task is outside this
+  surface, and that a downloaded binary, a package postinstall script or an
+  editor extension running as the operator is outside it. All three are inside
+  it, with full authority.
+
+  ### What a peer-credential check would need decided first
+
+  Refusing a connecting uid that is not the socket owner's is the obvious
+  hardening, and it is NOT taken here, for a reason that is about contracts and
+  not about effort. `docs/contracts/ipc-v1.org` opens by recording that the v1
+  fixtures are shared byte-for-byte with the Orris consumer and pins the paired
+  consumer revision and both `CONTRACT_HASH` files; the same document states
+  that a change reaching into both repositories "is a reviewed change in BOTH
+  repositories, so a single-repository lane cannot make it". A new admission
+  refusal is exactly such a change: it adds an outcome to the surface those
+  fixtures describe, on a connection the consumer's `PaneClient` opens.
+
+  So the decision this check waits on is not "should the daemon be safer". It
+  is: under which contract revision does the IPC surface acquire a refusal that
+  no fixture has, and who authors the matching consumer change. A uid check is
+  also weaker than binding an operator identity, so taking it here would not
+  settle that question either way.
+
+  The second reason is mechanical and was MEASURED, not assumed, at Elixir
+  1.20.4 / OTP 29.0.5 on `{:unix, :darwin}`, against a socket accepted exactly
+  the way `accept_loop/3` accepts one:
+
+    * `:inet.getopts(sock, [:peercred])` — and `:peercreds`, and `:peer_cred` —
+      answers `{:error, :einval}`. There is no named option.
+    * `:socket.is_supported(:options, :socket, :peercred)` answers `false`, so
+      OTP's own portable spelling is unavailable on this platform.
+    * the Linux spelling, raw `SOL_SOCKET`/`SO_PEERCRED`, answers
+      `{:error, :eopnotsupp}` through `:socket`, and `{:ok, []}` through
+      `:inet` — an empty list, which is the shape a caller is most likely to
+      mistake for a successful read of nothing.
+    * only a raw `getsockopt(SOL_LOCAL, LOCAL_PEERCRED)` answers, returning 76
+      opaque bytes that a caller must decode as a `struct xucred` to find the
+      uid in them.
+
+  A check built on that last line is a platform-specific raw option number plus
+  a hand-written C struct layout, with a DIFFERENT option number and a DIFFERENT
+  layout on Linux — and `.github/workflows/verify.yml` runs this repository's
+  only automated verification on `ubuntu-24.04`. The darwin half would therefore
+  be a control no automated run ever exercises, on the platform the operator
+  actually develops on, which is the defect class this project treats as its
+  worst: a check that cannot fail. Writing that without a ruling on which
+  platforms must enforce it, and on what a host that cannot answer at all should
+  do, would be building the appearance of a defence rather than a defence.
 
   Architecture:
     * This GenServer owns the listen socket.
