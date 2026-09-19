@@ -48,6 +48,18 @@ fail() {
   exit 1
 }
 
+# The Linux Nix build sandbox has no /usr/bin, so an executable whose shebang
+# is /usr/bin/env bash cannot be run there and its caller sees exit 126. Point
+# every executable this test writes at the bash the test itself is running.
+bash_bin="$(command -v bash)"
+retarget_shebang() {
+  local file body
+  for file in "$@"; do
+    body="$(tail -n +2 "$file")"
+    printf '#!%s\n%s\n' "$bash_bin" "$body" >"$file"
+  done
+}
+
 # A real AF_UNIX socket file, because doctor tests the daemon socket with
 # [[ -S ]] and a regular file would pass a weaker test than the real one.
 cat >"$root/mksock.exs" <<'EOF'
@@ -86,6 +98,7 @@ fi
 exit 0
 EOF
 chmod +x "$bin/tmux" "$bin/claude" "$bin/codex" "$bin/ai-pair"
+retarget_shebang "$bin/ap" "$bin/start-pair" "$bin/tmux" "$bin/claude" "$bin/codex" "$bin/ai-pair"
 
 # Runs doctor with a controlled PATH and a clean project-scoped environment,
 # and records stdout, stderr and the exit status. Never inherits the caller's
@@ -170,6 +183,7 @@ for name in tmux claude codex; do ln -s "$bin/$name" "$no_client/$name"; done
 cp "$ap_source" "$lonely/ap"
 cp "$tooling_source" "$lonely/tooling.ex"
 chmod +x "$lonely/ap"
+retarget_shebang "$lonely/ap"
 doctor_ap="$lonely/ap"
 run_doctor no-client "$no_client:$tools"
 doctor_ap="$bin/ap"
@@ -198,6 +212,7 @@ fi
 exit 1
 EOF
 chmod +x "$bin/launchctl"
+retarget_shebang "$bin/launchctl"
 run_doctor launchd "$bin:$tools"
 [[ "$(rc_of launchd)" == "0" ]] || fail "doctor failed with a listed launchd agent: $(cat "$root/launchd/err")"
 out_has launchd "[ ok ] launchd agent listed" "doctor did not report the listed launchd agent"

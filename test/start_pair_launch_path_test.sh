@@ -33,6 +33,20 @@ exit 0
 EOF
 chmod +x "$fake_bin/tmux" "$fake_bin/ai-pair"
 
+# The Linux Nix build sandbox has no /usr/bin, so an executable whose shebang
+# is /usr/bin/env bash cannot be run there and its caller sees exit 126. This
+# check had never been built by CI, so nothing had discovered that. Point every
+# executable this test writes at the bash the test itself is running.
+bash_bin="$(command -v bash)"
+retarget_shebang() {
+  local file body
+  for file in "$@"; do
+    body="$(tail -n +2 "$file")"
+    printf '#!%s\n%s\n' "$bash_bin" "$body" >"$file"
+  done
+}
+retarget_shebang "$fake_bin/tmux" "$fake_bin/ai-pair"
+
 fail() {
   printf 'start-pair launch-path test: %s\n' "$*" >&2
   exit 1
@@ -63,6 +77,7 @@ cat >"$fake_bin/llm-proxy-shim" <<'EOF'
 exit 0
 EOF
 chmod +x "$fake_bin/llm-proxy-shim"
+retarget_shebang "$fake_bin/llm-proxy-shim"
 
 run_start_pair shim
 if grep -F 'NO TELEMETRY' "$root/shim/stderr" "$root/shim/inbox/logs/start-pair.log" >/dev/null; then

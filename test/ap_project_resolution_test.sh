@@ -71,6 +71,20 @@ exit 0
 EOF
 chmod +x "$bin/tmux" "$bin/ai-pair" "$bin/claude" "$bin/codex"
 
+# The Linux Nix build sandbox has no /usr/bin, so an executable whose shebang
+# is /usr/bin/env bash cannot be run there and its caller sees exit 126. This
+# check had never been built by CI, so nothing had discovered that. Point every
+# executable this test writes at the bash the test itself is running.
+bash_bin="$(command -v bash)"
+retarget_shebang() {
+  local file body
+  for file in "$@"; do
+    body="$(tail -n +2 "$file")"
+    printf '#!%s\n%s\n' "$bash_bin" "$body" >"$file"
+  done
+}
+retarget_shebang "$bin/ap" "$bin/start-pair" "$bin/tmux" "$bin/ai-pair" "$bin/claude" "$bin/codex"
+
 fail() {
   printf 'ap project-resolution test: %s\n' "$*" >&2
   exit 1

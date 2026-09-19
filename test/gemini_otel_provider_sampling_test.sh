@@ -18,6 +18,19 @@ cp "$script" "$tmp/subject/gemini-otel.sh"
 cp "$helper" "$tmp/subject/telemetry-batch.ex"
 script="$tmp/subject/gemini-otel.sh"
 
+# The Linux Nix build sandbox has no /usr/bin, so an executable whose shebang
+# is /usr/bin/env bash cannot be run there and its caller sees exit 126. This
+# check had never been built by CI, so nothing had discovered that. Point every
+# executable this test writes at the bash the test itself is running.
+bash_bin="$(command -v bash)"
+retarget_shebang() {
+  local file body
+  for file in "$@"; do
+    body="$(tail -n +2 "$file")"
+    printf '#!%s\n%s\n' "$bash_bin" "$body" >"$file"
+  done
+}
+
 cat >"$tmp/bin/curl" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -118,6 +131,7 @@ fi
 printf '%s\n' '{}'
 EOF
 chmod +x "$tmp/bin/curl"
+retarget_shebang "$tmp/bin/curl"
 
 cat >"$tmp/bin/agy" <<'EOF'
 #!/usr/bin/env bash
@@ -132,6 +146,7 @@ done
 printf '%s\n' '* Summary' 'fixture report' '' '* Findings' '- [info] fixture' '' '* Suggestions' '- none'
 EOF
 chmod +x "$tmp/bin/agy"
+retarget_shebang "$tmp/bin/agy"
 
 run_case() {
   local name="$1" limit="$2" inbox
