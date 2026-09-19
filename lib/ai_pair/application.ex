@@ -64,14 +64,22 @@ defmodule AiPair.Application do
   # normalised text of this file, where the block must occur EXACTLY ONCE. The
   # durable branch splices into this list rather than restating it, so there is
   # no second copy to drift (the contract's OQ-6).
+  #
+  # The connection supervisor's `max_children:` is the one option amended since
+  # that freeze, and the amendment is in the contract and both fixtures rather
+  # than only here. Before it, the supervisor accepted handler tasks without
+  # bound; the number is `AiPair.IPC.Server`'s, so the surface's bound and the
+  # surface's other caps are read from one module.
   defp legacy_children(inbox, receipt_store) do
+    max_connections = AiPair.IPC.Server.max_concurrent_connections()
+
     [
       {Registry, keys: :unique, name: AiPair.Registry},
       {AiPair.Telemetry.OtelBridge, heartbeat_interval_ms: 60_000},
       {AiPair.PaneSupervisor, []},
       {AiPair.Inbox.StuckScanner, inbox: inbox},
       {AiPair.Tmux, []},
-      {Task.Supervisor, name: AiPair.IPC.ConnectionSupervisor},
+      {Task.Supervisor, name: AiPair.IPC.ConnectionSupervisor, max_children: max_connections},
       {AiPair.Delivery.ReceiptStore, inbox: inbox},
       {AiPair.IPC.Server, inbox: inbox, receipt_store: receipt_store}
     ]

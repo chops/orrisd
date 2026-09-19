@@ -29,7 +29,10 @@ defmodule AiPair.Contracts.DurableModeConfigurationTest do
 
   @fixture_dir Path.expand("../../fixtures/contracts/durable-mode-config", __DIR__)
   @hash_path Path.join(@fixture_dir, "CONTRACT_HASH")
-  @pinned_hash "7adbd52a5f9d4cf672ab8d909a049ebd57f94a746ec35493a7f45bcbb638b366"
+  # Amended 2026-09-19 when child 6 of the legacy list (child 9 of the durable
+  # one) gained `max_children:`. The contract's "The connection cap" section
+  # carries the amendment; the bytes below carry its consequence.
+  @pinned_hash "bfb788322afbf72da65684d3d9d03fff830dac7bdd8f0649cddd3c91f06b4494"
   @expected_fixture_count 3
 
   @application_source Path.expand("../../../lib/ai_pair/application.ex", __DIR__)

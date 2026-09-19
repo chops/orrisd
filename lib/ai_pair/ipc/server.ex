@@ -87,6 +87,13 @@ defmodule AiPair.IPC.Server do
     * Handler tasks run under `AiPair.IPC.ConnectionSupervisor`
       (`Task.Supervisor`, restart: :temporary). A crashing handler does
       not touch the acceptor or the listener.
+    * That supervisor is capped at `max_concurrent_connections/0` children,
+      the bound `AiPair.Application` passes as its `max_children:`. The cap is
+      enforced inside the supervisor, so a connection beyond it is REFUSED —
+      `Task.Supervisor.start_child/2` answers `{:error, :max_children}`, the
+      acceptor closes that client socket and resumes accepting. Nothing is
+      queued and nothing waits, which is the difference between a bounded
+      surface and one that merely defers the growth.
     * On startup, the server probes the existing socket path with a brief
       connect attempt. If a daemon answers, we refuse to start; if the
       socket is stale (ECONNREFUSED / ENOENT), we unlink and bind.
@@ -161,6 +168,38 @@ defmodule AiPair.IPC.Server do
   @max_frame_bytes 1_048_576
   @max_send_text_bytes 524_288
   @default_send_call_timeout_ms 5_000
+
+  # Cap on concurrently live connection handlers, passed by `AiPair.Application`
+  # as the `max_children:` of `AiPair.IPC.ConnectionSupervisor`. Without it the
+  # supervisor accepts handlers without bound, and a local process that opens
+  # sockets in a loop and sends nothing holds one handler and one socket each
+  # for `@handler_recv_timeout_ms`, growing until the VM runs out of ports or
+  # processes.
+  #
+  # The value is NOT a new number. `@max_pending_sends` in
+  # `AiPair.Pane.StateMachine` is this repository's only other count bound, and
+  # this one is deliberately the same literal, set the same way: a module
+  # attribute on the module that owns the bounded surface, read everywhere else
+  # through an accessor so the number exists in one place, and reported to the
+  # caller rather than defaulted away. Taking a different figure would be
+  # inventing one, and nothing measured here justifies a second convention.
+  #
+  # What the figure has to clear is one command per connection: `ap` and the
+  # Orris `PaneClient` both open a socket, send one frame, read one reply and
+  # close. Thirty-two of those outstanding AT ONCE is far above any observed
+  # operator or orchestrator burst, and a handler that has been answered is
+  # gone, so the cap bites on connections that are open and idle, which is what
+  # T-22 of the MCP threat model describes.
+  @max_concurrent_connections 32
+
+  @doc """
+  The concurrent connection-handler cap, as `AiPair.Application` applies it.
+
+  Read this rather than the literal: the cap lives here, beside the frame and
+  payload bounds of the same surface, and the supervision child spec calls it.
+  """
+  @spec max_concurrent_connections() :: pos_integer()
+  def max_concurrent_connections, do: @max_concurrent_connections
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do

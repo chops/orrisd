@@ -216,7 +216,7 @@ Eleven children, in this order (~lane:92-104~). The three new ones are marked.
 | 6 | ~{AiPair.PaneRestore.Coordinator, []}~                                               | yes | ~lane:98~             |
 | 7 | the store spec: id ~AiPair.PaneIntentStore~, start ~{configured module, :start_link, [root: inbox, fs: configured fs]}~ | yes | ~lane:74-76,99~ |
 | 8 | ~{AiPair.PaneRestore.Boot, store:, root:, tmux:, binding:, callbacks:}~               | yes | ~lane:100~            |
-| 9 | ~{Task.Supervisor, name: AiPair.IPC.ConnectionSupervisor}~                            |     | ~lane:101~            |
+| 9 | ~{Task.Supervisor, name: AiPair.IPC.ConnectionSupervisor, max_children: max_connections}~ |  | ~lane:101~; see "The connection cap" |
 |10 | ~{AiPair.Delivery.ReceiptStore, inbox: inbox}~                                        |     | ~lane:102~            |
 |11 | ~{AiPair.IPC.Server, inbox:, receipt_store:, boot_generation: generation}~            |     | ~lane:103~            |
 
@@ -337,7 +337,7 @@ order, with the same options, under the same strategy and supervisor name
 | 3 | ~{AiPair.PaneSupervisor, []}~                                    |
 | 4 | ~{AiPair.Inbox.StuckScanner, inbox: inbox}~                      |
 | 5 | ~{AiPair.Tmux, []}~                                              |
-| 6 | ~{Task.Supervisor, name: AiPair.IPC.ConnectionSupervisor}~       |
+| 6 | ~{Task.Supervisor, name: AiPair.IPC.ConnectionSupervisor, max_children: max_connections}~ |
 | 7 | ~{AiPair.Delivery.ReceiptStore, inbox: inbox}~                   |
 | 8 | ~{AiPair.IPC.Server, inbox: inbox, receipt_store: receipt_store}~ |
 
@@ -355,9 +355,50 @@ fail on a malformed one.
 necessarily edits ~lib/ai_pair/application.ex~ to add the branch, and the lane
 moves the eight-entry literal into the ~else~ of a ~children/2~ helper
 (~lane:41-56~), which reindents it. What may not change is the eight entries,
-their order and their options. That is what
-~supervision.legacy.json~ pins and what the contract test checks against the
-source and against the running tree.
+their order and their options WITHOUT AMENDING THIS CONTRACT AND BOTH FIXTURES.
+That is what ~supervision.legacy.json~ pins and what the contract test checks
+against the source and against the running tree.
+
+*** The connection cap
+:PROPERTIES:
+:CUSTOM_ID: connection-cap
+:END:
+One option has been amended since the freeze above, on 2026-09-19, and it is
+recorded here rather than left as a fixture diff.
+
+Child 6 of the legacy list, and child 9 of the durable one, gained
+~max_children: max_connections~, where ~max_connections~ is
+~AiPair.IPC.Server.max_concurrent_connections/0~. Before the amendment
+~AiPair.IPC.ConnectionSupervisor~ was a bare ~Task.Supervisor~ with no bound,
+which is threat T-22 of ~phase0/mcp-threat-model.org~ in the planning
+repository: a local process opening connections in a loop without sending a
+frame held one handler task and one socket each, for
+~AiPair.IPC.Server~'s five-second handler receive timeout, with nothing
+refusing the next one.
+
+- What the cap does :: the bound is enforced inside the supervisor, so
+  ~Task.Supervisor.start_child/2~ answers ~{:error, :max_children}~ for a
+  connection beyond it. ~AiPair.IPC.Server~'s acceptor already treats a failed
+  spawn as a closed client socket and resumes accepting, so the surplus
+  connection is REFUSED, not queued and not deferred.
+- Who owns the number :: ~AiPair.IPC.Server~, beside that surface's frame and
+  payload bounds, exposed as ~max_concurrent_connections/0~. The composition
+  calls the accessor; the literal exists in one place, as
+  ~AiPair.Pane.StateMachine.max_pending_sends/0~ does for the per-pane send
+  queue.
+- What the number is :: the same literal as ~@max_pending_sends~, this
+  repository's only other count bound. Every legitimate connection carries one
+  command and is gone as soon as it is answered, so the cap bites only on
+  connections left open and idle.
+- What it does NOT do :: it does not authenticate anybody, and it does not stop
+  a local process from taking the whole cap for the handler timeout and making
+  the daemon refuse a legitimate connection for that window. It converts an
+  unbounded resource into a bounded and self-clearing one. The residual is
+  stated rather than closed, because a cap that silently made the daemon
+  unavailable would be worse than the growth it replaced.
+- Read by ::
+  ~test/ai_pair/ipc/connection_cap_test.exs~ takes the cap concurrently and
+  measures the refusal, so the bound is a statement that can fail.
 
 ** What a reader may conclude
 :PROPERTIES:
