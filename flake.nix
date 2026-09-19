@@ -119,6 +119,13 @@
             touch "$out"
           '';
 
+          ap-doctor = pkgs.runCommand "ap-doctor-test" {
+            nativeBuildInputs = [ pkgs.bash pkgs.coreutils pkgs.gnugrep pkgs.beam.packages.erlang_29.elixir_1_20 ];
+          } ''
+            bash ${./test/ap_doctor_test.sh} ${./nix/files/ap.sh} ${./nix/files/start-pair.sh} ${./nix/files/tooling.ex}
+            touch "$out"
+          '';
+
           gemini-otel-provider-sampling = pkgs.runCommand "gemini-otel-provider-sampling-test" {
             nativeBuildInputs = [ pkgs.bash pkgs.coreutils pkgs.diffutils pkgs.gnugrep pkgs.beam.packages.erlang_29.elixir_1_20 ];
           } ''
