@@ -27,7 +27,11 @@ retarget_shebang() {
   local file body
   for file in "$@"; do
     body="$(tail -n +2 "$file")"
+    # A copy of a store file inherits its read-only mode, so make it writable
+    # before the rewrite and executable again after it.
+    chmod u+w "$file"
     printf '#!%s\n%s\n' "$bash_bin" "$body" >"$file"
+    chmod +x "$file"
   done
 }
 
