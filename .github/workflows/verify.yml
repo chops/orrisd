@@ -15,7 +15,10 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # The gate now builds the shipped release and runs the declared flake
+    # checks as well as bin/verify, so it needs more than the 20 minutes the
+    # single-step job used.
+    timeout-minutes: 45
     steps:
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -32,3 +35,15 @@ jobs:
 
       - name: Verify
         run: nix develop --impure --command bin/verify
+
+      # bin/verify never touches the flake outputs, so until these three steps
+      # existed the shipped release, the declared checks and the four Nix
+      # modules were neither built nor evaluated by any gate.
+      - name: Evaluate supported Nix outputs
+        run: nix flake check --no-build --all-systems --impure
+
+      - name: Build the shipped artifacts
+        run: nix build --no-link --print-out-paths .#default .#ap .#manifest
+
+      - name: Run declared flake checks
+        run: nix flake check --impure

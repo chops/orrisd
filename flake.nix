@@ -13,7 +13,10 @@
 
   outputs = inputs@{ self, nixpkgs, devenv, ... }:
     let
-      systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
+      # The pinned nixpkgs (26.11) has dropped x86_64-darwin, so declaring it
+      # here made every x86_64-darwin output an evaluation error rather than a
+      # package. Orris pins the same nixpkgs rev and declares the same three.
+      systems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" ];
       forEachSystem = nixpkgs.lib.genAttrs systems;
 
       version = "0.1.0";
