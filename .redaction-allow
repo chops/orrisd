@@ -24,10 +24,10 @@ tmux_pane_id:test/ai_pair/pane_intent_store_test.exs:6bdca038a1c8cc47add79dab5a0
 tmux_pane_id:test/ai_pair/pane_intent_store_test.exs:ea74f5dd3cbe92ad652f53de22903a416198271e27be9d264fceba661e8aa945 # S1-F1 synthetic fixture pane id, high decimal half that must sort first under lexicographic binary order
 tmux_pane_id:test/ai_pair/pane_intent_store_test.exs:0cc02f7365ac3eebb1bc6f856264c40f933592643f0b9724815949bb6c0a7a2a # S1-F1 synthetic fixture pane id, absent-pane subject of the H1 same-owner retry control
 tmux_pane_id:test/ai_pair/tmux_census_test.exs:6e861e37ea72444561cee42b9e3cdb0af82925b4b7b48c23b381edb2662c1637 # R04-S4 percent-escape codec constant in the frozen list_panes argv control, not a pane identity
-tmux_pane_id:test/fixtures/tmux/observe_panes.format:6e861e37ea72444561cee42b9e3cdb0af82925b4b7b48c23b381edb2662c1637 # R04-S4 percent-escape codec constant in the frozen strict-census format, not a pane identity
-tmux_pane_id:test/fixtures/tmux/observe_panes.raw:4ed8903d12414a734d3476d0befdb1450ce5e2c6a0712a4deac881d5d42a82ca # R04-S4 frozen strict-census fixture row 0 synthetic pane id
-tmux_pane_id:test/fixtures/tmux/observe_panes.raw:289870ec22377db0e54128317e0f4a2b3d22fd4a2979e3dc311a05f2866b70b7 # R04-S4 frozen strict-census fixture row 1 synthetic pane id
-tmux_pane_id:test/fixtures/tmux/observe_panes.raw:615238498192d8ed68a7eae30a2f8619cb3a51a9dfd3ec374e533db4647f7310 # R04-S4 frozen strict-census fixture row 2 synthetic pane id
+tmux_pane_id:test/fixtures/tmux/observe_panes.format.txt:6e861e37ea72444561cee42b9e3cdb0af82925b4b7b48c23b381edb2662c1637 # R04-S4 percent-escape codec constant in the frozen strict-census format, not a pane identity
+tmux_pane_id:test/fixtures/tmux/observe_panes.raw.txt:4ed8903d12414a734d3476d0befdb1450ce5e2c6a0712a4deac881d5d42a82ca # R04-S4 frozen strict-census fixture row 0 synthetic pane id
+tmux_pane_id:test/fixtures/tmux/observe_panes.raw.txt:289870ec22377db0e54128317e0f4a2b3d22fd4a2979e3dc311a05f2866b70b7 # R04-S4 frozen strict-census fixture row 1 synthetic pane id
+tmux_pane_id:test/fixtures/tmux/observe_panes.raw.txt:615238498192d8ed68a7eae30a2f8619cb3a51a9dfd3ec374e533db4647f7310 # R04-S4 frozen strict-census fixture row 2 synthetic pane id
 tmux_pane_id:test/fixtures/tmux/observe_panes.expected.json:4d168e3198f6944867c08aa6cca9355a1a9d91d5c277b9cc5729eee61be92a49 # R04-S4 frozen strict-census expected row 0 synthetic pane id
 tmux_pane_id:test/fixtures/tmux/observe_panes.expected.json:fddcee834ded5330d9c0061cc4d38e2fdaaaa87c4b15388eabd4a6ee3c4da1e0 # R04-S4 frozen strict-census expected row 1 synthetic pane id
 tmux_pane_id:test/fixtures/tmux/observe_panes.expected.json:79f37d0ac5857e54d79c60f612553890ec29ae3605435af2c1bcef1293494d6b # R04-S4 frozen strict-census expected row 2 synthetic pane id

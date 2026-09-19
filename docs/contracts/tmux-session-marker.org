@@ -48,8 +48,8 @@ of them says something, this document says "not promised" rather than deciding.
 - The ~session_id~ a caller addresses comes from the S4 census,
   ~AiPair.Tmux.observe_panes/1~: its ~session_id~ field is the ~$~-prefixed id
   framed raw by the format frozen at
-  ~test/fixtures/tmux/observe_panes.format~, with the raw listing and its
-  decoded rows pinned at ~test/fixtures/tmux/observe_panes.raw~ and
+  ~test/fixtures/tmux/observe_panes.format.txt~, with the raw listing and its
+  decoded rows pinned at ~test/fixtures/tmux/observe_panes.raw.txt~ and
   ~test/fixtures/tmux/observe_panes.expected.json~. The marker's own
   ~session_id~ member is the same identifier.
 

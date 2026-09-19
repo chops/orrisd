@@ -77,7 +77,7 @@ defmodule AiPair.TmuxCensusTest do
       {server, dir} = fake_tmux!("")
 
       assert {:ok, []} = Tmux.observe_panes(server)
-      assert argv!(dir) == ["list-panes", "-a", "-F", fixture!("observe_panes.format")]
+      assert argv!(dir) == ["list-panes", "-a", "-F", fixture!("observe_panes.format.txt")]
       assert calls!(dir) == 1
     end
 
@@ -89,7 +89,7 @@ defmodule AiPair.TmuxCensusTest do
     end
 
     test "the format is the frozen fixture and its arity is stated as 8" do
-      assert Tmux.observe_format() == fixture!("observe_panes.format")
+      assert Tmux.observe_format() == fixture!("observe_panes.format.txt")
       assert Tmux.observation_arity() == 8
       # Every free-text field is percent escaped by tmux; no tab is anywhere in
       # the format, so a C locale cannot change how many fields a row has.
@@ -115,7 +115,7 @@ defmodule AiPair.TmuxCensusTest do
 
   describe "observe_panes/1 parsing" do
     test "decodes the frozen fixture bytes into exactly the frozen structure" do
-      {server, _dir} = fake_tmux!(fixture!("observe_panes.raw"))
+      {server, _dir} = fake_tmux!(fixture!("observe_panes.raw.txt"))
 
       assert {:ok, observations} = Tmux.observe_panes(server)
       assert observations == expected_observations!()
