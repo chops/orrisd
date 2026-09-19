@@ -206,6 +206,26 @@ out_has siblings "[ ok ] ap → $bin/ap" \
 out_has siblings "[ ok ] healthcheck uds-json-ping (pong=0.1.0-fake" \
   "doctor did not resolve the healthcheck client as a sibling when PATH omitted it"
 
+# Leg 8: no date binary is resolvable at all. The healthcheck measures its own
+# elapsed time, and a host without a date it can find must still get a doctor
+# report: the elapsed value degrades to a question mark, the run does not die.
+dateless="$root/dateless"
+mkdir -p "$dateless"
+for tool in bash basename dirname elixir grep head mkdir mktemp rm sha256sum tail timeout tr uname; do
+  if [[ -e "$tools/$tool" ]]; then ln -s "$tools/$tool" "$dateless/$tool"; fi
+done
+# Reach of this leg, stated rather than implied: doctor tries the absolute
+# /run/current-system/sw/bin/date first, so on a nix-darwin host it times
+# itself here regardless of PATH and the fallback is not exercised. Where that
+# absolute path does not exist, which includes the Linux build sandbox this
+# check runs in, this leg is the one that walks the fallback.
+run_doctor dateless "$bin:$dateless"
+[[ "$(rc_of dateless)" == "0" ]] || fail "doctor died with no resolvable date: $(cat "$root/dateless/err")"
+out_has dateless "[ ok ] healthcheck uds-json-ping (pong=0.1.0-fake" \
+  "doctor did not report the healthcheck when it could not resolve a date"
+out_has dateless "[ ok ] project-scoped environment agrees with the session root" \
+  "doctor stopped before the project-resolution report when it could not time itself"
+
 # Leg 7: a launchd entry exists. Fake launchctl, so no real launchd is queried.
 cat >"$bin/launchctl" <<'EOF'
 #!/usr/bin/env bash

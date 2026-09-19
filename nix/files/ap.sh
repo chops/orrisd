@@ -174,7 +174,13 @@ case "$CMD" in
     hc_timeout="/run/current-system/sw/bin/timeout"
     [[ -x "$hc_timeout" ]] || hc_timeout="$(command -v timeout 2>/dev/null || true)"
     hc_date="/run/current-system/sw/bin/date"
-    [[ -x "$hc_date" ]] || hc_date="$(command -v gdate 2>/dev/null || /bin/date)"
+    # A PATH lookup, never an execution: the old fallback ran /bin/date, so on
+    # a host without it the command substitution failed and set -e killed
+    # doctor before it printed a single project-resolution or drift line. The
+    # elapsed-time arithmetic below already degrades to "?" when no date is
+    # resolvable, which is the behaviour that was unreachable.
+    [[ -x "$hc_date" ]] ||
+      hc_date="$(command -v gdate 2>/dev/null || command -v date 2>/dev/null || true)"
     if [[ -z "$hc_timeout" || ! -x "$hc_client" ]]; then
       fail "healthcheck cannot run (timeout=$hc_timeout client=$hc_client)"
     else
