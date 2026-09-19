@@ -292,6 +292,61 @@ defmodule AiPair.Delivery.NS42ProducerConformanceTest do
       assert File.read!(path) == before,
              "a retryable absence is still only a read; attempt 2 is opened by admission alone"
     end
+
+    test "concurrent admissions of one id open one attempt and mint one token", %{inbox: inbox} do
+      store = start_store!(inbox)
+      id = message_id("concurrent-admit")
+      results = admit_concurrently(store, id, 50)
+
+      admitted = for {:ok, {:admitted, view}} <- results, do: view
+      duplicates = for {:ok, {:duplicate, view}} <- results, do: view
+
+      assert length(results) == 50, "the row must really have raced 50 admissions"
+
+      assert length(admitted) == 1,
+             "admission is the only thing that opens an attempt; a second winner is a second " <>
+               "paste authorization for bytes that are already authorized"
+
+      assert length(duplicates) == 49
+
+      assert [%{delivery_attempt: 1}] = admitted
+      assert Map.has_key?(hd(admitted), :operation_token)
+
+      for view <- duplicates do
+        assert view.delivery_attempt == 1
+        assert view.status == "pending"
+
+        refute Map.has_key?(view, :operation_token),
+               "a duplicate admission mints no token, or the losers could finalize the " <>
+                 "attempt they did not open"
+      end
+
+      assert length(log_lines(store)) == 1,
+             "fifty admissions of one id wrote more than one record"
+    end
+
+    test "a concurrent retry after proven non-delivery opens exactly one attempt 2",
+         %{inbox: inbox} do
+      store = start_store!(inbox)
+      id = message_id("concurrent-retry")
+      first = admit!(store, id)
+      :ok = ReceiptStore.transition(store, id, first.operation_token, "not_delivered")
+
+      results = admit_concurrently(store, id, 25)
+      admitted = for {:ok, {:admitted, view}} <- results, do: view
+      duplicates = for {:ok, {:duplicate, view}} <- results, do: view
+
+      assert [%{delivery_attempt: 2}] = admitted
+      assert length(duplicates) == 24
+      assert Enum.all?(duplicates, &(&1.delivery_attempt == 2))
+
+      assert {:error, _} = ReceiptStore.transition(store, id, first.operation_token, "delivered"),
+             "the attempt-1 token is stale the moment attempt 2 is admitted, or a retry " <>
+               "would let the previous attempt report an outcome for bytes it never sent"
+
+      assert {:ok, %{status: "pending", delivery_attempt: 2}} = reconcile(store, id)
+      assert length(log_lines(store)) == 3
+    end
   end
 
   # ===== helpers =====
@@ -321,6 +376,39 @@ defmodule AiPair.Delivery.NS42ProducerConformanceTest do
   end
 
   defp reconcile(store, id), do: ReceiptStore.reconcile(store, id, @pane, @payload, wait_ms: 0)
+
+  # `count` separate processes admit the same id, released together so their calls
+  # queue against the store at once. Each admitting process is its own owner and
+  # stays alive, so no owner loss can finalize an attempt while the row measures it.
+  defp admit_concurrently(store, id, count) do
+    test = self()
+
+    owners =
+      for _ <- 1..count do
+        spawn(fn ->
+          receive do
+            :go ->
+              send(test, {:admit_result, ReceiptStore.admit(store, id, @pane, @payload, self())})
+              Process.sleep(:infinity)
+          end
+        end)
+      end
+
+    on_exit(fn ->
+      Enum.each(owners, fn pid -> if Process.alive?(pid), do: Process.exit(pid, :kill) end)
+    end)
+
+    Enum.each(owners, &send(&1, :go))
+
+    for _ <- 1..count do
+      assert_receive {:admit_result, result}, 5_000
+      result
+    end
+  end
+
+  defp log_lines(store) do
+    store |> ReceiptStore.path() |> File.read!() |> String.split("\n", trim: true)
+  end
 
   defp queued_reconcile(store, id),
     do:
