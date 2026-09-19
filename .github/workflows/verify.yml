@@ -39,8 +39,25 @@ jobs:
       # bin/verify never touches the flake outputs, so until these three steps
       # existed the shipped release, the declared checks and the four Nix
       # modules were neither built nor evaluated by any gate.
-      - name: Evaluate supported Nix outputs
-        run: nix flake check --no-build --all-systems --impure
+      # Not --all-systems: devenv's dev shell reads a derivation at evaluation
+      # time (tasks.nix imports one), and for a system the runner cannot build
+      # that import fails with "path ...-source.drv is not valid". CI run
+      # 35411391330 failed exactly there, on devShells.aarch64-linux, after
+      # every package on all three systems had evaluated. So the dev shell is
+      # checked on the runner's own system, where it is also used, and the
+      # outputs that ship are evaluated on every declared system below.
+      - name: Evaluate this runner's outputs and the Nix modules
+        run: nix flake check --no-build --impure
+
+      - name: Evaluate every package and check on every supported system
+        run: |
+          for system in x86_64-linux aarch64-linux aarch64-darwin; do
+            for output in packages checks; do
+              echo "== $output.$system"
+              nix eval --impure --json ".#$output.$system" \
+                --apply 'outputs: builtins.mapAttrs (_: drv: drv.drvPath) outputs'
+            done
+          done
 
       - name: Build the shipped artifacts
         run: nix build --no-link --print-out-paths .#default .#ap .#manifest
