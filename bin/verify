@@ -66,6 +66,7 @@ mix compile --warnings-as-errors
 mix test --warnings-as-errors
 
 bash test/start_pair_launch_path_test.sh nix/files/start-pair.sh
+bash test/start_pair_trustgate_regex_test.sh nix/files/start-pair.sh test/fixtures/fingerprints
 bash test/ap_project_resolution_test.sh nix/files/ap.sh nix/files/start-pair.sh
 bash test/ap_doctor_test.sh nix/files/ap.sh nix/files/start-pair.sh
 bash test/gemini_otel_provider_sampling_test.sh nix/files/gemini-otel.sh

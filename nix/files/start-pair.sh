@@ -160,11 +160,22 @@ register_panes() {
 # either agent is interacting. Pre-existing trust state in ~/.claude and
 # ~/.codex makes this no-op on subsequent boots; the watcher just times
 # out at $max_wait without typing anything. Idempotent + race-tolerant.
-# Regex of trust/permission-gate prompt text. Matched against live pane
-# content before we ever press Enter. Covers Claude ("Do you trust the files
-# in this folder?") and Codex (older "trust this folder?" gates) without
-# matching a normal agent TUI. Override/extend via AI_PAIR_TRUSTGATE_REGEX.
-TRUSTGATE_REGEX="${AI_PAIR_TRUSTGATE_REGEX:-do you (trust|want to (trust|allow))|trust (this|the) (folder|files|directory|workspace)|allow .* to (work|run|access|edit|make changes)|yes, (allow|proceed|trust)|press enter to (continue|trust|confirm)}"
+# Regex of workspace-trust prompt text ONLY. Matched against live pane
+# content before we ever press Enter. Covers Claude ("Yes, I trust this
+# folder", the anchor in priv/fingerprints/claude_code.json) and Codex ("Do
+# you trust the contents of this directory?"). It deliberately matches no
+# tool-approval wording: the Enter this loop sends confirms whichever row
+# has focus, and permission prompts are never approved by classification
+# (planning north-star-architecture: known project-trust dialogs may be
+# answered by launch policy; permission prompts may not). Earlier defaults
+# also carried "allow ... to run", "yes, (allow|proceed)" and "press enter
+# to continue"; "Yes, proceed" is a Codex approval option label, and the
+# Claude auto-mode banner ("allow harmful commands to run") satisfied the
+# "allow" clause on every busy/idle screen. test/start_pair_trustgate_regex_test.sh
+# pins both directions. AI_PAIR_TRUSTGATE_REGEX replaces the default
+# wholesale; an override that re-adds approval wording widens what one
+# Enter can confirm, so it is explicit operator policy, never a default.
+TRUSTGATE_REGEX="${AI_PAIR_TRUSTGATE_REGEX:-do you trust|trust (this|the) (folder|files|directory|workspace)}"
 
 autodismiss_trustgates() {
   local AI_PAIR_BIN HERE pane_label pane_id state t0 max_wait content

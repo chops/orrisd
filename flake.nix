@@ -112,6 +112,13 @@
             touch "$out"
           '';
 
+          start-pair-trustgate-regex = pkgs.runCommand "start-pair-trustgate-regex-test" {
+            nativeBuildInputs = [ pkgs.bash pkgs.coreutils pkgs.gnugrep ];
+          } ''
+            bash ${./test/start_pair_trustgate_regex_test.sh} ${./nix/files/start-pair.sh} ${./test/fixtures/fingerprints}
+            touch "$out"
+          '';
+
           ap-project-resolution = pkgs.runCommand "ap-project-resolution-test" {
             nativeBuildInputs = [ pkgs.bash pkgs.coreutils pkgs.gnugrep pkgs.beam.packages.erlang_29.elixir_1_20 ];
           } ''
