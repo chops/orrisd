@@ -110,11 +110,14 @@ at the next boot. The daemon-wide setting is the only gate (~lane:53-61,872-874~
   **v1-only**: a client that negotiates v2 for delivery still sends attach and
   detach as v1 frames.
 - Any other ~protocol_version~ answers ~unsupported_protocol_version~
-  (~delivery.ex:54-55~).
-- ~ping~ at v2 advertises ~capabilities: ["delivery_reconcile"]~
-  (~delivery.ex:34-37~). No capability names durable attachment, so a client
-  cannot negotiate for it and must learn the daemon's mode from the replies
-  below. Whether S9 should advertise one is an open question (OQ-4).
+  (~1018ad9b:lib/ai_pair/ipc/delivery.ex:54-55~, historical source snapshot).
+- The historical R04 S9 baseline's v2 ~ping~ advertised
+  ~capabilities: ["delivery_reconcile"]~ (~delivery.ex:34-37~).
+  D01 clarification, 2026-09-20: the source-adoption candidate adds
+  ~sessions_read~ beside ~delivery_reconcile~; qualification and coordinated
+  pairing remain pending in ~ipc-v2.org~. Neither capability names durable
+  attachment, so a client cannot negotiate for it and must learn the daemon's
+  mode from the replies below. Whether S9 should advertise one remains OQ-4.
 
 ** Reply members
 :PROPERTIES:
@@ -439,9 +442,11 @@ nothing to ~test/fixtures/contracts/ipc/v1~ and changes no byte in it:
   ~"durable_store_timeout"~ comes from ~lane:1078~ and from no assertion. It is
   frozen here because a closed vocabulary needs a name, but it is the one attach
   error string with no RED row behind it.
-- OQ-4 capability advertisement. ~ping~ at v2 advertises only
-  ~"delivery_reconcile"~ (~delivery.ex:36~). Should a durable daemon advertise
-  its mode, so a client learns it without provoking a refusal?
+- OQ-4 capability advertisement. At the historical R04 S9 baseline, ~ping~ at v2
+  advertised only ~"delivery_reconcile"~ (~delivery.ex:36~). Should a durable
+  daemon advertise its mode, so a client learns it without provoking a refusal?
+  D01 clarification, 2026-09-20: candidate ~sessions_read~ advertises a census
+  read, not durable mode, and does not answer this historical open question.
 - OQ-5 the second census read. ~lane:1131-1132~ re-observes and refuses
   ~durable_observation_changed~ on ANY difference, including a changed
   ~pane_pid~ of the same pane. No RED row exercises it, and the scope says only

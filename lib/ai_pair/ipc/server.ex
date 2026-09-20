@@ -156,6 +156,7 @@ defmodule AiPair.IPC.Server do
   use GenServer
 
   alias AiPair.IPC.Delivery
+  alias AiPair.IPC.Sessions
   alias AiPair.PaneRestore.Coordinator
   alias AiPair.PaneRestore.Marker
 
@@ -385,7 +386,11 @@ defmodule AiPair.IPC.Server do
         do_dispatch(params |> Map.put(:receipt_store, store) |> Map.put(:durable_context, context))
 
       2 ->
-        Jason.encode!(Delivery.dispatch(params, store))
+        if params["cmd"] == "sessions" do
+          params |> Sessions.dispatch() |> Sessions.encode_reply()
+        else
+          Jason.encode!(Delivery.dispatch(params, store))
+        end
 
       _ ->
         Jason.encode!(Delivery.unsupported(params))

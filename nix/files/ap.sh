@@ -9,6 +9,7 @@
 #   doctor                     Sanity checks (daemon, socket, paths, env)
 #   migrate [DIR] [--apply]    Scaffold .envrc into project dirs
 #   ping [--protocol-version 2]     Query daemon health and delivery capabilities
+#   sessions [--protocol-version 2] Read sessions after capability preflight
 #   reconcile <pane> --protocol-version 2 --msg-id ID --payload-hash HASH [--wait-ms N]
 #   send [--msg-id ID] <pane> <text>  Wake a peer pane with <text> via the daemon
 #   send [--msg-id ID] <pane> --stdin Same, reading payload from stdin
@@ -287,7 +288,7 @@ case "$CMD" in
     echo "summary: candidates=$found written=$written skipped=$skipped mode=$mode"
     ;;
 
-  ping|reconcile)
+  ping|reconcile|sessions)
     exec "$(resolve_bin ai-pair)" "$CMD" "$@"
     ;;
 

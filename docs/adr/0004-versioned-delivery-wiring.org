@@ -21,6 +21,13 @@ with a live store. Send requires the caller's stable message ID, hashes the
 received text independently, and never mints a replacement ID. Reconcile binds
 message ID, pane ID and payload hash, with a bounded wait (default 250 ms).
 
+D01 clarification, 2026-09-20: the source-adoption candidate also advertises
+sessions_read in ordinary v2 ping. The live-store condition above still governs
+delivery_reconcile; "only" states that condition, not a singleton capability list.
+sessions_read is a census-read capability, not durable-attachment negotiation.
+Producer qualification and coordinated pairing remain pending in
+docs/contracts/ipc-v2.org; this note does not release a main or live rollout.
+
 The pane, not its IPC connection, owns admission and the operation token. It
 persists queued before adding the queue entry, calls begin_paste immediately
 before the paste adapter, and persists delivered or ambiguous afterward. An

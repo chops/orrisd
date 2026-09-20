@@ -13,7 +13,7 @@ defmodule AiPair.IPC.ContractV2HashTest do
 
   @fixture_dir Path.expand("../../fixtures/contracts/ipc/v2", __DIR__)
   @hash_path Path.join(@fixture_dir, "CONTRACT_HASH")
-  @pinned_hash "78c2f64240c3c5c9da60425c65c498974a2a81c8adb3e68e0bef28613c1707dc"
+  @pinned_hash "a6f92d537897d30a883a04d29217ff36a4f33db759b87d4e6ccc79ad4c2232fc"
   @expected_fixture_count 16
 
   test "the IPC v2 fixture set matches the pinned cross-repository hash" do

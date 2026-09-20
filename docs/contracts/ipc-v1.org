@@ -93,6 +93,14 @@ unchanged from the previously paired consumer ~3684f53e~. This advances the
 named fixture snapshot only; the historical document comparison below remains
 about ~3684f53e~.
 
+Re-measured on 2026-09-20 for the D01 source adoption candidate against consumer
+~ffe6fb87bb049d604e269ba60891fda1b14dba57~: both committed v1 fixture trees
+remain ~c290afa11a973c7e32528b66c3d5bbd9c008def7~, with unchanged hash
+~f1cacf8b53fdd1db37ec968e5476081250804e9c6a4d615215d47d9b77894213~.
+This is a fixture-only source-snapshot measurement, not a v1 document alignment
+or completed D01 paired adoption; producer qualification against that source and
+coordinated v2 fixture adoption remain pending as recorded in ~ipc-v2.org~.
+
 The two repositories' v1 DOCUMENTS were written independently and are not
 byte-identical; only the fixtures and their hash are. The v2 contract text is
 the other way round: [[./ipc-v2.org][the version 2 contract]] vendors the
