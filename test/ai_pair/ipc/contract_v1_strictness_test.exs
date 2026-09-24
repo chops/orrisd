@@ -66,9 +66,13 @@ defmodule AiPair.IPC.ContractV1StrictnessTest do
 
     {:ok, server} = Server.start_link(inbox: tmp, name: :ipc_contract_v1_strictness_server)
 
+    # The listener socket is disposable and uniquely named; cleanup is asserted, so a
+    # row that leaves the server or its socket behind fails even if its body passed.
     on_exit(fn ->
       stop_quietly(server)
       File.rm_rf!(tmp)
+      refute Process.alive?(server), "the IPC listener outlived its test"
+      refute File.exists?(sock_path), "the IPC socket outlived its test"
     end)
 
     %{sock_path: sock_path}
