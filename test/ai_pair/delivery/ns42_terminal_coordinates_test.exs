@@ -38,6 +38,7 @@ defmodule AiPair.Delivery.NS42TerminalCoordinatesTest do
 
   @statuses ~w(pending queued delivered not_delivered ambiguous)
   @terminal ~w(delivered not_delivered ambiguous)
+  @pending_successors ~w(queued delivered not_delivered ambiguous)
 
   # The five coordinates of the receipt view (`receipt_store.ex:21-27`).
   @coordinates [:message_id, :pane_id, :payload_hash, :status, :delivery_attempt]
@@ -112,6 +113,8 @@ defmodule AiPair.Delivery.NS42TerminalCoordinatesTest do
       end
     end
 
+    # Assertion-shape control: it shows the comparison detects a one-coordinate
+    # difference. It is not mutation evidence; the rows above carry that.
     test "control: the tuple comparison fails when any single coordinate differs" do
       bound = tuple(message_id("control-tuple"), "delivered")
       changes = one_coordinate_changes(bound)
@@ -179,8 +182,8 @@ defmodule AiPair.Delivery.NS42TerminalCoordinatesTest do
         assert {:ok, served} = reconcile(store, id)
         assert Map.take(served, @coordinates) == expected
 
-        # message_id: a write under another id is another receipt, never a re-key of
-        # this one. The prior bytes stay a prefix of the log.
+        # message_id: no write entry point can re-key a receipt, so there is nothing to
+        # refuse. An unrelated admission leaves the prior bytes intact as a prefix.
         other = message_id("other-#{status}")
         assert %{delivery_attempt: 1} = admit!(store, other, owner)
         assert String.starts_with?(File.read!(path), before)
@@ -203,6 +206,8 @@ defmodule AiPair.Delivery.NS42TerminalCoordinatesTest do
       end
     end
 
+    # Assertion-shape control: it shows the byte comparison detects an accepted write.
+    # It is not mutation evidence; the rows above carry that.
     test "control: the byte comparison fails when a write is accepted", %{inbox: inbox} do
       store = start_store!(inbox)
       id = message_id("control-accepted-write")
@@ -219,7 +224,7 @@ defmodule AiPair.Delivery.NS42TerminalCoordinatesTest do
     end
   end
 
-  describe "(c) a hand-written rewrite of one coordinate is refused when the log is opened" do
+  describe "(c) a hand-written line contradicting one terminal coordinate is refused at open" do
     test "control: the hand-written pending and terminal lines open and read back the tuple",
          %{inbox: inbox} do
       for status <- @terminal do
@@ -239,32 +244,32 @@ defmodule AiPair.Delivery.NS42TerminalCoordinatesTest do
       end
     end
 
-    test "control: the forging helper's lines are accepted when the edit is a legal edge",
-         %{inbox: inbox} do
-      for status <- @terminal do
-        dir = Path.join(inbox, "legal-#{status}")
-        {[pending_line, _terminal_line], expected} = hand_written_terminal(status)
+    for status <- @terminal do
+      test "#{status}: control: a legal seq-3 successor of the terminal line opens",
+           %{inbox: inbox} do
+        status = unquote(status)
+        {lines, _expected} = hand_written_terminal(status)
 
-        # The same helper the refusal rows use, applied after a PENDING line: seq,
-        # chain link, key set and grammars are identical in kind, and the edge is legal.
-        forged = forge_after([pending_line], &Map.put(&1, "status", status))
-        write_log!(dir, [pending_line, forged])
+        # A fresh id opened as pending at attempt 1. It differs from the refused
+        # message_id row below ONLY in its status, which isolates that row's cause.
+        fresh = message_id("fresh-after-#{status}")
+        open_fresh = fn record -> %{record | "message_id" => fresh, "status" => "pending"} end
+        successors = [{"fresh", open_fresh} | legal_retry(status)]
 
-        assert {:ok, log} = ReceiptLog.open(SystemFs.new(), dir)
+        for {label, edit} <- successors do
+          dir = Path.join(inbox, "legal-#{status}-#{label}")
+          write_log!(dir, lines ++ [forge_after(lines, edit)])
 
-        try do
-          assert ReceiptLog.view(log.entries[expected.message_id]) == expected
-        after
-          ReceiptLog.close(log)
+          # Same helper, same position as the refusal rows, and the log opens: the
+          # refusals are not "nothing is accepted after a terminal line".
+          assert_opens!(dir, 3)
+          assert_raise ExUnit.AssertionError, fn -> assert_refused_at_open!(dir, 3) end
         end
-
-        # And the refusal assertion used below really fails on an accepted log.
-        assert_raise ExUnit.AssertionError, fn -> assert_refused_at_open!(dir, 2) end
       end
     end
 
     for status <- @terminal do
-      test "#{status}: each single-coordinate rewrite is refused by the history rule",
+      test "#{status}: each successor contradicting one coordinate is refused at seq 3",
            %{inbox: inbox} do
         status = unquote(status)
         {lines, expected} = hand_written_terminal(status)
@@ -293,12 +298,69 @@ defmodule AiPair.Delivery.NS42TerminalCoordinatesTest do
 
           write_log!(dir, lines ++ [tampered])
 
+          # The product reports only {:receipt_log_corrupt, seq} (receipt_log.ex:95),
+          # whichever conjunct of valid_record?/2 failed. Attribution to the history
+          # rule (history_valid?/2) rests on the assertions above eliminating every
+          # other conjunct: key set, schema, grammars, seq and chain link.
+          #
+          # The message_id variant is not a re-key (the product has no re-key
+          # operation): it states that a FIRST record under a new id cannot be
+          # terminal (receipt_log.ex:114). Its control above differs only in status.
           assert_refused_at_open!(dir, 3)
+          assert_store_refuses!(dir, 3, "#{status}: #{label(field)}")
+        end
+      end
+    end
 
-          assert {:error, reason} = start_store(dir, {:tampered, status, index})
+    for status <- @terminal do
+      test "#{status}: an in-place rewrite of an identity coordinate is refused at seq 2",
+           %{inbox: inbox} do
+        status = unquote(status)
+        {[pending_line, _terminal_line], expected} = hand_written_terminal(status)
 
-          assert inspect(reason) =~ "{:receipt_log_corrupt, 3}",
-                 "#{status}: the store must refuse to serve a log rewriting #{key}"
+        identity = Enum.reject(one_coordinate_changes(expected), &match?({:status, _}, &1))
+        identity_fields = [:message_id, :pane_id, :payload_hash, :delivery_attempt]
+        assert Enum.map(identity, &elem(&1, 0)) == identity_fields
+
+        for {{field, value}, index} <- Enum.with_index(identity) do
+          key = Atom.to_string(field)
+          dir = Path.join(inbox, "in-place-#{status}-#{index}")
+
+          # The terminal line itself is replaced: nothing follows it, so no later hash
+          # has to be recomputed, and its own link to the pending line stays correct.
+          rewritten =
+            forge_after([pending_line], &(&1 |> Map.put("status", status) |> Map.put(key, value)))
+
+          record = decode_line!(rewritten)
+          assert well_formed?(record), "#{key}: the rewritten line must be well formed"
+          assert record["seq"] == 2
+          assert_chain!([pending_line, rewritten])
+
+          write_log!(dir, [pending_line, rewritten])
+          assert_refused_at_open!(dir, 2)
+        end
+      end
+    end
+
+    test "characterisation: an in-place final status rewrite to a legal outcome opens",
+         %{inbox: inbox} do
+      # KNOWN LIMITATION, pinned rather than hidden. ADR-0003 "Durable Record": "This chain
+      # is not authentication against an attacker who can rewrite the entire log." The
+      # final line can be replaced by any other legal successor of `pending`, because no
+      # later line binds its bytes. Whether NS-42.C.007 must go further is an owner
+      # decision; this row changes if the product ever detects it.
+      for status <- @terminal, other <- @pending_successors, other != status do
+        {[pending_line, _terminal_line], expected} = hand_written_terminal(status)
+        dir = Path.join(inbox, "undetected-#{status}-#{other}")
+        rewritten = forge_after([pending_line], &Map.put(&1, "status", other))
+        write_log!(dir, [pending_line, rewritten])
+
+        assert {:ok, log} = ReceiptLog.open(SystemFs.new(), dir)
+
+        try do
+          assert ReceiptLog.view(log.entries[expected.message_id]).status == other
+        after
+          ReceiptLog.close(log)
         end
       end
     end
@@ -381,6 +443,37 @@ defmodule AiPair.Delivery.NS42TerminalCoordinatesTest do
     assert File.read!(path) == before, "a refused complete line is not repaired or truncated"
   end
 
+  # The store's own open path refuses the log with the exact reason. GenServer.start
+  # is unlinked and unregistered, so an unexpected success is stopped, not leaked.
+  defp assert_store_refuses!(dir, seq, message) do
+    result = GenServer.start(ReceiptStore, inbox: dir)
+    with {:ok, pid} <- result, do: GenServer.stop(pid)
+    assert result == {:error, {:receipt_log_corrupt, seq}}, message
+  end
+
+  defp assert_opens!(dir, seq) do
+    assert {:ok, log} = ReceiptLog.open(SystemFs.new(), dir)
+
+    try do
+      assert log.seq == seq
+    after
+      ReceiptLog.close(log)
+    end
+  end
+
+  # The one legal successor that reuses a terminal id: a retry after proven non-delivery.
+  defp legal_retry("not_delivered") do
+    retry = fn record -> %{record | "status" => "pending", "delivery_attempt" => 2} end
+    [{"retry", retry}]
+  end
+
+  defp legal_retry(_status), do: []
+
+  defp label(:message_id), do: "a first record under a new id cannot be terminal"
+  defp label(field), do: "a successor may not change #{field}"
+
+  # Duplicates the private epoch grammar at receipt_log.ex:108; the product check is
+  # not public, so the rows restate it.
   defp well_formed?(record) do
     Enum.all?([
       record["schema"] == "ai-pair/delivery-receipt",
@@ -442,7 +535,12 @@ defmodule AiPair.Delivery.NS42TerminalCoordinatesTest do
   defp stop_store(pid) do
     ref = Process.monitor(pid)
     :ok = GenServer.stop(pid, :normal, 1_000)
-    receive do: ({:DOWN, ^ref, :process, ^pid, _} -> :ok)
+
+    receive do
+      {:DOWN, ^ref, :process, ^pid, _} -> :ok
+    after
+      1_000 -> flunk("the store under test never went down")
+    end
   end
 
   defp admit!(store, id, owner \\ nil) do
