@@ -20,11 +20,15 @@ defmodule AiPair.IPC.ContractV1StrictnessTest do
     * a queued send has `queue_reason` equal to `debounce`, `busy`, `dialog` or `unknown`;
     * a `send` request may carry `msg_id`, which is not echoed in a v1 reply.
 
-  Nothing in product code is changed; every row asserts behaviour that is present.
+  Nothing in product code is changed; every row asserts behaviour that is present, and
+  one row pins a known product defect (see "the one v1 send outcome with no fixture
+  reply").
   """
 
   # One row changes the send-call timeout in the application environment.
   use ExUnit.Case, async: false
+
+  import ExUnit.CaptureLog, only: [with_log: 1]
 
   alias AiPair.Pane.StateMachine
   alias AiPair.Test.ReceiptBackedIPCServer, as: Server
@@ -240,7 +244,16 @@ defmodule AiPair.IPC.ContractV1StrictnessTest do
         "msg_id" => "msg_ns39_quarantined"
       }
 
-      assert exchange(sock_path, payload) == {:error, :closed}
+      # The close alone would pass for ANY handler crash, so the captured crash report
+      # must name the cause. The report is written by the dying handler task before
+      # it exits, and its socket closes only on that exit, so the close observed here
+      # is ordered after the report.
+      {result, log} = with_log(fn -> exchange(sock_path, payload) end)
+
+      assert result == {:error, :closed}
+      assert log =~ "FunctionClauseError", "the close must come from the missing clause"
+      assert log =~ "format_send_result", "the crash must be in format_send_result/2"
+      assert log =~ ":pane_quarantined", "the unmatched value must be the quarantine refusal"
 
       # Nothing was queued behind the refusal, and the listener still answers.
       assert %{pending_count: 0} = StateMachine.status(pane)
