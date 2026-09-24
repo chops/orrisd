@@ -179,7 +179,14 @@ defmodule AiPair.Delivery.ReceiptStore do
       {%{from: from, id: id, monitor: monitor}, rest} ->
         Process.demonitor(monitor, [:flush])
         {:ok, view} = current(state, id)
-        GenServer.reply(from, {:ok, Map.put(view, :outcome, "ambiguous")})
+
+        # A poisoned store can no longer finalize this record; never answer it as pending.
+        reply =
+          if state.poisoned and view.status in ["pending", "queued"],
+            do: {:error, :receipt_store_unavailable},
+            else: {:ok, Map.put(view, :outcome, "ambiguous")}
+
+        GenServer.reply(from, reply)
         {:noreply, %{state | waiters: rest}}
     end
   end
@@ -289,13 +296,27 @@ defmodule AiPair.Delivery.ReceiptStore do
     {:noreply, %{state | waiters: Map.put(state.waiters, ref, waiter)}}
   end
 
-  defp persist(%{poisoned: true} = state, _view), do: {:error, :receipt_store_unavailable, state}
+  defp persist(%{poisoned: true} = state, _view),
+    do: {:error, :receipt_store_unavailable, fail_waiters(state)}
 
   defp persist(state, view) do
     case ReceiptLog.append(state.log, view, state.epoch) do
       {:ok, log} -> {:ok, %{state | log: log}}
-      {:error, reason} -> {:error, reason, %{state | poisoned: true}}
+      {:error, reason} -> {:error, reason, fail_waiters(%{state | poisoned: true})}
     end
+  end
+
+  # No pending or queued record can be finalized once the store is poisoned, so a waiter on
+  # any id could only be answered by its timer with a stale view. Wake every one with the
+  # answer a later caller gets; no further append is attempted.
+  defp fail_waiters(state) do
+    Enum.each(state.waiters, fn {_ref, waiter} ->
+      Process.cancel_timer(waiter.timer)
+      Process.demonitor(waiter.monitor, [:flush])
+      GenServer.reply(waiter.from, {:error, :receipt_store_unavailable})
+    end)
+
+    %{state | waiters: %{}}
   end
 
   defp notify(state, id) do
