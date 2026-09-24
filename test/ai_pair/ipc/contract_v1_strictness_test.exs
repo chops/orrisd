@@ -32,11 +32,22 @@ defmodule AiPair.IPC.ContractV1StrictnessTest do
   @fixture_dir Path.expand("../../fixtures/contracts/ipc/v1", __DIR__)
   @contract_doc Path.expand("../../../docs/contracts/ipc-v1.org", __DIR__)
 
-  @states ~w(idle busy dialog dead unknown)
-  @queue_reasons ~w(debounce busy dialog unknown)
+  @external_resource @contract_doc
 
-  @state_lead "- ~pane_status.state~ is one of"
-  @queue_reason_lead "- A queued send has ~queue_reason~ equal to"
+  # The closed vocabularies are read from the contract text at compile time, so every
+  # row below checks against the set the contract states rather than a copy of it. The
+  # words of one bullet written as ~word~ are taken, minus the bullet's subject.
+  vocabulary = fn lead ->
+    [_before, rest] = @contract_doc |> File.read!() |> String.split(lead, parts: 2)
+    [bullet | _] = String.split(rest, ~r/\n(- |\n)/, parts: 2)
+
+    ~r/~([a-z_]+)~/
+    |> Regex.scan(bullet, capture: :all_but_first)
+    |> List.flatten()
+  end
+
+  @states vocabulary.("- ~pane_status.state~ is one of")
+  @queue_reasons vocabulary.("- A queued send has ~queue_reason~ equal to")
 
   # Every v1 reply kind in the fixture table, with the request that produces it.
   @kinds [
@@ -68,11 +79,17 @@ defmodule AiPair.IPC.ContractV1StrictnessTest do
 
     # The listener socket is disposable and uniquely named; cleanup is asserted, so a
     # row that leaves the server or its socket behind fails even if its body passed.
+    # The socket check runs BEFORE the directory is removed, so it observes what the
+    # server's own terminate/2 did; the directory is removed whether or not it passes.
     on_exit(fn ->
       stop_quietly(server)
-      File.rm_rf!(tmp)
-      refute Process.alive?(server), "the IPC listener outlived its test"
-      refute File.exists?(sock_path), "the IPC socket outlived its test"
+
+      try do
+        refute Process.alive?(server), "the IPC listener outlived its test"
+        refute File.exists?(sock_path), "the IPC socket outlived its test"
+      after
+        File.rm_rf!(tmp)
+      end
     end)
 
     %{sock_path: sock_path}
@@ -80,8 +97,15 @@ defmodule AiPair.IPC.ContractV1StrictnessTest do
 
   describe "varying v1 fields are typed, not only replaced" do
     test "the vocabularies these rows use are the ones the contract states" do
-      assert contract_vocabulary(@state_lead) == @states
-      assert contract_vocabulary(@queue_reason_lead) == @queue_reasons
+      for set <- [@states, @queue_reasons] do
+        assert set != [], "a contract vocabulary parsed to nothing"
+        assert set == Enum.uniq(set), "a contract vocabulary parsed with duplicates"
+      end
+
+      # What the contract states today. Contract drift fails here, in one place, while
+      # every other row already checks against the parsed set.
+      assert @states == ~w(idle busy dialog dead unknown)
+      assert @queue_reasons == ~w(debounce busy dialog unknown)
     end
 
     test "every v1 reply kind carries correctly typed varying fields", %{sock_path: sock_path} do
@@ -192,11 +216,45 @@ defmodule AiPair.IPC.ContractV1StrictnessTest do
     end
   end
 
+  describe "the one v1 send outcome with no fixture reply" do
+    # FINDING, pinned as current behaviour and not asserted as correct. A quarantined
+    # pane answers the v1 send path with {:error, :pane_quarantined}
+    # (state_machine.ex:441-445), and `format_send_result/2` (server.ex:638-680) has no
+    # clause for it. The handler task raises, its socket closes, and the client gets no
+    # reply at all. The v1 fixture table defines no reply for this case, so the reply a
+    # client SHOULD get is a product and contract decision for a follow-up row; when that
+    # lands, this row must change with it.
+    test "a send to a quarantined pane closes without a reply, and the listener survives",
+         %{sock_path: sock_path} do
+      pane_id = unique_pane("quarantined")
+      pane = start_fixture_pane(pane_id, "IDLE_MARKER", quarantine_token: make_ref())
+      wait_for_state(pane_id, :idle)
+
+      # Precondition: the pane really is quarantined, or the row proves nothing.
+      assert %{quarantined: true} = StateMachine.status(pane)
+
+      payload = %{
+        "cmd" => "send",
+        "pane_id" => pane_id,
+        "text" => "quarantined",
+        "msg_id" => "msg_ns39_quarantined"
+      }
+
+      assert exchange(sock_path, payload) == {:error, :closed}
+
+      # Nothing was queued behind the refusal, and the listener still answers.
+      assert %{pending_count: 0} = StateMachine.status(pane)
+      {raw, bindings} = drive(:ping, sock_path, %{})
+      conform!(raw, "ping.ok.json", bindings)
+    end
+  end
+
   describe "the queue-reason vocabulary is closed" do
     test "every pane state is driven and the server emits only contract reasons",
          %{sock_path: sock_path} do
-      # The pane state space is read from the product's own type, so a sixth state
-      # would enter this enumeration rather than escape it.
+      # The DECLARED pane state space is read from the product's own type. A sixth
+      # declared state fails the next assertion before any state is driven; this row
+      # does not prove the machine never enters an undeclared state.
       states = pane_states()
       assert Enum.sort(states) == @states |> Enum.map(&String.to_atom/1) |> Enum.sort()
 
@@ -398,7 +456,12 @@ defmodule AiPair.IPC.ContractV1StrictnessTest do
 
   defp drive(:send_timeout, sock_path, extra) do
     pane_id = unique_pane("timeout")
-    slow = fn _, _ -> Process.sleep(100) && :ok end
+
+    slow = fn _, _ ->
+      Process.sleep(100)
+      :ok
+    end
+
     start_fixture_pane(pane_id, "IDLE_MARKER", paste_fn: slow)
     wait_for_state(pane_id, :idle)
 
@@ -442,7 +505,19 @@ defmodule AiPair.IPC.ContractV1StrictnessTest do
         wait_for_state(pane_id, :dialog)
 
       :unknown ->
-        start_fixture_pane(pane_id, "no marker in this capture")
+        # The machine STARTS in :unknown, so the pane is first classified busy and then
+        # re-classified from a capture that carries no marker: the state is driven.
+        screen = :atomics.new(1, [])
+
+        capture = fn _ ->
+          if :atomics.get(screen, 1) == 0,
+            do: {:ok, "BUSY_MARKER"},
+            else: {:ok, "no marker in this capture"}
+        end
+
+        start_fixture_pane(pane_id, "unused", capture_fn: capture)
+        wait_for_state(pane_id, :busy)
+        :atomics.put(screen, 1, 1)
         wait_for_state(pane_id, :unknown)
 
       :dead ->
@@ -453,9 +528,13 @@ defmodule AiPair.IPC.ContractV1StrictnessTest do
     end
 
     raw = send_text(sock_path, pane_id, "state #{state}", %{})
-    bindings = %{pane_id: pane_id, queue_reason: reason(raw)}
-    {raw, bindings}
+    {raw, %{pane_id: pane_id, queue_reason: expected_reason(state)}}
   end
+
+  # Bound independently of the reply, so `conform!/3` checks equality on its own.
+  defp expected_reason(:idle), do: "debounce"
+  defp expected_reason(:dead), do: nil
+  defp expected_reason(state), do: Atom.to_string(state)
 
   defp reason(raw), do: Jason.decode!(raw)["queue_reason"]
 
@@ -528,7 +607,8 @@ defmodule AiPair.IPC.ContractV1StrictnessTest do
     is_integer(value) and value >= 0 and value == Map.fetch!(bindings, :pending_count)
   end
 
-  defp valid?("queue_reason", _representative, value, bindings) do
+  # The fixture's "busy" is its representative value, pinned so a fixture change fails.
+  defp valid?("queue_reason", "busy", value, bindings) do
     value in @queue_reasons and value == Map.fetch!(bindings, :queue_reason)
   end
 
@@ -537,16 +617,6 @@ defmodule AiPair.IPC.ContractV1StrictnessTest do
     refute Map.has_key?(reply, "msg_id"), "a v1 reply must not carry msg_id"
 
     refute String.contains?(raw, msg_id), "a v1 reply must not echo msg_id under any key"
-  end
-
-  # The words of one contract bullet that are written as ~word~, minus the subject.
-  defp contract_vocabulary(lead) do
-    [_before, rest] = @contract_doc |> File.read!() |> String.split(lead, parts: 2)
-    [bullet | _] = String.split(rest, ~r/\n(- |\n)/, parts: 2)
-
-    ~r/~([a-z_]+)~/
-    |> Regex.scan(bullet, capture: :all_but_first)
-    |> List.flatten()
   end
 
   defp pane_states do
@@ -571,13 +641,18 @@ defmodule AiPair.IPC.ContractV1StrictnessTest do
   end
 
   defp request(sock_path, payload, extra) do
+    {:ok, frame} = exchange(sock_path, Map.merge(payload, extra))
+    frame
+  end
+
+  # One bounded request/receive, answering the raw receive result.
+  defp exchange(sock_path, payload) do
     {:ok, client} =
       :gen_tcp.connect({:local, sock_path}, 0, [:binary, {:active, false}, {:packet, 4}], 1_000)
 
     try do
-      :ok = :gen_tcp.send(client, Jason.encode!(Map.merge(payload, extra)))
-      {:ok, frame} = :gen_tcp.recv(client, 0, 1_000)
-      frame
+      :ok = :gen_tcp.send(client, Jason.encode!(payload))
+      :gen_tcp.recv(client, 0, 1_000)
     after
       :gen_tcp.close(client)
     end
