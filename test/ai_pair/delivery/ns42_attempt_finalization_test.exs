@@ -126,27 +126,19 @@ defmodule AiPair.Delivery.NS42AttemptFinalizationTest do
       assert {:ok, %{outcome: "delivered"}} = reconcile(store, id, 0)
     end
 
-    test "an owner loss that cannot be persisted answers ambiguous and poisons the store",
+    test "an owner loss that cannot be persisted poisons the store and fabricates nothing",
          %{inbox: inbox} do
-      fs = FaultFs.new()
-      store = start_store!(inbox, :store, fs: fs)
-      id = message_id("unpersisted-loss")
-      owner = spawn_owner()
-      admit!(store, id, owner)
+      {store, fs, owner, id} = unpersistable_owner_loss!(inbox)
       path = ReceiptStore.path(store)
       before = File.read!(path)
+      writes = FaultFs.count(fs, :write)
+      syncs = FaultFs.count(fs, :sync)
 
-      # The next write is the ambiguity append for the owner loss; it is refused.
-      FaultFs.inject(fs, :write, FaultFs.count(fs, :write) + 1, {:error, :eio})
-
-      waiter = wait_async(store, id, 300)
-      await_waiters(store, 1)
       kill_and_await(owner)
 
-      assert {:ok, reply} = Task.await(waiter, 2_000)
-
-      assert reply.outcome == "ambiguous",
-             "an unrecorded owner loss is still unproven delivery, never absence"
+      # The owner loss reached the store and its append was the refused write.
+      wait_until(fn -> FaultFs.count(fs, :write) == writes + 1 end)
+      assert FaultFs.count(fs, :sync) == syncs, "a refused write is never fsynced"
 
       assert File.read!(path) == before, "no outcome is fabricated behind a failed append"
 
@@ -155,6 +147,34 @@ defmodule AiPair.Delivery.NS42AttemptFinalizationTest do
 
       assert {:error, :receipt_store_unavailable} =
                ReceiptStore.admit(store, message_id("after-poison"), @pane, @payload, self())
+    end
+
+    # EXPECTED RED against 1018ad9b: a finding for the owners, kept failing on purpose.
+    #
+    # ADR-0003 "Ownership and Recovery": after a failed append, "Previously unresolved
+    # records cannot then answer queued/pending as if finalization remained healthy. The
+    # caller receives a named error". ADR-0003 "Crossing the Paste Boundary": "owner loss
+    # wakes waiters with durably recorded ambiguity". Here the owner-loss append fails, so
+    # neither can happen as written, and the store (receipt_store.ex:196-199) returns
+    # without notify/2: the waiter is not woken. It is answered only when its own timer
+    # fires (receipt_store.ex:174-184), which does not check `poisoned` and replies
+    # {:ok, %{status: "pending", outcome: "ambiguous"}}. A caller arriving one moment
+    # later gets {:error, :receipt_store_unavailable} (receipt_store.ex:258-259) for the
+    # same record. This row asserts the documented answer: the named error, promptly.
+    test "RED: a waiter caught by an unpersisted owner loss receives the named error",
+         %{inbox: inbox} do
+      {store, _fs, owner, id} = unpersistable_owner_loss!(inbox)
+
+      # A 5 s wait, so within the 2 s bound only owner loss could answer it.
+      waiter = wait_async(store, id, 5_000)
+      await_waiters(store, 1)
+      kill_and_await(owner)
+
+      answer = Task.yield(waiter, 2_000) || Task.shutdown(waiter, :brutal_kill)
+
+      assert answer == {:ok, {:error, :receipt_store_unavailable}},
+             "ADR-0003: a waiter on a record whose owner loss could not be persisted must " <>
+               "receive the named error, got #{inspect(answer)}"
     end
   end
 
@@ -286,6 +306,8 @@ defmodule AiPair.Delivery.NS42AttemptFinalizationTest do
 
       assert {:error, reason} = start_store(inbox, :failed, fs: fs)
       assert inspect(reason) =~ "receipt_write_failed"
+      assert FaultFs.count(fs, :write) == 1, "the refused write is the recovery append"
+      assert FaultFs.count(fs, :sync) == 0
       assert File.read!(path) == before
 
       revived = start_store!(inbox, :second)
@@ -325,7 +347,9 @@ defmodule AiPair.Delivery.NS42AttemptFinalizationTest do
       assert {:ok, %{outcome: "ambiguous", delivery_attempt: 1}} =
                ReceiptStore.reconcile(revived, id, @pane, hash, wait_ms: 0)
 
-      assert Agent.get(pastes, & &1) == 1, "recovery never re-pastes"
+      # Sanity only: the paste entered exactly once. The store cannot paste, so this does
+      # not prove a re-paste guard; that needs a second pane and a retry, another row.
+      assert Agent.get(pastes, & &1) == 1
     end
   end
 
@@ -348,8 +372,22 @@ defmodule AiPair.Delivery.NS42AttemptFinalizationTest do
 
   defp wait_async(store, id, wait_ms), do: Task.async(fn -> reconcile(store, id, wait_ms) end)
 
+  # A pending attempt whose owner is live, on a store whose NEXT write (the owner-loss
+  # ambiguity append) is refused.
+  defp unpersistable_owner_loss!(inbox) do
+    fs = FaultFs.new()
+    store = start_store!(inbox, :store, fs: fs)
+    id = message_id("unpersisted-loss")
+    owner = spawn_owner()
+    admit!(store, id, owner)
+    FaultFs.inject(fs, :write, FaultFs.count(fs, :write) + 1, {:error, :eio})
+    {store, fs, owner, id}
+  end
+
   # Test-only observation of the store's registered waiters, so a row can prove the
-  # wait was in place before the event it waits for.
+  # wait was in place before the event it waits for. Coupled to ReceiptStore's state
+  # field `waiters :: %{reference() => waiter}` (receipt_store.ex:85, :289); no public
+  # API reports waiter registration, and a rename fails this loudly.
   defp await_waiters(store, count) do
     wait_until(fn -> map_size(:sys.get_state(store).waiters) == count end)
   end
