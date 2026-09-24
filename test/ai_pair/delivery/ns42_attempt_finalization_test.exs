@@ -149,19 +149,17 @@ defmodule AiPair.Delivery.NS42AttemptFinalizationTest do
                ReceiptStore.admit(store, message_id("after-poison"), @pane, @payload, self())
     end
 
-    # EXPECTED RED against 1018ad9b: a finding for the owners, kept failing on purpose.
-    #
     # ADR-0003 "Ownership and Recovery": after a failed append, "Previously unresolved
     # records cannot then answer queued/pending as if finalization remained healthy. The
-    # caller receives a named error". ADR-0003 "Crossing the Paste Boundary": "owner loss
-    # wakes waiters with durably recorded ambiguity". Here the owner-loss append fails, so
-    # neither can happen as written, and the store (receipt_store.ex:196-199) returns
-    # without notify/2: the waiter is not woken. It is answered only when its own timer
-    # fires (receipt_store.ex:174-184), which does not check `poisoned` and replies
-    # {:ok, %{status: "pending", outcome: "ambiguous"}}. A caller arriving one moment
-    # later gets {:error, :receipt_store_unavailable} (receipt_store.ex:258-259) for the
-    # same record. This row asserts the documented answer: the named error, promptly.
-    test "RED: a waiter caught by an unpersisted owner loss receives the named error",
+    # caller receives a named error". This row asserts that documented answer, promptly.
+    #
+    # History: this row was RED against 1018ad9b. The store returned without waking the
+    # waiter when the owner-loss append failed, and the waiter's own timer later answered
+    # {:ok, %{status: "pending", outcome: "ambiguous"}} while a later caller got the named
+    # error. #4 (e71e7ed) wakes every waiter with {:error, :receipt_store_unavailable} when
+    # the store is poisoned (`fail_waiters/1`) and guards the expired-wait answer the same
+    # way. The row is kept unchanged as the acceptance test for that fix.
+    test "a waiter caught by an unpersisted owner loss receives the named error",
          %{inbox: inbox} do
       {store, _fs, owner, id} = unpersistable_owner_loss!(inbox)
 
