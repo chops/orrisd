@@ -1,3 +1,4 @@
 # Exact repository path\tSpecific consuming tool requirement
 nix/files/agents-md-block.md	Markdown content injected into the AGENTS.md file consumed by Codex
 nix/files/claude-md-block.md	Markdown content injected into the CLAUDE.md file consumed by Claude Code
+AGENTS.md	Repository guidance read by name by AI coding agents (Codex, Claude Code and others) that consume AGENTS.md
