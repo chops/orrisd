@@ -308,7 +308,7 @@ defmodule AiPair.Delivery.ReceiptStore do
 
   # No pending or queued record can be finalized once the store is poisoned, so a waiter on
   # any id could only be answered by its timer with a stale view. Wake every one with the
-  # answer a later caller gets; nothing is appended.
+  # answer a later caller gets; no further append is attempted.
   defp fail_waiters(state) do
     Enum.each(state.waiters, fn {_ref, waiter} ->
       Process.cancel_timer(waiter.timer)
