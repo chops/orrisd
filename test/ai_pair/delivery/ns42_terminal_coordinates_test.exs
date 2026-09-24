@@ -370,8 +370,12 @@ defmodule AiPair.Delivery.NS42TerminalCoordinatesTest do
   defp assert_refused_at_open!(dir, seq) do
     path = log_path(dir)
     before = File.read!(path)
+    result = ReceiptLog.open(SystemFs.new(), dir)
 
-    assert ReceiptLog.open(SystemFs.new(), dir) == {:error, {:receipt_log_corrupt, seq}},
+    # An unexpectedly accepted log still has its handle released before the assertion.
+    with {:ok, log} <- result, do: ReceiptLog.close(log)
+
+    assert result == {:error, {:receipt_log_corrupt, seq}},
            "the reader must refuse the log at exactly seq #{seq}"
 
     assert File.read!(path) == before, "a refused complete line is not repaired or truncated"
