@@ -33,7 +33,11 @@ defmodule AiPair.IPC.Delivery do
       case params["cmd"] do
         "ping" ->
           if available?(store),
-            do: %{ok: true, pong: AiPair.version(), capabilities: ["delivery_reconcile"]},
+            do: %{
+              ok: true,
+              pong: AiPair.version(),
+              capabilities: ["delivery_reconcile", "sessions_read"]
+            },
             else: %{ok: false, error: "receipt_store_unavailable"}
 
         "reconcile" ->

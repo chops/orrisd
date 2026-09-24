@@ -39,9 +39,9 @@ defmodule AiPair.Contracts.VendoredIPCV2Test do
   @begin_sentinel "# BEGIN VENDORED orris docs/contracts/ipc-v2.org"
   @end_sentinel "# END VENDORED orris docs/contracts/ipc-v2.org"
 
-  @orris_revision "880e7a3f8117c79114384c5f7682a70d44580046"
-  @orris_sha256 "849589a85527357ed61643f50cdfe2a4ba32fec823e2dca28868ec77f44164cc"
-  @fixture_hash "78c2f64240c3c5c9da60425c65c498974a2a81c8adb3e68e0bef28613c1707dc"
+  @orris_revision "ffe6fb87bb049d604e269ba60891fda1b14dba57"
+  @orris_sha256 "dd121abbd0f4596889d6960b4c1a6273f5c44e3fb6a463b9a56c8b7cc9973315"
+  @fixture_hash "a6f92d537897d30a883a04d29217ff36a4f33db759b87d4e6ccc79ad4c2232fc"
   @v1_fixture_hash "f1cacf8b53fdd1db37ec968e5476081250804e9c6a4d615215d47d9b77894213"
 
   @fixtures ~w(
@@ -110,13 +110,17 @@ defmodule AiPair.Contracts.VendoredIPCV2Test do
       # `paired_fixture_count` USED to be one of these markers and no longer is: at orris
       # `3684f53e` the consumer text declares its own reciprocal block with that key. A
       # marker must be producer-only in the CURRENT region, not in the one it was written
-      # against, so the list is three strings that no consumer text has any reason to
+      # against, so the list uses strings that no consumer text has any reason to
       # carry: the addenda heading, a module function of this repository, and the
       # producer declaration of which repository the source is.
       for producer_only <- [
             "** Producer addenda",
             "ReceiptLog.valid_pane?/1",
-            "- source_repository: =orris="
+            "- source_repository: =orris=",
+            "The region below is that exact source snapshot, including its historical",
+            "not claims about the current producer candidate or an already completed pairing.",
+            "it does NOT assert equality with C0's H0",
+            "Qualification of this producer candidate against C0 is PENDING."
           ] do
         assert String.contains?(preamble, producer_only)
 

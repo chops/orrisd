@@ -49,7 +49,7 @@ defmodule AiPair.IPC.ContractV2FixtureTest do
         assert Client.main(["ping", "--protocol-version", "2"]) == 0
       end)
 
-    assert Jason.decode!(ping)["capabilities"] == ["delivery_reconcile"]
+    assert Jason.decode!(ping)["capabilities"] == ["delivery_reconcile", "sessions_read"]
     args = ["send", c.pane, "--stdin", "--msg-id", @id, "--protocol-version", "2"]
 
     first =

@@ -84,6 +84,13 @@ defmodule AiPair.CLI.Client do
   def main([verb | rest]) when verb in ["ping", "reconcile"],
     do: run_versioned(verb, parse_versioned(verb, rest))
 
+  def main(["sessions" | rest]) do
+    case parse_sessions(rest) do
+      :ok -> sessions()
+      :error -> cli_error_span("sessions", "sessions accepts only --protocol-version 2")
+    end
+  end
+
   def main(["attach" | rest]) do
     case parse_attach(rest) do
       {:ok, pane_id, agent} ->
@@ -187,6 +194,70 @@ defmodule AiPair.CLI.Client do
   end
 
   defp run_versioned(verb, _), do: cli_error_span(verb, "invalid versioned delivery arguments")
+
+  defp parse_sessions(args) do
+    {opts, positional, invalid} =
+      OptionParser.parse(args, strict: [protocol_version: [:integer, :keep]])
+
+    if positional == [] and invalid == [] and
+         opts in [[], [protocol_version: 2]],
+       do: :ok,
+       else: :error
+  rescue
+    _ -> :error
+  end
+
+  defp sessions do
+    Tracer.with_span "cli.sessions", %{kind: :client, attributes: %{"cli.command" => "sessions"}} do
+      exit_code =
+        case request(%{"cmd" => "ping", "protocol_version" => 2}) do
+          {:ok, ping} ->
+            if sessions_capable?(ping),
+              do: read_sessions(),
+              else: sessions_error("sessions unavailable: capability preflight failed")
+
+          {:error, _reason} ->
+            sessions_error("sessions unavailable: capability preflight failed")
+        end
+
+      Tracer.set_attribute("cli.exit_code", exit_code)
+      exit_code
+    end
+  end
+
+  defp sessions_capable?(%{"protocol_version" => 2, "ok" => true, "capabilities" => capabilities})
+       when is_list(capabilities) do
+    Enum.all?(capabilities, &is_binary/1) and "sessions_read" in capabilities
+  end
+
+  defp sessions_capable?(_), do: false
+
+  defp read_sessions do
+    case request(%{"cmd" => "sessions", "protocol_version" => 2}) do
+      {:ok, reply} ->
+        if AiPair.IPC.Sessions.valid_reply?(reply) do
+          IO.puts(Jason.encode!(reply))
+
+          if reply["ok"] do
+            0
+          else
+            Tracer.set_status(:error, "daemon returned ok:false")
+            1
+          end
+        else
+          sessions_error("protocol_error: invalid sessions reply")
+        end
+
+      {:error, _reason} ->
+        sessions_error("sessions unavailable: daemon request failed")
+    end
+  end
+
+  defp sessions_error(message) do
+    Tracer.set_status(:error, message)
+    IO.puts(:stderr, "ai-pair: " <> message)
+    1
+  end
 
   @doc false
   def parse_versioned(verb, args) do
@@ -661,6 +732,7 @@ defmodule AiPair.CLI.Client do
       Commands:
         ping                            Ping the daemon and print the reply (default)
         ping --protocol-version 2      Report durable delivery capabilities.
+        sessions [--protocol-version 2] Read sessions after capability preflight.
         attach <pane_id> [--agent A]    Attach a tmux pane to the daemon's tracker.
                                         --agent selects a fingerprint classifier
                                         (claude_code | codex_cli). Default: stub.

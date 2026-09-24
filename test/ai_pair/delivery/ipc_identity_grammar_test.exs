@@ -276,7 +276,7 @@ defmodule AiPair.Delivery.IPCIdentityGrammarTest do
       assert ping(ctx, @pane) == %{
                ok: true,
                pong: AiPair.version(),
-               capabilities: ["delivery_reconcile"],
+               capabilities: ["delivery_reconcile", "sessions_read"],
                pane_id: @pane,
                protocol_version: 2
              }
@@ -287,7 +287,7 @@ defmodule AiPair.Delivery.IPCIdentityGrammarTest do
       assert ping(ctx, "%pane-alpha") == %{
                ok: true,
                pong: AiPair.version(),
-               capabilities: ["delivery_reconcile"],
+               capabilities: ["delivery_reconcile", "sessions_read"],
                protocol_version: 2
              }
     end
