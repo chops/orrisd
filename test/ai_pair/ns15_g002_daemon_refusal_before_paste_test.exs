@@ -35,9 +35,10 @@ defmodule AiPair.NS15G002DaemonRefusalBeforePasteTest do
       assertion could never fail.
     * R3 v2, dead by the reaper (threshold 2, grace 0, switchable capture). Control: a
       send while IDLE, before the capture is switched. The refusal is `pane_dead` with no
-      paste. DISCLOSED, as observed and not asserted correct: the refused send still
-      leaves a record, reconcile answers `absent` with `status: not_delivered` and
-      `delivery_attempt: 1`, and the log gains `pending` then `not_delivered`.
+      paste. DISCLOSED ADMISSION (PD-3, finding H-1), asserted as observed, not as
+      correct: the refused send still leaves a record, reconcile answers `absent` with
+      `status: not_delivered` and `delivery_attempt: 1`, and the log gains `pending` then
+      `not_delivered`.
     * R4 v1, dead by the reaper: `pane_dead`, queue 0.
     * R5 v2, quarantined (a run-time token): refused `pane_quarantined` (the H-2 fix,
       main `0be02ccc`, added it to `Delivery`'s request errors). No paste, log
@@ -127,7 +128,8 @@ defmodule AiPair.NS15G002DaemonRefusalBeforePasteTest do
       text = "R1 text " <> Integer.to_string(c.n)
 
       # Preconditions.
-      assert PaneSupervisor.whereis_pane(pane) == :error
+      where = PaneSupervisor.whereis_pane(pane)
+      assert where == :error, "R1 precondition unregistered; observed " <> inspect(where)
       assert_absent_unadmitted(c, pane, id, text)
       before = File.read(c.log)
 
@@ -172,15 +174,14 @@ defmodule AiPair.NS15G002DaemonRefusalBeforePasteTest do
       ctl_before = File.read(c.log)
       ctl = send_v2!(c, pane, ctl_id, ctl_text)
       assert ctl["status"] == "sent", "R1b control; observed " <> inspect(ctl)
-      assert pastes(c, pane, ctl_text) == 1
+      assert_pastes(c, pane, ctl_text, 1, "R1b control")
       ctl_after = File.read(c.log)
 
       refute ctl_after == ctl_before,
              "R1b control must change the log; observed " <> inspect(ctl_after)
 
       # Stop and prove the stop.
-      assert :ok = PaneSupervisor.stop_pane(pane)
-      assert :ok = await_unregistered(pane)
+      assert_stopped(pane, "R1b")
 
       id = id(c, "r1b")
       text = "R1b text " <> Integer.to_string(c.n)
@@ -207,7 +208,8 @@ defmodule AiPair.NS15G002DaemonRefusalBeforePasteTest do
       pane = pane!(c, "s")
       text = "R2 text " <> Integer.to_string(c.n)
 
-      assert PaneSupervisor.whereis_pane(pane) == :error
+      where = PaneSupervisor.whereis_pane(pane)
+      assert where == :error, "R2 precondition unregistered; observed " <> inspect(where)
 
       # No receipt-log assertion on v1: send_legacy goes to :send_untracked and writes no
       # receipt, so a log-unchanged check here could never fail.
@@ -235,10 +237,9 @@ defmodule AiPair.NS15G002DaemonRefusalBeforePasteTest do
       ctl_text = "R2b control " <> Integer.to_string(c.n)
       ctl = send_v1!(c, pane, ctl_text)
       assert ctl["status"] == "sent", "R2b control; observed " <> inspect(ctl)
-      assert pastes(c, pane, ctl_text) == 1
+      assert_pastes(c, pane, ctl_text, 1, "R2b control")
 
-      assert :ok = PaneSupervisor.stop_pane(pane)
-      assert :ok = await_unregistered(pane)
+      assert_stopped(pane, "R2b")
 
       # No receipt-log assertion on v1 (untracked path, writes no receipt; see R2).
       text = "R2b text " <> Integer.to_string(c.n)
@@ -257,19 +258,23 @@ defmodule AiPair.NS15G002DaemonRefusalBeforePasteTest do
     test "R3 v2: pane_dead with no paste; the refused send's record is DISCLOSED", c do
       pane = pane!(c, "d")
       {sm, capture} = start_switchable!(c, pane)
-      assert :ok = await_state(sm, :idle)
+      assert_state(sm, :idle, "R3 start")
 
       # Control: the same pane while idle.
       ctl_id = id(c, "r3-control")
       ctl_text = "R3 control " <> Integer.to_string(c.n)
       ctl = send_v2!(c, pane, ctl_id, ctl_text)
       assert ctl["status"] == "sent", "R3 control; observed " <> inspect(ctl)
-      assert pastes(c, pane, ctl_text) == 1
+      assert_pastes(c, pane, ctl_text, 1, "R3 control")
 
       # The reaper: capture switched to pane_gone; dead by telemetry and by state.
       Agent.update(capture, fn _ -> {:error, :pane_gone} end)
-      assert_receive {:reaped, ^pane}, 2_000
-      assert StateMachine.state(sm) == :dead
+
+      assert_receive {:reaped, ^pane},
+                     2_000,
+                     "R3 reaped telemetry; pane state " <> inspect(StateMachine.state(sm))
+
+      assert_now(sm, :dead, "R3 reaped")
 
       id = id(c, "r3")
       text = "R3 text " <> Integer.to_string(c.n)
@@ -295,16 +300,20 @@ defmodule AiPair.NS15G002DaemonRefusalBeforePasteTest do
     test "R4 v1: pane_dead with no paste and an empty queue", c do
       pane = pane!(c, "e")
       {sm, capture} = start_switchable!(c, pane)
-      assert :ok = await_state(sm, :idle)
+      assert_state(sm, :idle, "R4 start")
 
       ctl_text = "R4 control " <> Integer.to_string(c.n)
       ctl = send_v1!(c, pane, ctl_text)
       assert ctl["status"] == "sent", "R4 control; observed " <> inspect(ctl)
-      assert pastes(c, pane, ctl_text) == 1
+      assert_pastes(c, pane, ctl_text, 1, "R4 control")
 
       Agent.update(capture, fn _ -> {:error, :pane_gone} end)
-      assert_receive {:reaped, ^pane}, 2_000
-      assert StateMachine.state(sm) == :dead
+
+      assert_receive {:reaped, ^pane},
+                     2_000,
+                     "R4 reaped telemetry; pane state " <> inspect(StateMachine.state(sm))
+
+      assert_now(sm, :dead, "R4 reaped")
 
       text = "R4 text " <> Integer.to_string(c.n)
       reply = send_v1!(c, pane, text)
@@ -327,7 +336,7 @@ defmodule AiPair.NS15G002DaemonRefusalBeforePasteTest do
       token = Base.url_encode64(:crypto.strong_rand_bytes(32), padding: false)
       sm = start_quarantined!(c, pane, token)
       _sib_sm = start_idle!(c, sib)
-      assert :ok = await_state(sm, :idle)
+      assert_state(sm, :idle, "R5 start")
 
       status = StateMachine.status(sm)
 
@@ -345,7 +354,7 @@ defmodule AiPair.NS15G002DaemonRefusalBeforePasteTest do
       ctl1_log = File.read(c.log)
       ctl1 = send_v2!(c, sib, id(c, "r5-control-before"), ctl1_text)
       assert ctl1["status"] == "sent", "R5 control before; observed " <> inspect(ctl1)
-      assert pastes(c, sib, ctl1_text) == 1
+      assert_pastes(c, sib, ctl1_text, 1, "R5 control before")
       ctl1_after = File.read(c.log)
 
       refute ctl1_after == ctl1_log,
@@ -355,14 +364,18 @@ defmodule AiPair.NS15G002DaemonRefusalBeforePasteTest do
       text = "R5 text " <> Integer.to_string(c.n)
       assert_absent_unadmitted(c, pane, id, text)
       before = File.read(c.log)
-      flush_polls(pane)
       reply = send_v2!(c, pane, id, text)
+      # Flushed after the send, so the poll awaited below is necessarily after it.
+      flush_polls(pane)
 
       # The quarantined pane is refused with its own wire word (H-2 fix, main 0be02ccc).
       assert reply == refusal_v2(pane, id, "pane_quarantined"),
              "R5 reply; observed " <> inspect(reply)
 
-      assert_receive {:poll, ^pane, _}, 1_000
+      assert_receive {:poll, ^pane, _},
+                     1_000,
+                     "R5 poll after the send; pane state " <> inspect(StateMachine.state(sm))
+
       assert pastes(c, pane, text) == 0, "R5 pastes; observed #{pastes(c, pane, text)}"
       after_neg = File.read(c.log)
       assert after_neg == before, "R5 log unchanged; observed " <> inspect(after_neg)
@@ -375,7 +388,7 @@ defmodule AiPair.NS15G002DaemonRefusalBeforePasteTest do
       ctl2_log = File.read(c.log)
       ctl2 = send_v2!(c, sib, id(c, "r5-control-after"), ctl2_text)
       assert ctl2["status"] == "sent", "R5 control after; observed " <> inspect(ctl2)
-      assert pastes(c, sib, ctl2_text) == 1
+      assert_pastes(c, sib, ctl2_text, 1, "R5 control after")
       ctl2_after = File.read(c.log)
 
       refute ctl2_after == ctl2_log,
@@ -388,36 +401,45 @@ defmodule AiPair.NS15G002DaemonRefusalBeforePasteTest do
       token = Base.url_encode64(:crypto.strong_rand_bytes(32), padding: false)
       sm = start_quarantined!(c, pane, token)
       _sib_sm = start_idle!(c, sib)
-      assert :ok = await_state(sm, :idle)
-      assert StateMachine.status(sm).quarantined == true
+      assert_state(sm, :idle, "R6 start")
+      quarantined = StateMachine.status(sm).quarantined
+      assert quarantined == true, "R6 precondition quarantined; observed " <> inspect(quarantined)
 
       # Control.
       ctl_text = "R6 control " <> Integer.to_string(c.n)
       ctl = send_v1!(c, sib, ctl_text)
       assert ctl["status"] == "sent", "R6 control; observed " <> inspect(ctl)
-      assert pastes(c, sib, ctl_text) == 1
+      assert_pastes(c, sib, ctl_text, 1, "R6 control")
 
       text = "R6 text " <> Integer.to_string(c.n)
+      needles = ["FunctionClauseError", "format_send_result", ":pane_quarantined"]
 
-      {result, log} =
+      # The crash report is awaited with a bound (2_000 ms), not a fixed sleep: a
+      # forwarding logger handler is polled until every needle appears or the bound passes.
+      # with_log only keeps the report off the console.
+      {{result, {waited, log}}, _console} =
         ExUnit.CaptureLog.with_log(fn ->
+          handler = forward_logs!()
           r = raw_v1(c, %{"cmd" => "send", "pane_id" => pane, "text" => text})
-          # Let the crash report reach the logger before capture ends.
-          Process.sleep(100)
-          r
+          logged = await_log(needles, 2_000)
+          :ok = :logger.remove_handler(handler)
+          {r, logged}
         end)
 
       # FINDING H-3, pinned as current behaviour and not asserted as correct
       assert result == {:error, :closed}, "R6 socket; observed " <> inspect(result)
-      q = StateMachine.pending_count(sm)
-      assert q == 0, "R6 queue after the closed socket; observed #{q}"
 
-      for needle <- ["FunctionClauseError", "format_send_result", ":pane_quarantined"] do
+      assert waited == :ok,
+             "R6 crash report within 2_000 ms; observed #{waited}, capture " <> inspect(log)
+
+      for needle <- needles do
         assert log =~ needle, "R6 log must name #{needle}; observed " <> inspect(log)
       end
 
       ping = send_v1_frame!(c, %{"cmd" => "ping"})
       assert ping["ok"] == true, "R6 ping afterwards; observed " <> inspect(ping)
+      q = StateMachine.pending_count(sm)
+      assert q == 0, "R6 queue after the closed socket; observed #{q}"
       assert pastes(c, pane, text) == 0, "R6 pastes; observed #{pastes(c, pane, text)}"
     end
   end
@@ -432,14 +454,17 @@ defmodule AiPair.NS15G002DaemonRefusalBeforePasteTest do
       sib = pane!(c, "gs")
       sm = start_gone_unreaped!(c, pane)
       _sib_sm = start_idle_unreaped!(c, sib)
-      assert_receive {:poll, ^pane, :unknown}, 1_000
+
+      assert_receive {:poll, ^pane, :unknown},
+                     1_000,
+                     "R7 first unknown poll; pane state " <> inspect(StateMachine.state(sm))
 
       # Control: a sibling with the SAME option list (threshold 1_000_000); only the capture
       # double differs (IDLE). The control text differs only as an incidental difference.
       ctl_text = "R7 control " <> Integer.to_string(c.n)
       ctl = send_v2!(c, sib, id(c, "r7-control"), ctl_text)
       assert ctl["status"] == "sent", "R7 control; observed " <> inspect(ctl)
-      assert pastes(c, sib, ctl_text) == 1
+      assert_pastes(c, sib, ctl_text, 1, "R7 control")
 
       id = id(c, "r7")
       text = "R7 text " <> Integer.to_string(c.n)
@@ -462,8 +487,8 @@ defmodule AiPair.NS15G002DaemonRefusalBeforePasteTest do
       assert Enum.uniq(polls) == [:unknown],
              "R7 every later poll is unknown; observed " <> inspect(Enum.uniq(polls))
 
+      assert_now(sm, :unknown, "R7 after the polls")
       assert pastes(c, pane, text) == 0, "R7 pastes; observed #{pastes(c, pane, text)}"
-      assert StateMachine.state(sm) == :unknown
     end
   end
 
@@ -477,7 +502,7 @@ defmodule AiPair.NS15G002DaemonRefusalBeforePasteTest do
       sib = pane!(c, "ms")
       sm = start_storeless!(c, pane)
       _sib_sm = start_idle!(c, sib)
-      assert :ok = await_state(sm, :idle)
+      assert_state(sm, :idle, "R8 start")
 
       # Control text differs from the row's only as an incidental difference; the named
       # variable is the :receipt_store option.
@@ -514,7 +539,7 @@ defmodule AiPair.NS15G002DaemonRefusalBeforePasteTest do
     test "a BUSY sibling queues a v1 send and pending_count reads 1", c do
       pane = pane!(c, "b")
       sm = start_busy!(c, pane)
-      assert :ok = await_state(sm, :busy)
+      assert_state(sm, :busy, "C-Q start")
 
       text = "C-Q text " <> Integer.to_string(c.n)
       reply = send_v1!(c, pane, text)
@@ -524,7 +549,7 @@ defmodule AiPair.NS15G002DaemonRefusalBeforePasteTest do
 
       q = StateMachine.pending_count(sm)
       assert q == 1, "C-Q queue; observed #{q}"
-      assert pastes(c, pane, text) == 0
+      assert pastes(c, pane, text) == 0, "C-Q pastes; observed #{pastes(c, pane, text)}"
     end
   end
 
@@ -551,7 +576,7 @@ defmodule AiPair.NS15G002DaemonRefusalBeforePasteTest do
       )
 
     on_exit(fn -> PaneSupervisor.stop_pane(pane) end)
-    assert :ok = await_state(sm, :idle)
+    assert_state(sm, :idle, "start_idle! " <> pane)
     sm
   end
 
@@ -622,7 +647,7 @@ defmodule AiPair.NS15G002DaemonRefusalBeforePasteTest do
       )
 
     on_exit(fn -> PaneSupervisor.stop_pane(pane) end)
-    assert :ok = await_state(sm, :idle)
+    assert_state(sm, :idle, "start_idle_unreaped! " <> pane)
     sm
   end
 
@@ -665,6 +690,64 @@ defmodule AiPair.NS15G002DaemonRefusalBeforePasteTest do
   end
 
   defp pastes(c, pane, text), do: Agent.get(c.paste, &Map.get(&1, {pane, text}, 0))
+
+  defp assert_pastes(c, pane, text, expected, label) do
+    n = pastes(c, pane, text)
+    assert n == expected, label <> " pastes; observed #{n}"
+  end
+
+  # await_state/3 returns {:timeout, state} on a timeout; the message carries it.
+  defp assert_state(sm, target, label) do
+    r = await_state(sm, target)
+    assert r == :ok, label <> " awaiting #{inspect(target)}; observed " <> inspect(r)
+  end
+
+  defp assert_now(sm, target, label) do
+    s = StateMachine.state(sm)
+    assert s == target, label <> " state; observed " <> inspect(s)
+  end
+
+  defp assert_stopped(pane, label) do
+    stopped = PaneSupervisor.stop_pane(pane)
+    assert stopped == :ok, label <> " stop_pane; observed " <> inspect(stopped)
+    gone = await_unregistered(pane)
+    assert gone == :ok, label <> " unregistered; observed " <> inspect(gone)
+  end
+
+  # A logger handler forwarding each formatted event to the test process, removed on exit.
+  defp forward_logs! do
+    id = :"ns15_g002_log_#{System.unique_integer([:positive])}"
+    :ok = :logger.add_handler(id, __MODULE__, %{config: %{test: self()}})
+    on_exit(fn -> :logger.remove_handler(id) end)
+    id
+  end
+
+  @doc false
+  def log(event, %{config: %{test: test}}) do
+    {Logger.Formatter, formatter} = Logger.Formatter.new()
+    send(test, {:logged, IO.chardata_to_string(Logger.Formatter.format(event, formatter))})
+  end
+
+  # {:ok | :timeout, text}: the forwarded log text, once every needle appears or the bound
+  # passes.
+  defp await_log(needles, timeout) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_await_log(needles, deadline, "")
+  end
+
+  defp do_await_log(needles, deadline, acc) do
+    if Enum.all?(needles, &String.contains?(acc, &1)) do
+      {:ok, acc}
+    else
+      remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
+      receive do
+        {:logged, text} -> do_await_log(needles, deadline, acc <> text)
+      after
+        remaining -> {:timeout, acc}
+      end
+    end
+  end
 
   defp id(c, seed),
     do: "snd_" <> Base.encode16(:crypto.hash(:sha256, "#{seed}-#{c.n}"), case: :lower)
