@@ -313,7 +313,7 @@ defmodule AiPair.Delivery.NS42AttemptFinalizationTest do
       assert {:ok, %{outcome: "ambiguous"}} = reconcile(revived, id, 0)
     end
 
-    test "a direct paste cut off by a daemon crash is recovered ambiguous, not re-pasted",
+    test "a direct paste cut off by a daemon crash is recovered ambiguous",
          %{inbox: inbox} do
       store = start_store!(inbox, :first)
       parent = self()
