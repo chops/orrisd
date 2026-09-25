@@ -139,6 +139,10 @@
             bash ${./test/gemini_otel_provider_sampling_test.sh} ${./nix/files/gemini-otel.sh} ${./nix/files/telemetry-batch.ex}
             touch "$out"
           '';
+
+          hm-ap-self-package = import ./nix/hm-ap-self-package-check.nix {
+            inherit self nixpkgs system;
+          };
         });
 
       devShells = forEachSystem (system:
@@ -177,7 +181,16 @@
       # ~/.claude/CLAUDE.md and ~/.codex/AGENTS.md. Distinct namespace
       # (`programs.ai-pair-user`) from the Linux daemon module above so
       # both can be imported simultaneously on a host without clobber.
-      homeManagerModules.ai-pair-user = ./nix/home-universal-module.nix;
+      #
+      # The CLI defaults to this flake's own `packages.${system}.ap`, built
+      # from the pinned nixpkgs above, never from the consumer's `pkgs.beam`
+      # (a consumer nixpkgs can carry release-candidate Elixir/OTP that
+      # nixpkgs refuses to combine). mkDefault keeps it overridable.
+      homeManagerModules.ai-pair-user = { lib, pkgs, ... }: {
+        imports = [ ./nix/home-universal-module.nix ];
+        programs.ai-pair-user.package =
+          lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.ap;
+      };
 
       # Helper for direnv .envrc: `use ai_pair`.
       lib.useAiPair = ./nix/files/use_ai_pair.sh;

@@ -9,23 +9,6 @@
 let
   cfg = config.programs.ai-pair-user;
 
-  apPackage = pkgs.runCommandLocal "ai-pair-user-cli" {
-    buildInputs = [ pkgs.coreutils pkgs.bash ];
-  } ''
-    install -Dm755 ${./files/ap.sh}          $out/bin/ap
-    install -Dm755 ${./files/start-pair.sh}  $out/bin/start-pair
-    install -Dm755 ${./files/ap-bridge.sh}   $out/bin/ap-bridge
-    install -Dm755 ${./files/gemini-otel.sh} $out/bin/gemini-otel
-    install -Dm644 ${./files/tooling.ex} $out/bin/tooling.ex
-    install -Dm644 ${./files/telemetry-batch.ex} $out/bin/telemetry-batch.ex
-    substituteInPlace $out/bin/ap $out/bin/start-pair $out/bin/ap-bridge $out/bin/gemini-otel \
-      --replace-fail 'elixir -r' '${pkgs.beam.packages.erlang_29.elixir_1_20}/bin/elixir -r'
-    substituteInPlace $out/bin/ap $out/bin/start-pair \
-      --replace-fail 'sha256sum' '${pkgs.coreutils}/bin/sha256sum'
-    substituteInPlace $out/bin/start-pair --replace-fail 'command -v elixir' \
-      'test -x ${pkgs.beam.packages.erlang_29.elixir_1_20}/bin/elixir'
-  '';
-
   useAiPairLib = pkgs.runCommandLocal "ai-pair-direnv-lib" { } ''
     install -Dm644 ${./files/use_ai_pair.sh} $out/share/direnv/lib/use_ai_pair.sh
     substituteInPlace $out/share/direnv/lib/use_ai_pair.sh \
@@ -89,6 +72,22 @@ in
       description = "Install the `ap` and `start-pair` binaries into home.packages.";
     };
 
+    package = lib.mkOption {
+      type = lib.types.package;
+      defaultText = lib.literalExpression
+        "inputs.ai-pair.packages.\${pkgs.stdenv.hostPlatform.system}.ap";
+      description = ''
+        The user CLI package (`ap`, `start-pair`, `ap-bridge`,
+        `gemini-otel`). The flake output `homeManagerModules.ai-pair-user`
+        sets this, at `lib.mkDefault` priority, to the flake's own
+        `packages.''${system}.ap`, which is built from the flake's pinned
+        nixpkgs. The module never builds the CLI from the consumer `pkgs`,
+        so a consumer nixpkgs whose BEAM set is a release candidate is not
+        reached. Importing this file by path rather than through the flake
+        output requires setting this option.
+      '';
+    };
+
     installStartPair = lib.mkOption {
       type = lib.types.bool;
       default = true;
@@ -130,7 +129,7 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    home.packages = lib.mkIf cfg.installCLI [ apPackage peerProtocolDocs ];
+    home.packages = lib.mkIf cfg.installCLI [ cfg.package peerProtocolDocs ];
 
     home.file = lib.mkMerge [
       (lib.mkIf cfg.installDirenvLib {
