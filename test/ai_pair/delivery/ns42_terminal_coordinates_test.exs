@@ -366,7 +366,104 @@ defmodule AiPair.Delivery.NS42TerminalCoordinatesTest do
     end
   end
 
+  describe "(d) the first record under an id opens only at attempt 1" do
+    # Positive attempt numbering, reader side. `history_valid?(nil, r)` (receipt_log.ex:114)
+    # accepts a first record only when it is `pending` at `delivery_attempt == 1`, and the
+    # other conjuncts of `valid_record?/2` (receipt_log.ex:104-112) only require an integer
+    # attempt. Each forged line below differs from the attempt-1 control ONLY in
+    # `delivery_attempt`, so its refusal is attributable to that one field.
+
+    test "control: a pending first record at attempt 1 opens and reads back attempt 1",
+         %{inbox: inbox} do
+      {line, id} = first_record(1)
+      dir = Path.join(inbox, "first-attempt-1")
+      write_log!(dir, [line])
+
+      assert {:ok, log} = ReceiptLog.open(SystemFs.new(), dir)
+
+      try do
+        assert log.seq == 1
+        assert ReceiptLog.view(log.entries[id]) == tuple(id, "pending")
+      after
+        ReceiptLog.close(log)
+      end
+
+      # Same helper as the refusal rows below, and it does not refuse this log.
+      assert_raise ExUnit.AssertionError, fn -> assert_refused_at_open!(dir, 1) end
+
+      # The store opens the same log. On start it re-stamps the unresolved attempt as
+      # ambiguous (receipt_store.ex:74-107) and keeps its attempt number.
+      assert {:ok, store} = GenServer.start(ReceiptStore, inbox: dir)
+
+      try do
+        assert {:ok, %{status: "ambiguous", delivery_attempt: 1}} =
+                 ReceiptStore.reconcile(store, id, @pane, @payload, wait_ms: 0)
+      after
+        GenServer.stop(store)
+      end
+    end
+
+    # 0 and -1 are the rows the requirement names; 2 is the optional row, because first
+    # means exactly 1 and not merely positive.
+    for attempt <- [0, -1, 2] do
+      test "attempt #{attempt}: a pending first record is refused at seq 1 by the reader " <>
+             "and the store",
+           %{inbox: inbox} do
+        attempt = unquote(attempt)
+        {control, id} = first_record(1)
+        {forged, ^id} = first_record(attempt)
+        record = decode_line!(forged)
+
+        # A faithful first line in every respect but the attempt: valid JSON, the closed
+        # key set, valid grammars, seq 1, the empty-chain anchor and status pending.
+        assert Enum.sort(Map.keys(record)) == Enum.sort(@record_fields)
+        assert well_formed?(record), "attempt #{attempt}: the forged line must be well formed"
+        assert record["seq"] == 1
+        assert record["prev_line_sha256"] == @anchor
+        assert record["status"] == "pending"
+        assert record["delivery_attempt"] === attempt
+        assert changed_keys(decode_line!(control), record) == ["delivery_attempt"]
+
+        dir = Path.join(inbox, "first-attempt-#{attempt}")
+        write_log!(dir, [forged])
+
+        assert_refused_at_open!(dir, 1)
+
+        assert_store_refuses!(
+          dir,
+          1,
+          "attempt #{attempt}: a first record must open at attempt 1"
+        )
+
+        assert File.read!(log_path(dir)) == forged,
+               "a refused first record is neither repaired nor re-stamped by the store"
+      end
+    end
+  end
+
   # ===== helpers =====
+
+  # One pending first record for a fixed id, at `attempt`, with seq 1 and the empty-chain
+  # anchor. Only `delivery_attempt` varies between calls.
+  defp first_record(attempt) do
+    id = message_id("first-record")
+
+    line =
+      encode_line(%{
+        "schema" => "ai-pair/delivery-receipt",
+        "schema_version" => 1,
+        "seq" => 1,
+        "prev_line_sha256" => @anchor,
+        "daemon_epoch" => @epoch,
+        "message_id" => id,
+        "pane_id" => @pane,
+        "payload_hash" => @payload,
+        "status" => "pending",
+        "delivery_attempt" => attempt
+      })
+
+    {line, id}
+  end
 
   defp tuple(id, status) do
     %{
