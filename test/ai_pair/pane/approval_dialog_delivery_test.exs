@@ -36,10 +36,15 @@ defmodule AiPair.Pane.ApprovalDialogDeliveryTest do
     1. waits, bounded by poll telemetry, until the pane classifies the fixture as
        `:dialog`;
     2. sends, and requires the exact reply `{:queued, :dialog}`;
-    3. waits past the debounce window. This wait is bounded: at least
-       `@settle_polls` further polls and at least `@settle_debounces` times the
-       debounce, with a hard deadline. Every poll in the window must report `:dialog`;
-    4. asserts zero `paste-buffer` and, separately, zero `send-keys Enter` in the log;
+    3. waits past the debounce window. The window is the CONFIGURED TEST debounce,
+       `idle_debounce_ms: 50` (`@debounce_ms`), not the production default of 500 ms
+       (`state_machine.ex:102`). The wait is bounded: at least `@settle_polls` (15)
+       further polls at the 10 ms test poll interval, and at least
+       `@settle_debounces` (4) times the 50 ms test debounce, with a 3 s hard
+       deadline. Every poll in the window must report `:dialog`;
+    4. asserts zero `paste-buffer` and, separately, zero `send-keys Enter` in the log,
+       and then that the log is empty. That rules out any partial tmux sequence, such
+       as a `set-buffer` with no paste;
     5. asserts, separately, that the message is still queued: `pending_count == 1` in
        the pane's status, and for the receipted path the receipt reconciles `queued`.
 
@@ -53,7 +58,13 @@ defmodule AiPair.Pane.ApprovalDialogDeliveryTest do
   The fixture floor names the five shipped dialog fixtures (Codex 4, Claude 1). It
   requires each of them to exist and the glob to find at least that many, so a deleted
   fixture fails here instead of quietly dropping a witness. The per-fixture tests are
-  generated from the same glob.
+  generated from the same glob, `test/fixtures/fingerprints/*/dialog_*.txt`. It looks
+  exactly one directory level deep (the agent directory), so a `dialog_*` file nested
+  further down, for example under `codex_cli/streaming/`, is not found.
+
+  Pane ids are namespaced (`%ns30e001_<n>`). The poll telemetry forwarder filters on
+  pane id, so an async test elsewhere that uses a literal numeric id such as `%1`
+  cannot inject its poll states into these waits.
 
   LIMIT. This is timing-bounded negative evidence for THESE fixtures only. It shows
   that, for the five captured screens, the shipped fingerprints classify `:dialog` and
@@ -193,6 +204,7 @@ defmodule AiPair.Pane.ApprovalDialogDeliveryTest do
     ops = recorded(h)
     assert paste_buffers(ops) == []
     assert enters(ops) == []
+    assert recorded(h) == []
 
     status = StateMachine.status(h.pane)
     assert status.pending_count == 1
@@ -262,6 +274,7 @@ defmodule AiPair.Pane.ApprovalDialogDeliveryTest do
 
     screen = start_supervised!({Agent, fn -> initial_screen end}, id: {:screen, n})
 
+    assert Application.get_env(:ai_pair, :fingerprint_dir) == nil
     assert {:ok, classifier, classifier_name} = Loader.load_for_agent(agent)
 
     store =
@@ -271,7 +284,7 @@ defmodule AiPair.Pane.ApprovalDialogDeliveryTest do
         start_supervised!({ReceiptStore, inbox: inbox}, id: {:store, n})
       end
 
-    pane_id = "%#{n}"
+    pane_id = "%ns30e001_#{n}"
 
     handler = {__MODULE__, n}
     test_pid = self()
