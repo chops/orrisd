@@ -7,7 +7,7 @@ defmodule AiPair.Delivery.NS32M002DurableVersionTest do
   it does not support. It must not continue on it and must not rewrite it, and a
   same-construction file at the supported version must still load.
 
-  ## Receipt log (`lib/ai_pair/delivery/receipt_log.ex:104-106`)
+  ## Receipt log (`lib/ai_pair/delivery/receipt_log.ex`)
 
   A valid three-line control log is built here: three `pending` receipts, each
   correctly chained to the digest of the line before it. Each refusal row then
@@ -22,24 +22,26 @@ defmodule AiPair.Delivery.NS32M002DurableVersionTest do
   chained: its `prev_line_sha256` is still the digest of the real line before it.
   Every changed line ends with a trailing newline. The row asserts that newline is
   present before any reader opens the file. This matters because an unterminated
-  final line is a TAIL, which the reader truncates as a torn write
-  (`receipt_log.ex:125-128`). No row here has a line without its newline.
+  final line is a TAIL, which the reader classifies on a separate path, covered by
+  `receipt_log_compatibility_test.exs`. No row here has a line without its newline.
 
   For each row, both the log reader (`ReceiptLog.open/2`) and the receipt store's
   own open path (`GenServer.start(ReceiptStore, ...)`, unlinked and unregistered)
-  must return exactly `{:error, {:receipt_log_corrupt, n}}`, where `n` is the
-  changed line. The file bytes must be identical afterwards. The same-construction
-  control, which is the same builder with nothing changed, opens at `seq == 3`
-  through the reader and starts through the store.
+  must return exactly
+  `{:error, {:receipt_log_incompatible, %{seq: n, found: found, expected: expected}}}`,
+  where `n` is the changed line, `found` is the row's schema and version as the
+  reader reports them, and `expected` is `%{schema: "ai-pair/delivery-receipt",
+  schema_version: 1}`. The file bytes must be identical afterwards. The
+  same-construction control, which is the same builder with nothing changed, opens
+  at `seq == 3` through the reader and starts through the store.
 
-  These rows are PARTIAL refusal witnesses. They show that an incompatible or
-  foreign-schema line is refused at the right line and that the file is left
-  untouched. The refusal term is today's generic `{:receipt_log_corrupt, seq}`
-  (`receipt_log.ex:95`). That term does not tell an operator that the cause is
-  a version or schema incompatibility, so it is not an actionable compatibility
-  error. The pair tracks that as a separate product fix. If the product later
-  returns a more specific term, these exact-term assertions will fail and must be
-  updated with it.
+  These rows show that an incompatible or foreign-schema line is refused at the
+  right line with an actionable compatibility error, and that the file is left
+  untouched. The term names the line, the found pair and the expected pair. Found
+  values are bounded: a schema name within the reader's grammar and an integer
+  version are echoed, and a type-confused version is reported as
+  `{:unsupported_type, t}` (`:string`, `:float`, `:null` here), never as raw
+  content.
 
   ## Pane intent store (`lib/ai_pair/pane_intent_store.ex`, `record.ex`)
 
@@ -70,12 +72,10 @@ defmodule AiPair.Delivery.NS32M002DurableVersionTest do
 
   ## Limits
 
-    * The receipt-log rows are PARTIAL. They prove refusal and byte
-      preservation, not an actionable compatibility diagnosis.
-    * The tail path is a known open finding and is handled by a separate product
-      change. A final line with no trailing newline is truncated as a torn write
-      (`receipt_log.ex:125-128`). No row here exercises that path, and nothing
-      here endorses the truncation.
+    * The receipt-log rows prove refusal with the incompatible term and byte
+      preservation for terminated lines only.
+    * The tail path (a final line with no trailing newline) is covered by
+      `receipt_log_compatibility_test.exs`, not here. No row here exercises it.
     * Orrisd has no generation, upgrade or rollback mechanism for either store.
       This file therefore gives refusal-only evidence: it shows that an
       unsupported version is refused without being rewritten, not that any
@@ -124,20 +124,25 @@ defmodule AiPair.Delivery.NS32M002DurableVersionTest do
       GenServer.stop(pid)
     end
 
-    for {name, line_no, key, value} <- [
-          {"schema_version 2", 2, "schema_version", 2},
-          {~s(schema_version "1"), 2, "schema_version", "1"},
-          {"schema_version 1.0", 2, "schema_version", 1.0},
-          {"schema_version null", 2, "schema_version", nil},
-          {"schema name changed", 2, "schema", "ai-pair/delivery-receipt-v2"},
-          {"future version on the first line", 1, "schema_version", 2}
+    for {name, line_no, key, value, found} <- [
+          {"schema_version 2", 2, "schema_version", 2,
+           %{schema: "ai-pair/delivery-receipt", schema_version: 2}},
+          {~s(schema_version "1"), 2, "schema_version", "1",
+           %{schema: "ai-pair/delivery-receipt", schema_version: {:unsupported_type, :string}}},
+          {"schema_version 1.0", 2, "schema_version", 1.0,
+           %{schema: "ai-pair/delivery-receipt", schema_version: {:unsupported_type, :float}}},
+          {"schema_version null", 2, "schema_version", nil,
+           %{schema: "ai-pair/delivery-receipt", schema_version: {:unsupported_type, :null}}},
+          {"schema name changed", 2, "schema", "ai-pair/delivery-receipt-v2",
+           %{schema: "ai-pair/delivery-receipt-v2", schema_version: 1}},
+          {"future version on the first line", 1, "schema_version", 2,
+           %{schema: "ai-pair/delivery-receipt", schema_version: 2}}
         ] do
-      @row {line_no, key, value}
+      @row {line_no, key, value, found}
 
-      test "PARTIAL #{name}: refused at line #{line_no} by the reader and the store; bytes unchanged",
+      test "#{name}: refused as incompatible at line #{line_no} by the reader and the store; bytes unchanged",
            %{dir: dir} do
-        # PARTIAL: proves refusal and byte preservation, not an actionable compatibility diagnosis.
-        {line_no, key, value} = @row
+        {line_no, key, value, found} = @row
         control = control_lines()
         changed = change_key(control, line_no, key, value)
 
@@ -156,14 +161,23 @@ defmodule AiPair.Delivery.NS32M002DurableVersionTest do
         write_log!(dir, changed)
         before = File.read!(log_path(dir))
 
+        expected =
+          {:error,
+           {:receipt_log_incompatible,
+            %{
+              seq: line_no,
+              found: found,
+              expected: %{schema: "ai-pair/delivery-receipt", schema_version: 1}
+            }}}
+
         reader = ReceiptLog.open(SystemFs.new(), dir)
         with {:ok, log} <- reader, do: ReceiptLog.close(log)
-        assert reader == {:error, {:receipt_log_corrupt, line_no}}
+        assert reader == expected
         assert File.read!(log_path(dir)) == before
 
         store = GenServer.start(ReceiptStore, inbox: dir)
         with {:ok, pid} <- store, do: GenServer.stop(pid)
-        assert store == {:error, {:receipt_log_corrupt, line_no}}
+        assert store == expected
         assert File.read!(log_path(dir)) == before
       end
     end

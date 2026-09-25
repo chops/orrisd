@@ -41,10 +41,30 @@ at initialization, not on ordinary appends. There is no mutable head file: boot
 reads the complete log and validates its closed shape, chain, gapless sequence,
 identity consistency and legal attempt history before making it available.
 
-Only an unterminated final fragment is repairable. The preceding complete prefix
-must validate first, and truncation must be synced before service begins. A
-complete invalid last record is corruption, not a removable tail. This chain is
-not authentication against an attacker who can rewrite the entire log.
+A record is complete when it is a newline-terminated line, or when it is an
+unterminated final tail that decodes as a JSON value. The preceding complete prefix
+must validate first. Only a tail that does not decode, or that decodes to an object
+with this build's schema and version that also passes full record validation
+against the validated prefix, is repairable; that truncation must be synced before
+service begins. A complete unterminated tail that fails that validation, lacks a
+schema key, or decodes to a non-object is corruption and is refused with the file
+unchanged. A complete invalid last record is corruption, not a removable tail.
+
+A line with another ~schema~ or ~schema_version~, newline-terminated or not, is
+refused with ~{:receipt_log_incompatible, %{seq: n, found: ..., expected: ...}}~
+naming the line, the found pair and the expected pair, and the file is left
+unchanged. The classification precedes chain, key-set and history validation, and
+a present but unsupported version type is incompatible, not corrupt. Found values
+are echoed only when bounded: a schema name matching
+~\A[a-z0-9][a-z0-9/._-]{0,63}\z~, else ~:unrecognized~; an integer version in
+~0..1_000_000~, else a type marker ~{:unsupported_type, t}~. Recovery is an operator
+action: start the daemon build whose receipt schema matches ~found~, or move the
+log aside under operator control. This build never repairs or rewrites such a log.
+A torn line from another version does not decode and is still repaired as a
+fragment; a reader cannot tell it from a torn own line without a format commitment.
+Any future receipt schema change must land after this reader has shipped in the
+rollback target generation. This chain is not authentication against an attacker
+who can rewrite the entire log.
 
 ** Ownership and Recovery
 :PROPERTIES:
@@ -112,7 +132,11 @@ admissions being counted. No expected receipt transition was removed.
 Additional regressions cover mutation refusal after uncertain writes, truthful
 query rejection after uncertain finalization, malformed filesystem results,
 strict ID/hash grammars, duplicate-token nondisclosure, complete-tail corruption,
-and an invalid attempt history despite valid hash links. The canonical gate is
+and an invalid attempt history despite valid hash links.
+~test/ai_pair/delivery/receipt_log_compatibility_test.exs~ covers complete
+unterminated tails (repairable only when valid and own-version, refused otherwise
+with the bytes unchanged and no truncation) and the incompatible-version term with
+its bounded found values. The canonical gate is
 ~nix develop --impure --command bin/verify~.
 
 Operators explicitly choose when to deploy a new package. An older daemon cannot use these receipts to authorize sends;
