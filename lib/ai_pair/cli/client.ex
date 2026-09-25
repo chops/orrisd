@@ -30,6 +30,7 @@ defmodule AiPair.CLI.Client do
   @connect_timeout_ms 2_000
   @recv_timeout_ms 5_000
   @max_frame_bytes 1_048_576
+  @trace_carrier_keys ~w(traceparent tracestate)
 
   @doc """
   Release-wrapper entry. Decodes argv from `AI_PAIR_ARGV_B64`,
@@ -395,11 +396,17 @@ defmodule AiPair.CLI.Client do
         # tuple-list `[{binary, binary}]` — `Map.new/1` flattens it so it
         # JSON-encodes as top-level string keys. Outside an active span
         # the carrier comes back empty and `Map.merge/2` is a no-op.
+        #
+        # Only `traceparent` and `tracestate` are forwarded: they are the
+        # only keys the daemon reads. Any other key a configured propagator
+        # emits is dropped, and the command is merged last so its keys
+        # always win over the carrier's.
         carrier =
           :otel_propagator_text_map.inject([])
           |> Map.new()
+          |> Map.take(@trace_carrier_keys)
 
-        cmd_with_trace = Map.merge(cmd, carrier)
+        cmd_with_trace = Map.merge(carrier, cmd)
 
         with :ok <- :gen_tcp.send(conn, Jason.encode!(cmd_with_trace)),
              {:ok, frame} <- :gen_tcp.recv(conn, 0, @recv_timeout_ms) do
