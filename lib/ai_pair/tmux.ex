@@ -19,6 +19,11 @@ defmodule AiPair.Tmux do
   `error()` is `%{cmd: [String.t()], status: integer(), stderr: binary()}`.
   Raw `System.cmd/3` tuples never escape this module.
 
+  For the payload-bearing calls (`set_buffer`, `display_message`) the payload
+  element of `cmd` is `"<payload:N bytes>"` and `stderr` is
+  `"<stderr:N bytes class=C>"`, so neither the payload nor tmux's output leaves
+  this module.
+
   ## Two censuses
 
   `list_panes/1` is the lossy census. It reports the fields the send path
@@ -518,7 +523,8 @@ defmodule AiPair.Tmux do
   end
 
   defp do_set_buffer(state, name, payload) do
-    discard_ok(run_tmux(state, ["set-buffer", "-b", name, "--", payload]))
+    args = ["set-buffer", "-b", name, "--"]
+    discard_ok(run_tmux(state, args ++ [payload], shown: args ++ [payload_label(payload)]))
   end
 
   defp do_paste_buffer(state, pane_id, name, opts) do
@@ -532,7 +538,8 @@ defmodule AiPair.Tmux do
   end
 
   defp do_display_message(state, pane_id, message) do
-    discard_ok(run_tmux(state, ["display-message", "-t", pane_id, "--", message]))
+    args = ["display-message", "-t", pane_id, "--"]
+    discard_ok(run_tmux(state, args ++ [message], shown: args ++ [payload_label(message)]))
   end
 
   defp discard_ok({:ok, _}), do: :ok
@@ -540,8 +547,10 @@ defmodule AiPair.Tmux do
 
   # ===== Helpers =====
 
-  defp run_tmux(state, args) do
+  defp run_tmux(state, args, opts \\ []) do
     full_args = prepend_socket(state, args)
+    shown = Keyword.get(opts, :shown)
+    shown_cmd = [state.tmux_bin | prepend_socket(state, shown || args)]
 
     try do
       case System.cmd(state.tmux_bin, full_args, stderr_to_stdout: true) do
@@ -549,24 +558,35 @@ defmodule AiPair.Tmux do
           {:ok, output}
 
         {output, status} ->
-          {:error, %{cmd: [state.tmux_bin | full_args], status: status, stderr: output}}
+          bound_error(%{cmd: shown_cmd, status: status, stderr: output}, shown)
       end
     rescue
       e in [ErlangError, File.Error] ->
         if enoent?(e) do
           Logger.error(fn ->
-            "ai_pair: tmux binary not found on PATH while running " <>
-              inspect([state.tmux_bin | full_args])
+            "ai_pair: tmux binary not found on PATH while running " <> inspect(shown_cmd)
           end)
         end
 
-        {:error, %{cmd: [state.tmux_bin | full_args], status: -1, stderr: Exception.message(e)}}
+        bound_error(%{cmd: shown_cmd, status: -1, stderr: Exception.message(e)}, shown)
     end
   end
 
   defp enoent?(%ErlangError{original: :enoent}), do: true
   defp enoent?(%File.Error{reason: :enoent}), do: true
   defp enoent?(_), do: false
+
+  # Payload-bearing calls pass `shown:`, their argv with the payload replaced by
+  # its byte count. Their error never returns tmux's own output either: it is
+  # replaced by its byte count and the class read from it before bounding.
+  defp bound_error(err, nil), do: {:error, err}
+
+  defp bound_error(%{stderr: stderr} = err, _shown) do
+    bounded = "<stderr:#{byte_size(stderr)} bytes class=#{classify_error(err)}>"
+    {:error, %{err | stderr: bounded}}
+  end
+
+  defp payload_label(payload), do: "<payload:#{byte_size(payload)} bytes>"
 
   defp prepend_socket(%{socket_name: nil}, args), do: args
   defp prepend_socket(%{socket_name: name}, args), do: ["-L", name | args]
@@ -818,6 +838,7 @@ defmodule AiPair.Tmux do
     cond do
       stderr =~ "can't find pane" -> "pane_not_found"
       stderr =~ "no such pane" -> "pane_not_found"
+      stderr =~ "class=pane_not_found>" -> "pane_not_found"
       true -> "nonzero_exit"
     end
   end
