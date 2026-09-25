@@ -628,10 +628,35 @@ defmodule AiPair.Pane.StateMachine do
 
       {:next_state, :dead, settle_dead_queue(data), []}
     else
-      emit_poll_telemetry(started_at_us, state, state, false, data)
       data2 = %{data | pane_gone_count: count, pane_gone_since_ms: since}
-      {:keep_state, data2, [repoll]}
+      not_reaped(started_at_us, state, data2, repoll)
     end
+  end
+
+  # H-4: a pane observed gone cannot keep an idle verdict while it waits for
+  # the reaper. Mirror the non-pane capture error path: leave idle on the
+  # first :pane_gone, so sends queue as :unknown instead of pasting, and
+  # recovery needs fresh matching captures. The reaper counters are kept,
+  # so its threshold and grace are unchanged.
+  defp not_reaped(started_at_us, :idle, data, repoll) do
+    emit_poll_telemetry(started_at_us, :idle, :unknown, false, data)
+    emit_decision_telemetry(:idle, :unknown, data)
+    emit_transition_span(:idle, :unknown, data)
+
+    data2 = %{
+      data
+      | idle_since_ms: nil,
+        last_stripped_hash: nil,
+        recovering_capture: true,
+        recovery_candidate: nil
+    }
+
+    {:next_state, :unknown, data2, [repoll]}
+  end
+
+  defp not_reaped(started_at_us, state, data, repoll) do
+    emit_poll_telemetry(started_at_us, state, state, false, data)
+    {:keep_state, data, [repoll]}
   end
 
   defp classify_stripped(classifier, stripped) do

@@ -467,9 +467,10 @@ defmodule AiPair.Pane.StateMachineTest do
 
       set_capture(capture_agent, {:error, :pane_gone})
 
-      # Several poll ticks worth, but well under the 5s grace.
+      # Several poll ticks worth, but well under the 5s grace. H-4: the first
+      # :pane_gone revokes idle (to :unknown); the reaper still waits for grace.
       Process.sleep(150)
-      assert StateMachine.state(sm) == :idle
+      assert StateMachine.state(sm) == :unknown
     end
 
     test "successful capture between pane_gone observations resets the reaper window" do
@@ -479,23 +480,24 @@ defmodule AiPair.Pane.StateMachineTest do
       assert :ok = wait_until_state(sm, :idle)
 
       # First pane_gone burst — accumulate some elapsed time but stop short
-      # of the 100ms grace.
+      # of the 100ms grace. H-4: the first :pane_gone revokes idle.
       set_capture(capture_agent, {:error, :pane_gone})
       Process.sleep(60)
-      assert StateMachine.state(sm) == :idle
+      assert StateMachine.state(sm) == :unknown
 
-      # Successful capture resets pane_gone_count + pane_gone_since_ms.
+      # Successful capture resets pane_gone_count + pane_gone_since_ms. H-4:
+      # returning to :idle now takes two matching captures (recovery).
       set_capture(capture_agent, "IDLE_MARKER")
       Process.sleep(40)
-      assert StateMachine.state(sm) == :idle
+      assert :ok = wait_until_state(sm, :idle)
 
       # Second pane_gone burst. If the counter had NOT reset, the cumulative
       # elapsed (60+40+ε) would have already exceeded grace and the next
       # pane_gone tick would reap immediately. Confirm we still need a
-      # fresh grace window.
+      # fresh grace window. H-4: not reaped, but no longer idle.
       set_capture(capture_agent, {:error, :pane_gone})
       Process.sleep(40)
-      assert StateMachine.state(sm) == :idle
+      assert StateMachine.state(sm) == :unknown
 
       # And after the new grace window plus a poll tick, it does reap.
       assert :ok = wait_until_state(sm, :dead, 500)
@@ -544,7 +546,7 @@ defmodule AiPair.Pane.StateMachineTest do
                pane_id: "%test",
                agent: "claude_code",
                classifier_name: "fingerprint:claude_code",
-               from_state: :idle
+               from_state: :unknown
              } = meta
     end
   end
