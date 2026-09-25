@@ -1,0 +1,38 @@
+#+options: ^:nil
+
+* ADR-0006: Bound payload bytes in tmux payload-call errors
+:PROPERTIES:
+:CUSTOM_ID: adr-0006-bound-payload-bytes-in-tmux-payload-call-errors
+:END:
+** Decision
+:PROPERTIES:
+:CUSTOM_ID: decision
+:END:
+Dated 2026-09-25. For the two tmux calls that carry caller bytes in argv,
+~set-buffer~ and ~display-message~, the error ~AiPair.Tmux~ returns replaces
+the payload argument with ~<payload:N bytes>~ and replaces tmux's own output
+with ~<stderr:N bytes class=C>~, where C is the class read from that output
+before it is replaced. The missing-binary log line uses the same bounded
+argv. The bytes sent to tmux are unchanged.
+
+** Consequences
+:PROPERTIES:
+:CUSTOM_ID: consequences
+:END:
+A failed ~set-buffer~ therefore no longer carries the payload or tmux's output
+into the v1 send reply ~detail~, the ~pane.paste~ and ~tmux.set_buffer~ span
+statuses, the ~ipc.error_detail~ attribute, the queued-send drain warning or
+the missing-binary log. This is a claim about those error values only. Other
+tmux calls keep their argv (pane ids, buffer names) and their output. Errors
+returned by an injected paste adapter are not bounded. The call message
+~{:set_buffer, name, payload}~ and any crash report of the tmux process are
+outside this decision, as are the calibrator and process memory.
+
+** Verification
+:PROPERTIES:
+:CUSTOM_ID: verification
+:END:
+Tests drive a stub tmux that exits non-zero, one that echoes the payload on
+stderr, and a missing binary, through the tmux boundary and the v1 and v2
+send paths, and check each named channel for a synthetic token. Whether real
+tmux echoes the payload is not asserted.
