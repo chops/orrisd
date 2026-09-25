@@ -30,7 +30,9 @@ defmodule AiPair.NS15G002DaemonRefusalBeforePasteTest do
       once, changes the log and reconciles `delivered`. R1's negative necessarily runs
       before its control, because the control reuses the identity.
     * R1b v2, registered then stopped: `pane_not_found`. Control: a send before the stop.
-    * R2 / R2b: the same two constructions on v1.
+    * R2 / R2b: the same two constructions on v1. They carry no receipt-log assertion:
+      v1 `send_legacy` goes to `:send_untracked` and writes no receipt, so such an
+      assertion could never fail.
     * R3 v2, dead by the reaper (threshold 2, grace 0, switchable capture). Control: a
       send while IDLE, before the capture is switched. The refusal is `pane_dead` with no
       paste. DISCLOSED, as observed and not asserted correct: the refused send still
@@ -49,7 +51,9 @@ defmodule AiPair.NS15G002DaemonRefusalBeforePasteTest do
       `{:error, :pane_gone}` with a reaper threshold of 1_000_000. The send is queued as
       `unknown`, and 20+ polls after it all report `:unknown`. This is a simulated
       capture failure on an unreaped pane; it is not proof of real tmux liveness or
-      absence. Control: a sibling with an IDLE capture.
+      absence. DISCLOSED, asserted as observed and not as correct: the attempt is
+      admitted and queued, so reconcile answers `queued`/`queued`/attempt 1. Control: a
+      sibling with the same option list (threshold 1_000_000) and an IDLE capture.
     * R8 v2, receipt-authority mismatch: a pane started without `:receipt_store`
       answers `receipt_store_mismatch`, with nothing admitted. Control: a sibling with
       the store.
@@ -146,21 +150,33 @@ defmodule AiPair.NS15G002DaemonRefusalBeforePasteTest do
              "R1 control; observed " <> inspect(ctl)
 
       assert pastes(c, pane, text) == 1, "R1 control pastes; observed #{pastes(c, pane, text)}"
-      refute File.read(c.log) == before, "R1 control must change the log"
+      after_ctl = File.read(c.log)
+
+      refute after_ctl == before,
+             "R1 control must change the log; observed " <> inspect(after_ctl)
+
       rec = reconcile!(c, pane, id, text)
-      assert rec["outcome"] == "delivered", "R1 control reconcile; observed " <> inspect(rec)
+
+      assert {rec["outcome"], rec["delivery_attempt"]} == {"delivered", 1},
+             "R1 control reconcile; observed " <> inspect(rec)
     end
 
     test "R1b registered then stopped: pane_not_found; control: sent before the stop", c do
       pane = pane!(c, "rb")
       _sm = start_idle!(c, pane)
 
-      # Control first, on the registered pane.
+      # Control first, on the registered pane. Its text differs from the row's only as an
+      # incidental difference; the named variable is registration.
       ctl_id = id(c, "r1b-control")
       ctl_text = "R1b control " <> Integer.to_string(c.n)
+      ctl_before = File.read(c.log)
       ctl = send_v2!(c, pane, ctl_id, ctl_text)
       assert ctl["status"] == "sent", "R1b control; observed " <> inspect(ctl)
       assert pastes(c, pane, ctl_text) == 1
+      ctl_after = File.read(c.log)
+
+      refute ctl_after == ctl_before,
+             "R1b control must change the log; observed " <> inspect(ctl_after)
 
       # Stop and prove the stop.
       assert :ok = PaneSupervisor.stop_pane(pane)
@@ -177,7 +193,8 @@ defmodule AiPair.NS15G002DaemonRefusalBeforePasteTest do
              "R1b reply; observed " <> inspect(reply)
 
       assert pastes(c, pane, text) == 0, "R1b pastes; observed #{pastes(c, pane, text)}"
-      assert File.read(c.log) == before, "R1b log unchanged"
+      after_neg = File.read(c.log)
+      assert after_neg == before, "R1b log unchanged; observed " <> inspect(after_neg)
       assert_absent_unadmitted(c, pane, id, text)
     end
   end
@@ -191,15 +208,15 @@ defmodule AiPair.NS15G002DaemonRefusalBeforePasteTest do
       text = "R2 text " <> Integer.to_string(c.n)
 
       assert PaneSupervisor.whereis_pane(pane) == :error
-      before = File.read(c.log)
 
+      # No receipt-log assertion on v1: send_legacy goes to :send_untracked and writes no
+      # receipt, so a log-unchanged check here could never fail.
       reply = send_v1!(c, pane, text)
 
       assert reply == %{"ok" => false, "pane_id" => pane, "error" => "pane_not_found"},
              "R2 reply; observed " <> inspect(reply)
 
       assert pastes(c, pane, text) == 0, "R2 pastes; observed #{pastes(c, pane, text)}"
-      assert File.read(c.log) == before, "R2 log unchanged"
 
       # Control: the same pane id, registered and idle.
       _sm = start_idle!(c, pane)
@@ -223,15 +240,14 @@ defmodule AiPair.NS15G002DaemonRefusalBeforePasteTest do
       assert :ok = PaneSupervisor.stop_pane(pane)
       assert :ok = await_unregistered(pane)
 
+      # No receipt-log assertion on v1 (untracked path, writes no receipt; see R2).
       text = "R2b text " <> Integer.to_string(c.n)
-      before = File.read(c.log)
       reply = send_v1!(c, pane, text)
 
       assert reply == %{"ok" => false, "pane_id" => pane, "error" => "pane_not_found"},
              "R2b reply; observed " <> inspect(reply)
 
       assert pastes(c, pane, text) == 0, "R2b pastes; observed #{pastes(c, pane, text)}"
-      assert File.read(c.log) == before, "R2b log unchanged"
     end
   end
 
@@ -257,6 +273,7 @@ defmodule AiPair.NS15G002DaemonRefusalBeforePasteTest do
 
       id = id(c, "r3")
       text = "R3 text " <> Integer.to_string(c.n)
+      assert_absent_unadmitted(c, pane, id, text)
       reply = send_v2!(c, pane, id, text)
 
       assert reply == refusal_v2(pane, id, "pane_dead"),
@@ -264,7 +281,7 @@ defmodule AiPair.NS15G002DaemonRefusalBeforePasteTest do
 
       assert pastes(c, pane, text) == 0, "R3 pastes; observed #{pastes(c, pane, text)}"
 
-      # DISCLOSED, as observed and not asserted correct: the refusal still wrote a record.
+      # DISCLOSED ADMISSION (PD-3, finding H-1), asserted as observed, not as correct
       rec = reconcile!(c, pane, id, text)
 
       assert {rec["outcome"], rec["status"], rec["delivery_attempt"]} ==
@@ -322,33 +339,47 @@ defmodule AiPair.NS15G002DaemonRefusalBeforePasteTest do
 
       assert direct == {:error, :pane_quarantined}, "R5 direct; observed " <> inspect(direct)
 
-      # Control, before the negative send.
+      # Control, before the negative send. Control texts differ from the row's only as an
+      # incidental difference; the named variable is the quarantine token.
       ctl1_text = "R5 control before " <> Integer.to_string(c.n)
+      ctl1_log = File.read(c.log)
       ctl1 = send_v2!(c, sib, id(c, "r5-control-before"), ctl1_text)
       assert ctl1["status"] == "sent", "R5 control before; observed " <> inspect(ctl1)
       assert pastes(c, sib, ctl1_text) == 1
+      ctl1_after = File.read(c.log)
+
+      refute ctl1_after == ctl1_log,
+             "R5 control before must change the log; observed " <> inspect(ctl1_after)
 
       id = id(c, "r5")
       text = "R5 text " <> Integer.to_string(c.n)
+      assert_absent_unadmitted(c, pane, id, text)
       before = File.read(c.log)
       flush_polls(pane)
       reply = send_v2!(c, pane, id, text)
 
-      # FINDING H-2: pinned as current behaviour, not asserted as correct.
+      # FINDING H-2, pinned as current behaviour and not asserted as correct
       assert reply == refusal_v2(pane, id, "receipt_store_unavailable"),
              "R5 reply (H-2 pin); observed " <> inspect(reply)
 
       assert_receive {:poll, ^pane, _}, 1_000
       assert pastes(c, pane, text) == 0, "R5 pastes; observed #{pastes(c, pane, text)}"
-      assert File.read(c.log) == before, "R5 log unchanged"
+      after_neg = File.read(c.log)
+      assert after_neg == before, "R5 log unchanged; observed " <> inspect(after_neg)
+      assert_absent_unadmitted(c, pane, id, text)
       q = StateMachine.pending_count(sm)
       assert q == 0, "R5 queue; observed #{q}"
 
       # Control, after the negative send.
       ctl2_text = "R5 control after " <> Integer.to_string(c.n)
+      ctl2_log = File.read(c.log)
       ctl2 = send_v2!(c, sib, id(c, "r5-control-after"), ctl2_text)
       assert ctl2["status"] == "sent", "R5 control after; observed " <> inspect(ctl2)
       assert pastes(c, sib, ctl2_text) == 1
+      ctl2_after = File.read(c.log)
+
+      refute ctl2_after == ctl2_log,
+             "R5 control after must change the log; observed " <> inspect(ctl2_after)
     end
 
     test "R6 v1: FINDING H-3 pinned; the handler crashes, the server still answers", c do
@@ -376,8 +407,10 @@ defmodule AiPair.NS15G002DaemonRefusalBeforePasteTest do
           r
         end)
 
-      # FINDING H-3: pinned as current behaviour, not asserted as correct.
+      # FINDING H-3, pinned as current behaviour and not asserted as correct
       assert result == {:error, :closed}, "R6 socket; observed " <> inspect(result)
+      q = StateMachine.pending_count(sm)
+      assert q == 0, "R6 queue after the closed socket; observed #{q}"
 
       for needle <- ["FunctionClauseError", "format_send_result", ":pane_quarantined"] do
         assert log =~ needle, "R6 log must name #{needle}; observed " <> inspect(log)
@@ -398,10 +431,11 @@ defmodule AiPair.NS15G002DaemonRefusalBeforePasteTest do
       pane = pane!(c, "g")
       sib = pane!(c, "gs")
       sm = start_gone_unreaped!(c, pane)
-      _sib_sm = start_idle!(c, sib)
+      _sib_sm = start_idle_unreaped!(c, sib)
       assert_receive {:poll, ^pane, :unknown}, 1_000
 
-      # Control: a sibling with an IDLE capture.
+      # Control: a sibling with the SAME option list (threshold 1_000_000); only the capture
+      # double differs (IDLE). The control text differs only as an incidental difference.
       ctl_text = "R7 control " <> Integer.to_string(c.n)
       ctl = send_v2!(c, sib, id(c, "r7-control"), ctl_text)
       assert ctl["status"] == "sent", "R7 control; observed " <> inspect(ctl)
@@ -409,10 +443,17 @@ defmodule AiPair.NS15G002DaemonRefusalBeforePasteTest do
 
       id = id(c, "r7")
       text = "R7 text " <> Integer.to_string(c.n)
+      assert_absent_unadmitted(c, pane, id, text)
       reply = send_v2!(c, pane, id, text)
 
       assert {reply["ok"], reply["status"], reply["queue_reason"]} == {true, "queued", "unknown"},
              "R7 reply; observed " <> inspect(reply)
+
+      # DISCLOSED, asserted as observed, not as correct: the attempt is admitted and queued.
+      rec = reconcile!(c, pane, id, text)
+
+      assert {rec["outcome"], rec["status"], rec["delivery_attempt"]} == {"queued", "queued", 1},
+             "R7 disclosed reconcile; observed " <> inspect(rec)
 
       flush_polls(pane)
       polls = collect_polls(pane, 20, 3_000)
@@ -438,12 +479,22 @@ defmodule AiPair.NS15G002DaemonRefusalBeforePasteTest do
       _sib_sm = start_idle!(c, sib)
       assert :ok = await_state(sm, :idle)
 
+      # Control text differs from the row's only as an incidental difference; the named
+      # variable is the :receipt_store option.
       ctl_text = "R8 control " <> Integer.to_string(c.n)
+      ctl_log = File.read(c.log)
       ctl = send_v2!(c, sib, id(c, "r8-control"), ctl_text)
       assert ctl["status"] == "sent", "R8 control; observed " <> inspect(ctl)
+      ctl_pastes = pastes(c, sib, ctl_text)
+      assert ctl_pastes == 1, "R8 control pastes; observed #{ctl_pastes}"
+      ctl_after = File.read(c.log)
+
+      refute ctl_after == ctl_log,
+             "R8 control must change the log; observed " <> inspect(ctl_after)
 
       id = id(c, "r8")
       text = "R8 text " <> Integer.to_string(c.n)
+      assert_absent_unadmitted(c, pane, id, text)
       before = File.read(c.log)
       reply = send_v2!(c, pane, id, text)
 
@@ -451,7 +502,8 @@ defmodule AiPair.NS15G002DaemonRefusalBeforePasteTest do
              "R8 reply; observed " <> inspect(reply)
 
       assert pastes(c, pane, text) == 0, "R8 pastes; observed #{pastes(c, pane, text)}"
-      assert File.read(c.log) == before, "R8 log unchanged"
+      after_neg = File.read(c.log)
+      assert after_neg == before, "R8 log unchanged; observed " <> inspect(after_neg)
       assert_absent_unadmitted(c, pane, id, text)
     end
   end
@@ -553,6 +605,24 @@ defmodule AiPair.NS15G002DaemonRefusalBeforePasteTest do
       )
 
     on_exit(fn -> PaneSupervisor.stop_pane(pane) end)
+    sm
+  end
+
+  # R7's control: the same option list as start_gone_unreaped!/2; only the capture differs.
+  defp start_idle_unreaped!(c, pane) do
+    {:ok, sm} =
+      PaneSupervisor.start_pane(pane,
+        receipt_store: c.store,
+        capture_fn: fn _ -> {:ok, "IDLE_MARKER"} end,
+        paste_fn: paste_fn(c),
+        classifier: MarkerClassifier,
+        poll_interval_ms: 5,
+        idle_debounce_ms: 0,
+        pane_gone_threshold: 1_000_000
+      )
+
+    on_exit(fn -> PaneSupervisor.stop_pane(pane) end)
+    assert :ok = await_state(sm, :idle)
     sm
   end
 
