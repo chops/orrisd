@@ -27,7 +27,11 @@ defmodule AiPair.Delivery.NS42C010DuplicateWhilePendingTest do
     * `statuses(id)` from the receipt log, as `[{attempt, status}]`;
     * v2 reconcile over the socket, with `wait_ms` chosen per call;
     * the number of `{:"$gen_call", _, {:send_receipted, _, _, id, _}}` messages in the
-      pane's mailbox.
+      pane's mailbox;
+    * the store's registered reconcile waiters for an id, read from the `waiters` map in
+      `ReceiptStore` state with `:sys.get_state/1`;
+    * timed reconcile frames, stamped in native units after connect, immediately before
+      the request is written, and again when the reply is read.
 
   Paste counts are asserted as DELTAS within a row. Each row's control runs first, on
   the same pane, text and detectors as the row, so the row's own count is measured from
@@ -40,10 +44,13 @@ defmodule AiPair.Delivery.NS42C010DuplicateWhilePendingTest do
       send is then `sent`, with one paste. Control C-T1: a fresh id with the same text
       does NOT reply until release, and then two pastes are recorded.
     * T1-W, the wake: a reconcile with `wait_ms: 2_000`, issued while the send is held,
-      answers `delivered` only after the release. Control C-T1-W: `wait_ms: 0` answers
-      at once as `ambiguous`/`pending`.
-    * W2, the timeout: a reconcile with `wait_ms: 150` and NO release answers `ambiguous`
-      after at least 150 ms. T1-W is its control.
+      is observed registered as a store waiter before the release, was written before
+      the release, and answers `delivered` only after it. Control C-T1-W: `wait_ms: 0`
+      answers at once as `ambiguous`/`pending`.
+    * W2, the timeout: a reconcile with `wait_ms: 150` and NO release is observed
+      registered as a store waiter and answers `ambiguous`/`pending` at least 150 ms after
+      its request was written, with the waiter gone and no finalize in the log. T1-W is
+      its control.
     * T3, a TOCTOU race on one id: the pane is held inside an untracked v1 paste while two
       sends of the same id queue in its mailbox. Exactly one is sent and the other is a
       duplicate, with one paste. Control C-T3: two different ids, both sent, two pastes.
@@ -55,8 +62,9 @@ defmodule AiPair.Delivery.NS42C010DuplicateWhilePendingTest do
       attempt 2, `delivered`, with one paste. Control: an id delivered on the live pane
       and resent is a duplicate at attempt 1, with no attempt 2.
     * T6, racing retries after non-delivery: after attempt 1 is `not_delivered`, the T3
-      race on one id opens exactly one attempt 2, with one paste. Control: two different
-      ids race, both are sent and each reaches attempt 2.
+      race on one id opens exactly one attempt 2, with one paste. Before the release a
+      reconcile still answers `absent` on attempt 1. Control: two different ids race,
+      both are sent and each reaches attempt 2.
 
   H-4 (main `66de070c`) moves an idle pane to `:unknown` on its first `pane_gone`
   capture. T5 and T6 were checked against it: with threshold 2 and grace 0 the pane still
@@ -184,7 +192,7 @@ defmodule AiPair.Delivery.NS42C010DuplicateWhilePendingTest do
       held = Task.async(fn -> send_v2!(c, p, idc, t) end)
       assert_receive {:paste_started, ^sm, ^t}, 2_000
       dup = send_v2!(c, p, idc, t)
-      assert dup["status"] == "pending", "C-T1-W duplicate; observed " <> inspect(dup)
+      assert dup == typed_duplicate(idc, p, t), "C-T1-W duplicate; observed " <> inspect(dup)
       now = reconcile!(c, p, idc, t, 0)
 
       assert {now["outcome"], now["status"], now["delivery_attempt"]} ==
@@ -202,21 +210,24 @@ defmodule AiPair.Delivery.NS42C010DuplicateWhilePendingTest do
       s = Task.async(fn -> send_v2!(c, p, idw, t) end)
       assert_receive {:paste_started, ^sm, ^t}, 2_000
       dup = send_v2!(c, p, idw, t)
-      assert dup["status"] == "pending", "T1-W duplicate; observed " <> inspect(dup)
+      assert dup == typed_duplicate(idw, p, t), "T1-W duplicate; observed " <> inspect(dup)
+      assert_waiters(c, idw, 0, "T1-W before the reconcile")
 
-      w =
-        Task.async(fn ->
-          sent_at = now_native()
-          reply = reconcile!(c, p, idw, t, 2_000)
-          {reply, sent_at, now_native()}
-        end)
+      # w_sent_at is stamped after connect, immediately before the request is written.
+      w = Task.async(fn -> timed_reconcile!(c, p, idw, t, 2_000) end)
 
+      # The release waits for the store's own registration of this waiter.
+      assert_waiters(c, idw, 1, "T1-W registered before release")
       early = Task.yield(w, 200)
       assert early == nil, "T1-W must wait while held; observed " <> inspect(early)
       # Native units: a millisecond stamp can tie with the wake it precedes.
       released_at = now_native()
       release(sm)
       {reply, w_sent_at, w_received_at} = Task.await(w, 3_000)
+
+      assert w_sent_at < released_at,
+             "T1-W request written before release; observed sent #{w_sent_at}, " <>
+               "released #{released_at}"
 
       assert w_received_at > released_at,
              "T1-W answered after release; observed received #{w_received_at}, " <>
@@ -229,6 +240,7 @@ defmodule AiPair.Delivery.NS42C010DuplicateWhilePendingTest do
                {"delivered", "delivered", 1},
              "T1-W reply; observed " <> inspect(reply)
 
+      assert_waiters(c, idw, 0, "T1-W after the wake")
       assert_sent(Task.await(s, 6_000), "T1-W send")
       assert_delta(c, p, t, base, 1, "T1-W")
       assert_statuses(c, idw, [{1, "pending"}, {1, "delivered"}], "T1-W")
@@ -245,18 +257,26 @@ defmodule AiPair.Delivery.NS42C010DuplicateWhilePendingTest do
       a = Task.async(fn -> send_v2!(c, p, id2, t) end)
       assert_receive {:paste_started, ^sm, ^t}, 2_000
       dup = send_v2!(c, p, id2, t)
-      assert dup["status"] == "pending", "W2 duplicate; observed " <> inspect(dup)
+      assert dup == typed_duplicate(id2, p, t), "W2 duplicate; observed " <> inspect(dup)
+      assert_waiters(c, id2, 0, "W2 before the reconcile")
 
-      started = now_ms()
-      reply = reconcile!(c, p, id2, t, 150)
-      elapsed = now_ms() - started
+      # The clock starts after connect, immediately before the request is written.
+      w = Task.async(fn -> timed_reconcile!(c, p, id2, t, 150) end)
+
+      # The wait is the store's: its waiter for id2 is registered while the request is open.
+      assert_waiters(c, id2, 1, "W2 registered")
+      {reply, sent_at, received_at} = Task.await(w, 3_000)
+      elapsed = System.convert_time_unit(received_at - sent_at, :native, :millisecond)
 
       assert elapsed >= 150 and elapsed < 2_000, "W2 elapsed; observed #{elapsed} ms"
 
+      # The timeout's own answer: ambiguous on a record still pending, with the waiter gone
+      # and no finalize in the log, so no notify woke it.
       assert {reply["outcome"], reply["status"], reply["delivery_attempt"]} ==
                {"ambiguous", "pending", 1},
              "W2 reply; observed " <> inspect(reply)
 
+      assert_waiters(c, id2, 0, "W2 after the timeout")
       assert_statuses(c, id2, [{1, "pending"}], "W2 while held")
 
       release(sm)
@@ -371,6 +391,7 @@ defmodule AiPair.Delivery.NS42C010DuplicateWhilePendingTest do
 
       release(sm)
       assert_sent(Task.await(h7, 6_000), "T4 hold")
+      assert_statuses(c, id7, [{1, "pending"}, {1, "delivered"}], "T4 id7")
       assert_delta(c, pp, y2, y_base, 0, "T4 Y2")
       qp = pane_pastes(c, q) - q_base
       assert qp == 0, "T4 Q pastes; observed #{qp}"
@@ -461,12 +482,28 @@ defmodule AiPair.Delivery.NS42C010DuplicateWhilePendingTest do
       base = pastes(c, e, w)
       {block, r1, r2} = race!(c, e, sm, {id12, w}, {id12, w})
       assert_mailbox(sm, id12, 2, "T6 id12")
+      pre = reconcile!(c, e, id12, w, 0)
+
+      # Attempt 1 is recorded not_delivered, so the pre-release marker is outcome absent on
+      # attempt 1: no attempt 2 is admitted before release.
+      assert {pre["outcome"], pre["status"], pre["delivery_attempt"]} ==
+               {"absent", "not_delivered", 1},
+             "T6 nothing admitted before release; observed " <> inspect(pre)
+
       release(sm)
       assert_v1_sent(Task.await(block, 6_000), "T6 block")
       replies = Enum.map([r1, r2], &Task.await(&1, 6_000))
       recorded = statuses(c, id12)
       twos = Enum.count(recorded, &(&1 == {2, "pending"}))
       assert twos == 1, "T6 exactly one attempt 2; observed " <> inspect(recorded)
+
+      assert recorded == [
+               {1, "pending"},
+               {1, "not_delivered"},
+               {2, "pending"},
+               {2, "delivered"}
+             ],
+             "T6 id12 statuses; observed " <> inspect(recorded)
 
       assert Enum.sort_by(replies, &Map.has_key?(&1, "duplicate")) |> Enum.map(&kind/1) ==
                [:sent, {:duplicate, "delivered", 2}],
@@ -612,6 +649,42 @@ defmodule AiPair.Delivery.NS42C010DuplicateWhilePendingTest do
     assert result == {:ok, count}, label <> " mailbox calls; observed " <> inspect(result)
   end
 
+  # The store's registered reconcile waiters for `id` (`ReceiptStore` state `waiters`).
+  defp waiters(c, id) do
+    c.store |> :sys.get_state() |> Map.fetch!(:waiters) |> Enum.count(&(elem(&1, 1).id == id))
+  end
+
+  defp assert_waiters(c, id, count, label, timeout \\ 2_000) do
+    deadline = now_ms() + timeout
+
+    result =
+      Stream.repeatedly(fn ->
+        seen = waiters(c, id)
+
+        cond do
+          seen == count -> {:ok, seen}
+          now_ms() > deadline -> {:timeout, seen}
+          true -> Process.sleep(1) && :retry
+        end
+      end)
+      |> Enum.find(&(&1 != :retry))
+
+    assert result == {:ok, count}, label <> " store waiters; observed " <> inspect(result)
+  end
+
+  defp typed_duplicate(id, pane, text) do
+    %{
+      "ok" => true,
+      "duplicate" => true,
+      "status" => "pending",
+      "delivery_attempt" => 1,
+      "payload_hash" => hash(text),
+      "protocol_version" => 2,
+      "msg_id" => id,
+      "pane_id" => pane
+    }
+  end
+
   # Holds the pane inside an untracked v1 paste, then starts two v2 sends behind it.
   defp race!(c, pane, sm, {id_a, text_a}, {id_b, text_b}) do
     arm(c)
@@ -669,8 +742,13 @@ defmodule AiPair.Delivery.NS42C010DuplicateWhilePendingTest do
   defp send_v1!(c, pane, text),
     do: frame!(c, %{"cmd" => "send", "pane_id" => pane, "text" => text}, 6_000)
 
-  defp reconcile!(c, pane, id, text, wait_ms) do
-    frame!(
+  defp reconcile!(c, pane, id, text, wait_ms),
+    do: c |> timed_reconcile!(pane, id, text, wait_ms) |> elem(0)
+
+  # {reply, sent_at, received_at} in native units; sent_at is stamped after connect,
+  # immediately before the request is written.
+  defp timed_reconcile!(c, pane, id, text, wait_ms) do
+    timed_frame!(
       c,
       %{
         "cmd" => "reconcile",
@@ -684,14 +762,18 @@ defmodule AiPair.Delivery.NS42C010DuplicateWhilePendingTest do
     )
   end
 
-  defp frame!(c, payload, recv_timeout) do
+  defp frame!(c, payload, recv_timeout), do: c |> timed_frame!(payload, recv_timeout) |> elem(0)
+
+  defp timed_frame!(c, payload, recv_timeout) do
     {:ok, client} =
       :gen_tcp.connect({:local, c.sock}, 0, [:binary, {:active, false}, {:packet, 4}], 1_000)
 
     try do
+      sent_at = now_native()
       :ok = :gen_tcp.send(client, Jason.encode!(payload))
       {:ok, frame} = :gen_tcp.recv(client, 0, recv_timeout)
-      Jason.decode!(frame)
+      received_at = now_native()
+      {Jason.decode!(frame), sent_at, received_at}
     after
       :gen_tcp.close(client)
     end
