@@ -51,7 +51,12 @@ defmodule AiPair.Delivery.NS32M002DurableVersionTest do
 
   Rows:
 
-    * envelope `schema_version` set to `"2.0"`;
+    * envelope `schema_version` set to `"2.0"`, to `"1"` (a string) and to `1`
+      (an integer). Each asserts its own exact error. The term comes from
+      `lib/ai_pair/pane_intent_store/record.ex:197-203` (`literal/3` gives
+      `{"schema_version", {:unsupported, value}}`) and is wrapped by
+      `lib/ai_pair/pane_intent_store.ex:398-402` into
+      `%{stage: :schema, reason: ..., outcome: :unchanged, cleanup_errors: []}`;
     * a per-record `schema_version` set to `"2.0"` inside an otherwise valid
       envelope at `"1.0"`.
 
@@ -59,7 +64,32 @@ defmodule AiPair.Delivery.NS32M002DurableVersionTest do
   control, the same builder at `"1.0"`, starts and lists the record.
 
   Pane ids are built at run time, as `"%" <> Integer.to_string(unique_integer)`,
-  so no literal pane id appears in this source.
+  so no literal pane id appears in this source. Every pane row asserts that the
+  id matches the record grammar `~r/\A%[0-9]+\z/` (`record.ex:40`) before
+  using it.
+
+  ## Limits
+
+    * The receipt-log rows are PARTIAL. They prove refusal and byte
+      preservation, not an actionable compatibility diagnosis.
+    * The tail path is a known open finding and is handled by a separate product
+      change. A final line with no trailing newline is truncated as a torn write
+      (`receipt_log.ex:125-128`). No row here exercises that path, and nothing
+      here endorses the truncation.
+    * Orrisd has no generation, upgrade or rollback mechanism for either store.
+      This file therefore gives refusal-only evidence: it shows that an
+      unsupported version is refused without being rewritten, not that any
+      migration exists.
+    * This is the Orrisd half of the control only. The Orris journal and
+      protocol half is not covered here.
+    * Marker version coverage lives elsewhere, in
+      `test/ai_pair/pane_restore/marker_test.exs`:
+        - `:158-161` holds the malformed-marker rows "version as a string",
+          "version as a float" and "version 2";
+        - `:337-344` shows that a version-2 marker is
+          `{:marker_malformed, raw}` with zero writes.
+      The review cited this file as `test/ai_pair/marker_test.exs`; the path at
+      main `08b7e61c` is the one above.
   """
 
   use ExUnit.Case, async: true
@@ -73,7 +103,7 @@ defmodule AiPair.Delivery.NS32M002DurableVersionTest do
 
   describe "receipt log: one changed key on one well-formed, chained line" do
     setup do
-      dir = tmp!("ns32_m002_receipts")
+      dir = tmp!("ns32_m002_receipts", canonical: true)
       {:ok, dir: dir}
     end
 
@@ -104,8 +134,9 @@ defmodule AiPair.Delivery.NS32M002DurableVersionTest do
         ] do
       @row {line_no, key, value}
 
-      test "#{name}: refused at line #{line_no} by the reader and the store; bytes unchanged",
+      test "PARTIAL #{name}: refused at line #{line_no} by the reader and the store; bytes unchanged",
            %{dir: dir} do
+        # PARTIAL: proves refusal and byte preservation, not an actionable compatibility diagnosis.
         {line_no, key, value} = @row
         control = control_lines()
         changed = change_key(control, line_no, key, value)
@@ -221,10 +252,13 @@ defmodule AiPair.Delivery.NS32M002DurableVersionTest do
     setup do
       root = tmp!("ns32_m002_intent", canonical: true)
       File.chmod!(root, 0o700)
-      {:ok, root: root, pane: runtime_pane()}
+      pane = runtime_pane()
+      assert Regex.match?(~r/\A%[0-9]+\z/, pane)
+      {:ok, root: root, pane: pane}
     end
 
     test "control: the same construction at 1.0 starts and lists the record", ctx do
+      assert Regex.match?(~r/\A%[0-9]+\z/, ctx.pane)
       seed!(ctx.root, envelope("1.0", %{ctx.pane => intent(ctx.pane, ctx.root, "1.0")}))
       assert {:ok, store} = PaneIntentStore.start_link(root: ctx.root)
 
@@ -237,29 +271,36 @@ defmodule AiPair.Delivery.NS32M002DurableVersionTest do
       end
     end
 
-    test "envelope schema_version 2.0: exact :schema refusal, outcome unchanged, bytes unchanged",
-         ctx do
-      rec = %{ctx.pane => intent(ctx.pane, ctx.root, "1.0")}
-      control = envelope("1.0", rec)
-      changed = envelope("2.0", rec)
-      assert differing_keys(control, changed) == ["schema_version"]
+    for {name, value} <- [{"2.0", "2.0"}, {~s("1" string), "1"}, {"1 integer", 1}] do
+      @value value
 
-      seed!(ctx.root, changed)
-      before = File.read!(state_path(ctx.root))
+      test "envelope schema_version #{name}: exact :schema refusal, outcome unchanged, bytes unchanged",
+           ctx do
+        value = @value
+        assert Regex.match?(~r/\A%[0-9]+\z/, ctx.pane)
+        rec = %{ctx.pane => intent(ctx.pane, ctx.root, "1.0")}
+        control = envelope("1.0", rec)
+        changed = envelope(value, rec)
+        assert differing_keys(control, changed) == ["schema_version"]
 
-      assert PaneIntentStore.start_link(root: ctx.root) ==
-               {:error,
-                %{
-                  stage: :schema,
-                  reason: {"schema_version", {:unsupported, "2.0"}},
-                  outcome: :unchanged,
-                  cleanup_errors: []
-                }}
+        seed!(ctx.root, changed)
+        before = File.read!(state_path(ctx.root))
 
-      assert File.read!(state_path(ctx.root)) == before
+        assert PaneIntentStore.start_link(root: ctx.root) ==
+                 {:error,
+                  %{
+                    stage: :schema,
+                    reason: {"schema_version", {:unsupported, value}},
+                    outcome: :unchanged,
+                    cleanup_errors: []
+                  }}
+
+        assert File.read!(state_path(ctx.root)) == before
+      end
     end
 
     test "record schema_version 2.0 inside a 1.0 envelope: exact refusal, bytes unchanged", ctx do
+      assert Regex.match?(~r/\A%[0-9]+\z/, ctx.pane)
       control_rec = intent(ctx.pane, ctx.root, "1.0")
       changed_rec = intent(ctx.pane, ctx.root, "2.0")
 
