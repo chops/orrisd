@@ -62,6 +62,20 @@ Erlang printing, and legacy unreceipted queues are outside that protection.
 The pane's existing screen capture can itself contain sensitive material; this
 change does not claim whole-process crash-log confidentiality.
 
+** Addendum 2026-09-25: last raw capture not retained in pane data (NS-17 F-1)
+:PROPERTIES:
+:CUSTOM_ID: addendum-20260925-last-raw-capture-not-retained
+:END:
+Dated 2026-09-25. The pane state machine's data no longer holds the last
+raw capture: the struct field that kept it is removed, and a successful
+poll stores only the stripped-content hash. The last raw capture is
+therefore not emitted through the ~:state~ of the pane's gen_statem
+terminate report. This addendum claims nothing more. It does not claim
+that OTP status output, other terminate-report fields, logs, or process
+memory are free of pane or prompt bytes: a capture being processed, legacy
+unreceipted queue entries, classifier exception arguments and
+whole-process dumps remain outside it, and the non-claim above stands.
+
 ** Test Notes
 :PROPERTIES:
 :CUSTOM_ID: test-notes

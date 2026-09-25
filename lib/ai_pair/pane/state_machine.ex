@@ -86,7 +86,6 @@ defmodule AiPair.Pane.StateMachine do
     :poll_interval_ms,
     :idle_debounce_ms,
     :idle_since_ms,
-    :last_capture,
     :last_stripped_hash,
     :pane_gone_threshold,
     :pane_gone_grace_ms,
@@ -308,8 +307,7 @@ defmodule AiPair.Pane.StateMachine do
 
         data2 = %{
           data
-          | last_capture: raw,
-            last_stripped_hash: hash,
+          | last_stripped_hash: hash,
             pane_gone_count: 0,
             pane_gone_since_ms: nil
         }
