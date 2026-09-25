@@ -18,10 +18,11 @@ defmodule AiPair.Delivery.NS42IPCHandlerDeathTest do
 
   The row kills it at the latest moment it exists instead: after the receipt is admitted
   and its `queued` line is written, and before the handler has replied. The store's
-  `sync` of that `queued` line is held by a `FaultFs` hook (no product code is changed),
-  so the pending and queued lines are already in the log while the handler is still
-  waiting on the pane for its answer. The handler is killed there, the hook is released,
-  and only then are the outcomes read.
+  `sync` of that `queued` line is held by a `FaultFs` hook (no product code is changed).
+  The hook runs before `SystemFs.sync`, so at the kill the pending line is written and
+  synced, while the queued line is written but NOT yet synced, hence not yet durable. The
+  handler is still waiting on the pane for its answer. It is killed there, the hook is
+  released (the queued sync then runs), and only then are the outcomes read.
 
   Which child is this connection's handler is proven, not assumed: the module runs
   `async: false`, the supervisor's child set is taken before connecting and at the held
@@ -62,9 +63,10 @@ defmodule AiPair.Delivery.NS42IPCHandlerDeathTest do
 
     # The store's first sync is the admission's pending line; its second is the queued
     # line. `ReceiptLog.open/2` issues no `sync` (it uses `dir_sync`), so the numbering
-    # starts at admission. The hook holds the store inside that second sync, after the
-    # queued bytes are written, until the test releases it. The 5 s bound only matters if
-    # the test dies first; it is never reached in a passing run.
+    # starts at admission. The hook runs BEFORE `SystemFs.sync`: it holds the store after
+    # the queued bytes are written and before they are synced, until the test releases it.
+    # The 5 s bound only matters if the test dies first; it is never reached in a passing
+    # run.
     FaultFs.inject(
       fs,
       :sync,
@@ -111,7 +113,8 @@ defmodule AiPair.Delivery.NS42IPCHandlerDeathTest do
 
     assert_receive {:queued_sync_held, ^store}, 2_000
 
-    # 1. The receipt is admitted and its queued line is in the log.
+    # 1. The receipt is admitted and its queued line is written; its sync is being held,
+    #    so that line is not yet durable.
     held_bytes = File.read!(path)
 
     assert [
@@ -121,6 +124,7 @@ defmodule AiPair.Delivery.NS42IPCHandlerDeathTest do
 
     assert id == ctx.id
     assert FaultFs.count(fs, :write) == 2
+    # The second sync is counted when it is entered; it is the one being held.
     assert FaultFs.count(fs, :sync) == 2
 
     # 2. Exactly one new child of the connection supervisor, started by this server.
@@ -138,9 +142,13 @@ defmodule AiPair.Delivery.NS42IPCHandlerDeathTest do
     Process.exit(handler, :kill)
     assert_receive {:DOWN, ^ref, :process, ^handler, :killed}, 1_000
 
-    # Control for step 3: the killed pid was the supervisor's child and is gone from it,
-    # and the connection it served got no reply because it was closed mid-request.
-    refute handler in Task.Supervisor.children(@connections)
+    # Control for step 3: the killed pid was the supervisor's child and leaves it, and the
+    # connection it served got no reply because it was closed mid-request. The supervisor
+    # handles the handler's EXIT independently of this test's DOWN, so its absence is
+    # awaited within a bound rather than read once.
+    assert :absent = await_not_child(handler),
+           "the killed handler must leave AiPair.IPC.ConnectionSupervisor within 1 s"
+
     assert {:error, :closed} = :gen_tcp.recv(client, 0, 1_000)
 
     send(store, :release_queued_sync)
@@ -239,6 +247,21 @@ defmodule AiPair.Delivery.NS42IPCHandlerDeathTest do
 
   defp reconcile(store, ctx) do
     ReceiptStore.reconcile(store, ctx.id, ctx.pane, Payload.hash(Payload.new(@text)), wait_ms: 0)
+  end
+
+  # :absent once `pid` is no longer a child of the connection supervisor, polled for up
+  # to `timeout` ms; {:still_listed, pid} if it is still listed at the bound.
+  defp await_not_child(pid, timeout \\ 1_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+
+    Stream.repeatedly(fn ->
+      cond do
+        pid not in Task.Supervisor.children(@connections) -> :absent
+        System.monotonic_time(:millisecond) > deadline -> {:still_listed, pid}
+        true -> Process.sleep(5) && :retry
+      end
+    end)
+    |> Enum.find(&(&1 != :retry))
   end
 
   defp dictionary_value(pid, key) do
