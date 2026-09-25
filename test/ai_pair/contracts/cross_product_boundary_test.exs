@@ -18,7 +18,10 @@ defmodule AiPair.Contracts.CrossProductBoundaryTest do
          * `lib/**/*.ex`
          * `config/*.exs`
          * `mix.exs`
-         * `rel/overlays/bin/*` (the release scripts)
+         * every regular file under `rel/`, recursively and including dotfiles
+           (today: the release scripts in `rel/overlays/bin`). A new sibling such
+           as `rel/env.sh.eex` or `rel/vm.args.eex` enters the scan without any
+           change to this test; a witness below proves that on a temporary tree
          * `bin/*` (the repository scripts)
          * the Elixir and Bash files directly under `nix/files` (`*.ex`, `*.sh`)
 
@@ -109,8 +112,9 @@ defmodule AiPair.Contracts.CrossProductBoundaryTest do
     },
     %{name: "mix.exs", globs: ["mix.exs"], min: 1, anchors: ["mix.exs"]},
     %{
-      name: "rel scripts",
-      globs: ["rel/overlays/bin/*"],
+      name: "rel",
+      globs: ["rel/**/*"],
+      match_dot: true,
       min: 3,
       anchors: ["rel/overlays/bin/ai-pair"]
     },
@@ -254,24 +258,47 @@ defmodule AiPair.Contracts.CrossProductBoundaryTest do
 
         refute Enum.any?(files, &String.starts_with?(&1, "test/"))
 
-        hits =
-          for file <- files,
-              hits = text_hits(File.read!(Path.join(@root, file))),
-              hits != [],
-              do: {file, hits}
-
-        assert hits == []
+        assert scan_hits(files, @root) == []
       end
+    end
+
+    test "a new rel sibling enters the rel scan and a planted name in it is reported" do
+      root =
+        Path.join(System.tmp_dir!(), "ns01_a001_rel_#{System.unique_integer([:positive])}")
+
+      on_exit(fn -> File.rm_rf!(root) end)
+
+      File.mkdir_p!(Path.join(root, "rel/overlays/bin"))
+      File.write!(Path.join(root, "rel/overlays/bin/x"), "#!/usr/bin/env bash\nexit 0\n")
+      File.write!(Path.join(root, "rel/env.sh.eex"), "export AI_ORCHESTRATOR_HOME=/tmp\n")
+      File.write!(Path.join(root, "rel/.hidden"), "clean\n")
+      # Outside rel/: must not enter the rel set.
+      File.write!(Path.join(root, "sibling.sh"), "AiOrchestrator\n")
+
+      rel = Enum.find(@surfaces, &(&1.name == "rel"))
+      files = surface_files(rel, root)
+
+      assert files == ["rel/.hidden", "rel/env.sh.eex", "rel/overlays/bin/x"]
+      assert scan_hits(files, root) == [{"rel/env.sh.eex", ["AI_ORCHESTRATOR_"]}]
     end
   end
 
-  defp surface_files(surface) do
+  defp surface_files(surface, root \\ @root) do
+    opts = [match_dot: Map.get(surface, :match_dot, false)]
+
     surface.globs
-    |> Enum.flat_map(&Path.wildcard(Path.join(@root, &1)))
+    |> Enum.flat_map(&Path.wildcard(Path.join(root, &1), opts))
     |> Enum.filter(&File.regular?/1)
-    |> Enum.map(&Path.relative_to(&1, @root))
+    |> Enum.map(&Path.relative_to(&1, root))
     |> Enum.uniq()
     |> Enum.sort()
+  end
+
+  defp scan_hits(files, root) do
+    for file <- files,
+        hits = text_hits(File.read!(Path.join(root, file))),
+        hits != [],
+        do: {file, hits}
   end
 
   # ------------------------------------------------------------ 3. BEAM
