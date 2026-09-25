@@ -176,6 +176,7 @@ defmodule AiPair.IPC.Delivery do
     :oversize,
     :invalid_wait_ms,
     :pane_dead,
+    :pane_quarantined,
     :receipt_store_unavailable,
     :receipt_store_mismatch
   ]
