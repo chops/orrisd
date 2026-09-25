@@ -39,10 +39,10 @@ defmodule AiPair.NS15G002DaemonRefusalBeforePasteTest do
       leaves a record, reconcile answers `absent` with `status: not_delivered` and
       `delivery_attempt: 1`, and the log gains `pending` then `not_delivered`.
     * R4 v1, dead by the reaper: `pane_dead`, queue 0.
-    * R5 v2, quarantined (a run-time token): FINDING H-2, pinned as current behaviour and
-      NOT asserted correct. The wire word is `receipt_store_unavailable`, not
-      `pane_quarantined`. No paste, log unchanged, queue 0. Control: a sibling pane
-      without the token, sent once before and once after the negative send.
+    * R5 v2, quarantined (a run-time token): refused `pane_quarantined` (the H-2 fix,
+      main `0be02ccc`, added it to `Delivery`'s request errors). No paste, log
+      unchanged, nothing admitted, queue 0. Control: a sibling pane without the token,
+      sent once before and once after the negative send.
     * R6 v1, quarantined: FINDING H-3, pinned as current behaviour. The handler crashes
       in `format_send_result/2` on `{:error, :pane_quarantined}`, so the socket reads
       `{:error, :closed}`. The server still answers a ping afterwards. Control: a sibling
@@ -321,7 +321,7 @@ defmodule AiPair.NS15G002DaemonRefusalBeforePasteTest do
   # ===== R5 / R6: quarantined =====
 
   describe "R5 / R6: a quarantined pane" do
-    test "R5 v2: FINDING H-2 pinned; no paste, log unchanged, queue 0", c do
+    test "R5 v2: pane_quarantined; no paste, log unchanged, queue 0", c do
       pane = pane!(c, "q")
       sib = pane!(c, "qs")
       token = Base.url_encode64(:crypto.strong_rand_bytes(32), padding: false)
@@ -358,9 +358,9 @@ defmodule AiPair.NS15G002DaemonRefusalBeforePasteTest do
       flush_polls(pane)
       reply = send_v2!(c, pane, id, text)
 
-      # FINDING H-2, pinned as current behaviour and not asserted as correct
-      assert reply == refusal_v2(pane, id, "receipt_store_unavailable"),
-             "R5 reply (H-2 pin); observed " <> inspect(reply)
+      # The quarantined pane is refused with its own wire word (H-2 fix, main 0be02ccc).
+      assert reply == refusal_v2(pane, id, "pane_quarantined"),
+             "R5 reply; observed " <> inspect(reply)
 
       assert_receive {:poll, ^pane, _}, 1_000
       assert pastes(c, pane, text) == 0, "R5 pastes; observed #{pastes(c, pane, text)}"
