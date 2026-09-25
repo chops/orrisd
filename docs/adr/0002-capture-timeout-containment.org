@@ -46,6 +46,21 @@ GenServer call timeout are dropped. A test explicitly checks this assumption.
   Containment prevents the observed timeout crash, not all possible crashes.
 - A missing tmux pane retains the existing dead-pane reaper policy.
 
+** Addendum: a missing pane revokes send eligibility (H-4)
+:PROPERTIES:
+:CUSTOM_ID: addendum-missing-pane-revokes-send-eligibility
+:END:
+The reaper policy above is unchanged: a pane is marked ~dead~ only after
+the ~pane_gone~ threshold and grace are both met. Before this addendum an
+~idle~ pane kept its idle verdict through that window, so a send could paste
+to a pane the daemon had already observed gone. The first ~pane_gone~
+capture now moves an ~idle~ pane to ~unknown~, exactly as a transient
+capture error does: idle debounce is invalidated, the owner and pending
+queue are preserved, and recovery requires two matching classified
+captures. The reaper counters are kept, so its threshold and grace do not
+change. Sends in the window queue as ~unknown~; they deliver only if the
+pane returns, and are settled when the pane is reaped.
+
 ** Verification and Rollback
 :PROPERTIES:
 :CUSTOM_ID: verification-and-rollback
