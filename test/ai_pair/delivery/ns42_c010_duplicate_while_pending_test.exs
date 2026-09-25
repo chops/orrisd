@@ -206,14 +206,15 @@ defmodule AiPair.Delivery.NS42C010DuplicateWhilePendingTest do
 
       w =
         Task.async(fn ->
-          sent_at = now_ms()
+          sent_at = now_native()
           reply = reconcile!(c, p, idw, t, 2_000)
-          {reply, sent_at, now_ms()}
+          {reply, sent_at, now_native()}
         end)
 
       early = Task.yield(w, 200)
       assert early == nil, "T1-W must wait while held; observed " <> inspect(early)
-      released_at = now_ms()
+      # Native units: a millisecond stamp can tie with the wake it precedes.
+      released_at = now_native()
       release(sm)
       {reply, w_sent_at, w_received_at} = Task.await(w, 3_000)
 
@@ -221,8 +222,8 @@ defmodule AiPair.Delivery.NS42C010DuplicateWhilePendingTest do
              "T1-W answered after release; observed received #{w_received_at}, " <>
                "released #{released_at}"
 
-      assert w_received_at - w_sent_at < 2_000,
-             "T1-W woken before its bound; observed #{w_received_at - w_sent_at} ms"
+      waited_ms = System.convert_time_unit(w_received_at - w_sent_at, :native, :millisecond)
+      assert waited_ms < 2_000, "T1-W woken before its bound; observed #{waited_ms} ms"
 
       assert {reply["outcome"], reply["status"], reply["delivery_attempt"]} ==
                {"delivered", "delivered", 1},
@@ -697,6 +698,7 @@ defmodule AiPair.Delivery.NS42C010DuplicateWhilePendingTest do
   end
 
   defp now_ms, do: System.monotonic_time(:millisecond)
+  defp now_native, do: System.monotonic_time()
 
   defp await_unregistered(pane, timeout \\ 2_000) do
     deadline = now_ms() + timeout
