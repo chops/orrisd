@@ -16,8 +16,11 @@ defmodule AiPair.CLI.RequestTraceCarrierTest do
   what the running SDK reads on every inject; changing application config at runtime
   would not take effect. The original injector is captured first and restored.
 
+  The full `Client.main/1` path is exercised for the v2 send, ping and reconcile commands.
+
   Each assertion is made through a checker that returns `:ok` or `{:error, reason}`, and
-  controls C1-C6 show that every checker reports a violation when handed one.
+  controls C1-C8 show that every checker reports a violation when handed one (C7 and C8
+  for the ping and reconcile rows, on the frame the pre-fix merge would have sent).
   """
 
   use ExUnit.Case, async: false
@@ -52,6 +55,19 @@ defmodule AiPair.CLI.RequestTraceCarrierTest do
   }
 
   @sessions %{"cmd" => "sessions", "protocol_version" => 2}
+
+  # The frames `Client.main/1` builds for `ping` and `reconcile` with
+  # `--protocol-version 2` (`client.ex` `versioned_arguments/3`; `wait_ms` defaults to 250).
+  @ping %{"cmd" => "ping", "protocol_version" => 2}
+
+  @reconcile %{
+    "cmd" => "reconcile",
+    "protocol_version" => 2,
+    "pane_id" => "%carrier",
+    "msg_id" => "snd_" <> String.duplicate("b", 64),
+    "payload_hash" => "sha256:" <> String.duplicate("c", 64),
+    "wait_ms" => 250
+  }
 
   defmodule CollidingPropagator do
     @moduledoc false
@@ -144,6 +160,41 @@ defmodule AiPair.CLI.RequestTraceCarrierTest do
     assert check_no_extra(frame, @send) == :ok
   end
 
+  test "the full CLI ping path keeps its command keys under a colliding propagator", c do
+    reply = %{"ok" => true, "protocol_version" => 2, "capabilities" => ["delivery_reconcile"]}
+
+    {exit, frame} =
+      with_injector(colliding_injector(), fn ->
+        cli_exchange!(c.socket, ["ping", "--protocol-version", "2"], reply)
+      end)
+
+    assert exit == 0, "the request is never refused because of the carrier"
+    assert check_command_wins(frame, @ping) == :ok
+    assert Map.has_key?(frame, "traceparent"), "cli.ping is a span, so traceparent is sent"
+    assert check_no_extra(frame, @ping) == :ok
+  end
+
+  test "the full CLI reconcile path keeps its command keys under a colliding propagator", c do
+    args = ["reconcile", @reconcile["pane_id"], "--msg-id", @reconcile["msg_id"]]
+    args = args ++ ["--payload-hash", @reconcile["payload_hash"], "--protocol-version", "2"]
+
+    reply = %{
+      "ok" => true,
+      "protocol_version" => 2,
+      "outcome" => "delivered",
+      "msg_id" => @reconcile["msg_id"],
+      "pane_id" => @reconcile["pane_id"]
+    }
+
+    {exit, frame} =
+      with_injector(colliding_injector(), fn -> cli_exchange!(c.socket, args, reply) end)
+
+    assert exit == 0, "the request is never refused because of the carrier"
+    assert check_command_wins(frame, @reconcile) == :ok
+    assert Map.has_key?(frame, "traceparent"), "cli.reconcile is a span, so traceparent is sent"
+    assert check_no_extra(frame, @reconcile) == :ok
+  end
+
   test "the original injector is restored", c do
     _frame =
       with_injector(colliding_injector(), fn ->
@@ -192,6 +243,24 @@ defmodule AiPair.CLI.RequestTraceCarrierTest do
 
       assert check_trace_present(carrier) == :ok
       assert {:error, _} = check_command_wins(Map.merge(@send, carrier), @send)
+    end
+
+    # The ping and reconcile rows' checkers, handed the frame the pre-fix merge
+    # (`Map.merge(cmd, carrier)`) would have sent under the same colliding injector.
+    for {name, command} <- [
+          {"C7: ping", Macro.escape(@ping)},
+          {"C8: reconcile", Macro.escape(@reconcile)}
+        ] do
+      test "#{name}: the row's checkers fail on a carrier-rewritten frame" do
+        command = unquote(command)
+        carrier = colliding_carrier()
+        rewritten = Map.merge(command, carrier)
+
+        assert {:error, {:command_keys_changed, changed}} = check_command_wins(rewritten, command)
+        assert "cmd" in changed and "protocol_version" in changed
+        assert {:error, {:extra_keys, extra}} = check_no_extra(rewritten, command)
+        assert "baggage" in extra and "x-extra" in extra
+      end
     end
   end
 
@@ -263,6 +332,22 @@ defmodule AiPair.CLI.RequestTraceCarrierTest do
     after
       :otel_ctx.detach(token)
     end
+  end
+
+  defp colliding_carrier do
+    with_injector(colliding_injector(), fn ->
+      in_remote_child_span(fn -> :otel_propagator_text_map.inject([]) |> Map.new() end)
+    end)
+  end
+
+  # Runs `Client.main(args)` against one fake-daemon exchange; returns its exit code and
+  # the exact frame the CLI sent.
+  defp cli_exchange!(socket, args, reply) do
+    exchange!(socket, reply, fn ->
+      ExUnit.CaptureIO.capture_io(fn -> send(self(), {:exit, Client.main(args)}) end)
+      assert_received {:exit, exit}
+      exit
+    end)
   end
 
   defp request!(socket, command) do
