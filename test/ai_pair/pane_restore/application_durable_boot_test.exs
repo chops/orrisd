@@ -148,6 +148,7 @@ defmodule AiPair.ApplicationDurableBootTest do
   alias AiPair.PaneRestore.Boot
   alias AiPair.PaneRestore.Coordinator
   alias AiPair.Test.PaneIntentFaultFs, as: FaultFs
+  alias AiPair.Test.ScriptedTmux
   alias AiPair.Tmux
 
   @marker_option "@ai_pair_session_incarnation"
@@ -785,6 +786,213 @@ defmodule AiPair.ApplicationDurableBootTest do
       assert {:ok, _} = start_app!()
       assert child_ids() == @durable_child_ids
     end
+  end
+
+  # =========================================================================
+  # NS-15.G.001: restart with a dead/stale/live intent mix
+  # =========================================================================
+  #
+  # Register row NS-15.G.001. Acceptance: "Restart with dead/stale/live intent
+  # mix". Failure control: "Deleting stale record merely on boot fails".
+  #
+  # SCOPE, stated so it is not read as more: the restart here is SOURCE-LEVEL -
+  # the actual `:ai_pair` application stopped (its supervisor's DOWN joined) and
+  # started again inside this BEAM. It is not an OS-process restart, not a
+  # release or installed-daemon restart, and it does not survive a VM exit.
+  #
+  # The records are seeded through the REAL `PaneIntentStore.put/2` of the first
+  # boot and persisted by it; the second boot reads them back from disk. The
+  # first boot's `:tmux_server` names no process, so it takes no census and
+  # consumes no scripted step (asserted). The second boot's `:tmux_server` is a
+  # `ScriptedTmux` adapter (Bash stub, no tmux server) scripted for exactly the
+  # reconciliation's reads: census, the one census session's marker, then the
+  # live pane's fenced census and marker re-read. Records, census rows and the
+  # marker are lined up as in `reconciler_test.exs`'s unit row for the same
+  # acceptance, so only the intended field differs per record.
+  #
+  # KNOWN BEHAVIOUR, handled rather than hidden: the quarantined live pane polls
+  # its capture through the same adapter every 250 ms, and every capture past
+  # the script is the stub's unscripted `exit 99`. So no total call count is
+  # asserted; the four scripted steps are asserted by position, every recorded
+  # argv is checked for option writes, and the row proves a failed capture does
+  # not crash the pane (same pid, still alive, still quarantined).
+  describe "NS-15.G.001 restart with a dead/stale/live intent mix" do
+    test "a restart refuses dead and stale records, retains their bytes, and starts only the live pane" do
+      inbox = inbox_root!()
+      {wrapper_dir, log} = refusing_tmux_on_path!()
+      generation = decimal_generation()
+
+      [live, dead, stale_pid, stale_gen] =
+        for _ <- 1..4, do: "%" <> Integer.to_string(System.unique_integer([:positive]))
+
+      records = [
+        restart_record(live, inbox, generation),
+        restart_record(dead, inbox, generation),
+        restart_record(stale_pid, inbox, generation),
+        restart_record(stale_gen, inbox, "8")
+      ]
+
+      census =
+        {restart_census_row(live, inbox) <>
+           restart_census_row(stale_pid, inbox, "4343") <>
+           restart_census_row(stale_gen, inbox), 0}
+
+      marker =
+        {Jason.encode!(%{
+           "version" => 1,
+           "owner_root" => inbox,
+           "session_id" => "$3",
+           "generation" => generation
+         }) <> "\n", 0}
+
+      # Started before either boot so the first boot's zero use of it is measured.
+      {scripted, scripted_dir} = ScriptedTmux.start!([census, marker, census, marker])
+
+      baseline =
+        full_app_env!(inbox, wrapper_dir, fn ->
+          Application.put_env(:ai_pair, :durable_attachments, true)
+          Application.delete_env(:ai_pair, :boot_generation)
+          Application.delete_env(:ai_pair, :pane_intent_store_fs)
+          Application.delete_env(:ai_pair, :pane_intent_store_module)
+          Application.put_env(:ai_pair, :project_binding, binding_for(inbox))
+          Application.put_env(:ai_pair, :tmux_server, :no_such_tmux_adapter_for_ns15)
+          refused_path_control!(log)
+        end)
+
+      # ---- (1) first boot, absent adapter; seed through the real store --------
+      assert {:ok, _} = start_app!()
+      store = :global.whereis_name({PaneIntentStore, Path.expand(inbox)})
+      assert is_pid(store)
+
+      for record <- records, do: assert(:ok = PaneIntentStore.put(store, record))
+      assert {:ok, listed} = PaneIntentStore.list(store)
+      assert Enum.map(listed, & &1["pane_id"]) == Enum.sort([live, dead, stale_pid, stale_gen])
+
+      assert ScriptedTmux.calls!(scripted_dir) == 0,
+             "the first boot must not consume a scripted tmux step"
+
+      # ---- (2) the exact bytes, then a proven stop ----------------------------
+      state_file = Path.join([inbox, "state", "pane-attachments.json"])
+      seeded_bytes = File.read!(state_file)
+      stop_app!()
+
+      assert Process.whereis(AiPair.Supervisor) == nil
+      assert :global.whereis_name({PaneIntentStore, Path.expand(inbox)}) == :undefined
+      refute Process.alive?(store)
+      assert File.read!(state_file) == seeded_bytes, "stopping must not rewrite the records"
+
+      # ---- (3) restart against the scripted adapter ---------------------------
+      Application.put_env(:ai_pair, :tmux_server, scripted)
+      assert {:ok, _} = start_app!()
+
+      assert {:ok, boot} = app_child(Boot)
+      status = Boot.status(boot)
+      assert {:completed, _worker} = status.reconciliation
+      report = status.report
+
+      # ---- (4) each record's status and refusal -------------------------------
+      row = fn pane -> Enum.find(report.panes, &(&1.pane_id == pane)) end
+      assert length(report.panes) == 4
+
+      assert %{status: :observed_quarantined, refusals: [], dispatchable: false} = row.(live)
+
+      assert %{status: :refused, refusals: [{:live_absent}, {:source_unavailable, :marker}]} =
+               row.(dead)
+
+      assert %{status: :refused, refusals: [{:conflicting, :live}]} = row.(stale_pid)
+      assert %{status: :refused, refusals: [{:generation_mismatch}]} = row.(stale_gen)
+
+      assert Enum.sort(report.issues) ==
+               Enum.sort([
+                 {:source_unavailable, :marker},
+                 {:live_absent, dead},
+                 {:conflicting, :live, stale_pid},
+                 {:generation_mismatch, stale_gen}
+               ])
+
+      assert report.marker_writes == 0
+
+      # Only the live pane has a child.
+      assert {:ok, sm} = AiPair.PaneSupervisor.whereis_pane(live)
+
+      for pane <- [dead, stale_pid, stale_gen],
+          do: assert(:error == AiPair.PaneSupervisor.whereis_pane(pane))
+
+      # Every record retained, byte for byte: nothing was deleted merely on boot.
+      assert File.read!(state_file) == seeded_bytes,
+             "the restart rewrote the intent file; a refused record must be retained"
+
+      restarted = :global.whereis_name({PaneIntentStore, Path.expand(inbox)})
+      assert {:ok, ^listed} = PaneIntentStore.list(restarted)
+
+      # The four scripted reads, by position; the quarantined pane's later
+      # captures are unscripted and not counted.
+      assert eventually?(fn -> ScriptedTmux.calls!(scripted_dir) >= 5 end),
+             "the quarantined pane never polled a capture through the adapter"
+
+      [c1, m1, c2, m2 | captures] = ScriptedTmux.argvs!(scripted_dir)
+      for argv <- [c1, c2], do: assert("list-panes" in argv)
+      for argv <- [m1, m2], do: assert("show-options" in argv and "$3" in argv)
+      assert captures != [] and Enum.all?(captures, &("capture-pane" in &1))
+
+      # No option write reached tmux: not through the scripted adapter, and not
+      # through the refusing wrapper on PATH.
+      refute Enum.any?(ScriptedTmux.argvs!(scripted_dir), fn argv ->
+               Enum.any?(argv, &(&1 in ["set", "set-option", "setw", "set-window-option"]))
+             end)
+
+      assert marker_set_attempts(log) == baseline
+
+      # A failed (unscripted, exit 99) capture does not crash the pane.
+      assert Process.alive?(sm)
+      assert {:ok, ^sm} = AiPair.PaneSupervisor.whereis_pane(live)
+      assert AiPair.Pane.StateMachine.status(sm).quarantined == true
+
+      # ---- (5) control: a real deletion does change the bytes -----------------
+      assert :ok = PaneIntentStore.delete(restarted, stale_pid)
+
+      refute File.read!(state_file) == seeded_bytes,
+             "the byte comparison must detect a deleted record, or the retention check is blind"
+
+      # Stopped here, while the scripted adapter still runs, so the polling pane
+      # never outlives its adapter.
+      stop_app!()
+    end
+  end
+
+  defp restart_record(pane, root, generation) do
+    %{
+      "schema_version" => "1.0",
+      "pane_id" => pane,
+      "agent" => "synthetic-agent",
+      "classifier" => "stub",
+      "project" => "synthetic-project",
+      "project_dir" => root,
+      "project_inbox" => root,
+      "tmux_session" => "restore-fixture",
+      "session_gen" => generation,
+      "cwd" => root,
+      "command" => "zsh",
+      "pane_pid" => 4242,
+      "updated_at" => "2026-09-25T00:00:00Z"
+    }
+  end
+
+  # One raw row of the frozen strict-census format, session `$3`.
+  defp restart_census_row(pane, root, pid \\ "4242"),
+    do: "#{pane}|$3|restore-fixture|0|0|#{pid}|zsh|#{root}\n"
+
+  defp eventually?(fun, deadline_ms \\ 2_000) do
+    stop_at = System.monotonic_time(:millisecond) + deadline_ms
+
+    Stream.repeatedly(fun)
+    |> Enum.reduce_while(false, fn ok, _ ->
+      cond do
+        ok -> {:halt, true}
+        System.monotonic_time(:millisecond) > stop_at -> {:halt, false}
+        true -> Process.sleep(10) && {:cont, false}
+      end
+    end)
   end
 
   # ===== the full-application fixture ======================================
