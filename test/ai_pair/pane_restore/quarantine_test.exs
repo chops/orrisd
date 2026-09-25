@@ -368,6 +368,43 @@ defmodule AiPair.PaneRestore.QuarantineTest do
         assert StateMachine.pending_count(sm) == 0
         assert pastes(paste) == []
       end
+
+      # BASE-GREEN CHARACTERISATION (S2 step 2G), never a RED row: it pins the
+      # behaviour the base already has, so it is qualified GREEN before any RED
+      # step and is never listed in a RED receipt. The quarantine clause is
+      # matched ahead of every state-specific send clause, including :dead's.
+      test "#{name} is refused in :dead with zero paste and zero queued work (base-GREEN characterisation)" do
+        store = if unquote(call) == :send_receipted, do: owned_store(), else: nil
+
+        opts =
+          [initial_capture: "BUSY_MARKER", quarantine_token: make_ref()] ++
+            if(store, do: [receipt_store: store], else: [])
+
+        {sm, _capture, paste} = setup_pane(opts)
+        assert :ok = wait_until_state(sm, :busy)
+
+        StateMachine.mark_dead(sm)
+        assert :ok = wait_until_state(sm, :dead)
+
+        result =
+          case unquote(call) do
+            :send_text ->
+              StateMachine.send_text(sm, "hello")
+
+            :send_legacy ->
+              StateMachine.send_legacy(sm, "hello", 1_000, nil)
+
+            :send_receipted ->
+              id = "snd_" <> String.duplicate("c", 64)
+              StateMachine.send_receipted(sm, "hello", 1_000, id, store)
+          end
+
+        assert {:error, :pane_quarantined} = result
+        # Zero runner calls: the injected paste fake was never invoked.
+        assert pastes(paste) == []
+        # Refusal, not enqueueing, in the terminal state as well.
+        assert StateMachine.pending_count(sm) == 0
+      end
     end
   end
 
