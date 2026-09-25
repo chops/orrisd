@@ -63,7 +63,7 @@ defmodule AiPair.Pane.ApprovalDialogDeliveryTest do
   further down, for example under `codex_cli/streaming/`, is not found.
 
   Pane ids are namespaced (`%ns30e001_<n>`). The poll telemetry forwarder filters on
-  pane id, so an async test elsewhere that uses a literal numeric id such as `%1`
+  pane id, so an async test elsewhere that uses a literal numeric (tmux-style) id
   cannot inject its poll states into these waits.
 
   LIMIT. This is timing-bounded negative evidence for THESE fixtures only. It shows
