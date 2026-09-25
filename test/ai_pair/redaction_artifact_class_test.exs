@@ -26,7 +26,8 @@ defmodule AiPair.RedactionArtifactClassTest do
   review. That file was not readable from the session that wrote this test (Orris
   is outside its repository scope), so the category list is taken from the review.
   Where Orrisd has an equivalent store, the class uses Orrisd's own path. Where it
-  has none, the class uses an Orris-category shape.
+  has none, the class uses the exact Orris path from that file, as reported by
+  the review.
 
   Every class FILE is a synthetic fixture, written at run time into a temporary
   tree at the relative path below. No real store is read. The real Orrisd stores
@@ -40,8 +41,8 @@ defmodule AiPair.RedactionArtifactClassTest do
   | 1 | fixtures | `test/fixtures/fingerprints/codex_cli/seeded_capture.txt` | an Orrisd in-tree path shape, beside the real tracked fixtures in `test/fixtures/fingerprints/codex_cli/` | `github_token` |
   | 2 | evidence | `delivery/receipts.jsonl` | a real Orrisd store path, the delivery receipt log (`lib/ai_pair/delivery/receipt_log.ex:12-13`), out-of-tree | `aws_access_key` |
   | 3 | prompts | `inbox/msg-0001.json` | a real Orrisd store path, a delivered-prompt envelope in `$AI_PAIR_INBOX/inbox/` (`lib/ai_pair/inbox/stuck_scanner.ex:64,72`), out-of-tree | `slack_token` |
-  | 4 | logs | `logs/orrisd.log` | an Orris-category shape. Orrisd writes no log file (`Logger` goes to the console), so this path is synthetic | `anthropic_token` |
-  | 5 | packages | `packages/example/package.json` | an Orris-category shape. Orrisd keeps no package store (its release is built by Nix), so this path is synthetic | `gitlab_token` |
+  | 4 | logs | `logs/run.log` | the exact Orris shape (Orris `test/redaction_check_test.sh:183-189`). Orrisd writes no log file (`Logger` goes to the console), so there is no Orrisd equivalent | `anthropic_token` |
+  | 5 | packages | `packages/manifest.json` | the exact Orris shape (same lines). Orrisd keeps no package store (its release is built by Nix), so there is no Orrisd equivalent | `gitlab_token` |
 
   Two Orrisd stores fit none of the five categories. They are named here and not
   seeded: the pane-intent store `state/pane-attachments.json`
@@ -173,7 +174,7 @@ defmodule AiPair.RedactionArtifactClassTest do
     secret = "s" <> "k-ant-" <> "ns30_m002_orrisd_log_line00"
 
     %{
-      path: "logs/orrisd.log",
+      path: "logs/run.log",
       pattern: "anthropic_token",
       body: fn value -> "12:00:00.000 [info] request header x-api-key=#{value}\n" end,
       secret: secret
@@ -184,7 +185,7 @@ defmodule AiPair.RedactionArtifactClassTest do
     secret = "g" <> "lpat-" <> "ns30_m002_package_json00"
 
     %{
-      path: "packages/example/package.json",
+      path: "packages/manifest.json",
       pattern: "gitlab_token",
       body: fn value -> ~s({"name":"example","publishConfig":{"token":"#{value}"}}\n) end,
       secret: secret
