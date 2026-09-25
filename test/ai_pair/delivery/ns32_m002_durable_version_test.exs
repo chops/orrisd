@@ -103,7 +103,7 @@ defmodule AiPair.Delivery.NS32M002DurableVersionTest do
 
   describe "receipt log: one changed key on one well-formed, chained line" do
     setup do
-      dir = tmp!("ns32_m002_receipts", canonical: true)
+      dir = tmp!("ns32_m002_receipts")
       {:ok, dir: dir}
     end
 
@@ -250,7 +250,7 @@ defmodule AiPair.Delivery.NS32M002DurableVersionTest do
 
   describe "pane intent store: unsupported version, exact refusal, bytes unchanged" do
     setup do
-      root = tmp!("ns32_m002_intent", canonical: true)
+      root = tmp!("ns32_m002_intent")
       File.chmod!(root, 0o700)
       pane = runtime_pane()
       assert Regex.match?(~r/\A%[0-9]+\z/, pane)
@@ -370,9 +370,9 @@ defmodule AiPair.Delivery.NS32M002DurableVersionTest do
 
   defp hex(bytes), do: Base.encode16(:crypto.strong_rand_bytes(bytes), case: :lower)
 
-  defp tmp!(prefix, opts \\ []) do
-    base = if opts[:canonical], do: canonical_tmp(), else: System.tmp_dir!()
-    dir = Path.join(base, "#{prefix}_#{System.unique_integer([:positive])}")
+  # Both stores' rows use the same canonical (symlink-resolved) temp root.
+  defp tmp!(prefix) do
+    dir = Path.join(canonical_tmp(), "#{prefix}_#{System.unique_integer([:positive])}")
     File.mkdir_p!(dir)
     on_exit(fn -> File.rm_rf!(dir) end)
     dir
