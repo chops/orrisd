@@ -44,7 +44,7 @@ bash test/documentation_format_test.sh
 
 mix deps.get --check-locked
 expected_redaction_scanner_sha="986858606b542287d2093b29bf09d16c9ac46479479dfb8917c3366961ce3e44"
-expected_redaction_test_sha="025686c5fae96751238c1defce66f79a1cc5363010d76ae63d0598960f301ae2"
+expected_redaction_test_sha="fceadd9390f7c7672a0c96d31001a55aa7b8f767e38f328bdab26e3c942c370f"
 actual_redaction_scanner_sha="$(sha256sum bin/redaction-check)"
 actual_redaction_scanner_sha="${actual_redaction_scanner_sha%% *}"
 actual_redaction_test_sha="$(sha256sum test/redaction_check_test.sh)"
