@@ -29,9 +29,12 @@ defmodule AiPair.Delivery.NS42C001RequestVersionTest do
   `System.fetch_env` or `:os.getenv` read), and they check that the two shell wrappers
   forward argv without naming a version. A future read of that kind fails a row here; C3
   shows the extractor reports one. These rows do NOT prove that no ambient default can
-  exist anywhere: in particular `Client.request/1` merges the OpenTelemetry propagation
-  carrier over the command map (`client.ex:398-402`), so a text-map propagator configured
-  at OpenTelemetry start could add keys to the frame. The rows pin only that, with the
+  exist anywhere. The OpenTelemetry propagation carrier is no longer such a route:
+  `Client.request/1` keeps only the allowlisted `traceparent` and `tracestate` from it
+  (`client.ex:33`, `@trace_carrier_keys`) and merges the command over what remains
+  (`client.ex:404-409`, `Map.take/2` then `Map.merge(carrier, cmd)`), so command keys,
+  `protocol_version` included, always win. That is pinned against a colliding propagator in
+  `test/ai_pair/cli/request_trace_carrier_test.exs`. The row here pins only that, with the
   configured propagators, the carrier keys are the trace-context set and the frame's
   version is untouched. Whether "no ambient default exists, pinned structurally" is an
   acceptable witness for the register row is the reviewers' decision.
