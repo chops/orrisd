@@ -4,6 +4,8 @@ defmodule AiPair.Delivery.ReceiptLog do
   alias AiPair.Delivery.Fs
 
   @anchor "sha256:" <> Base.encode16(:crypto.hash(:sha256, ""), case: :lower)
+  @schema "ai-pair/delivery-receipt"
+  @schema_version 1
   @statuses ~w(pending queued delivered not_delivered ambiguous)
   @fields ~w(schema schema_version seq prev_line_sha256 daemon_epoch message_id pane_id payload_hash status delivery_attempt)
   defstruct [:fs, :fd, :path, seq: 0, previous: @anchor, entries: %{}]
@@ -88,18 +90,91 @@ defmodule AiPair.Delivery.ReceiptLog do
     {lines, [tail]} = Enum.split(parts, -1)
 
     Enum.reduce_while(lines, {:ok, log}, fn line, {:ok, acc} ->
-      with {:ok, %{} = record} <- Jason.decode(line),
-           true <- valid_record?(record, acc) do
-        {:cont, {:ok, accept(acc, record, line <> "\n")}}
-      else
-        _ -> {:halt, {:error, {:receipt_log_corrupt, acc.seq + 1}}}
+      case decode_line(line, acc) do
+        {:ok, record} -> {:cont, {:ok, accept(acc, record, line <> "\n")}}
+        error -> {:halt, error}
       end
     end)
     |> case do
-      {:ok, decoded} -> {:ok, decoded, byte_size(tail)}
+      {:ok, decoded} -> classify_tail(tail, decoded)
       error -> error
     end
   end
+
+  # A version mismatch is reported as such before the record rules run, so a line from
+  # another schema or version is never attributed to chain, key-set or history damage.
+  defp decode_line(line, acc) do
+    seq = acc.seq + 1
+
+    case Jason.decode(line) do
+      {:ok, %{} = record} -> check_line(record, classify_version(record), acc, seq)
+      _ -> corrupt(seq)
+    end
+  end
+
+  defp check_line(_record, {:incompatible, found}, _acc, seq), do: incompatible(seq, found)
+
+  defp check_line(record, _own_or_other, acc, seq) do
+    if valid_record?(record, acc), do: {:ok, record}, else: corrupt(seq)
+  end
+
+  # The unterminated final bytes, classified after the complete prefix has validated.
+  # Only a fragment that does not decode, or an own-version object that passes full
+  # validation against that prefix, is a repairable torn write. Every other complete
+  # value is refused here, before repair/4, so a refusal never truncates the file.
+  defp classify_tail("", decoded), do: {:ok, decoded, 0}
+
+  defp classify_tail(tail, decoded) do
+    seq = decoded.seq + 1
+
+    case Jason.decode(tail) do
+      {:error, _fragment} -> {:ok, decoded, byte_size(tail)}
+      {:ok, %{} = record} -> classify_tail_record(record, decoded, byte_size(tail), seq)
+      {:ok, _not_an_object} -> corrupt(seq)
+    end
+  end
+
+  defp classify_tail_record(record, decoded, tail_bytes, seq) do
+    case classify_version(record) do
+      {:incompatible, found} -> incompatible(seq, found)
+      :other -> corrupt(seq)
+      :ok -> repairable(valid_record?(record, decoded), decoded, tail_bytes, seq)
+    end
+  end
+
+  defp repairable(true, decoded, tail_bytes, _seq), do: {:ok, decoded, tail_bytes}
+  defp repairable(false, _decoded, _tail_bytes, seq), do: corrupt(seq)
+
+  # :ok for the pair this build reads, {:incompatible, found} for a map carrying both
+  # keys with any other pair (type-confused versions included), :other otherwise.
+  defp classify_version(%{"schema" => @schema, "schema_version" => @schema_version}), do: :ok
+
+  defp classify_version(%{"schema" => schema, "schema_version" => version}),
+    do: {:incompatible, %{schema: found_schema(schema), schema_version: found_version(version)}}
+
+  defp classify_version(_record), do: :other
+
+  # Found values are echoed only when bounded; anything else becomes a fixed marker, so
+  # no raw long or control-character content reaches the reason or its inspect output.
+  defp found_schema(schema) do
+    if matches?(schema, ~r/\A[a-z0-9][a-z0-9\/._-]{0,63}\z/), do: schema, else: :unrecognized
+  end
+
+  defp found_version(v) when is_integer(v) and v in 0..1_000_000, do: v
+  defp found_version(v) when is_integer(v), do: {:unsupported_type, :integer_out_of_range}
+  defp found_version(v) when is_binary(v), do: {:unsupported_type, :string}
+  defp found_version(v) when is_float(v), do: {:unsupported_type, :float}
+  defp found_version(nil), do: {:unsupported_type, :null}
+  defp found_version(v) when is_boolean(v), do: {:unsupported_type, :boolean}
+  defp found_version(v) when is_list(v), do: {:unsupported_type, :array}
+  defp found_version(v) when is_map(v), do: {:unsupported_type, :object}
+
+  defp incompatible(seq, found) do
+    expected = %{schema: @schema, schema_version: @schema_version}
+    {:error, {:receipt_log_incompatible, %{seq: seq, found: found, expected: expected}}}
+  end
+
+  defp corrupt(seq), do: {:error, {:receipt_log_corrupt, seq}}
 
   defp valid_record?(r, log) do
     Enum.sort(Map.keys(r)) == Enum.sort(@fields) and
