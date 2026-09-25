@@ -422,7 +422,8 @@ defmodule AiPair.NS15G002DaemonRefusalBeforePasteTest do
           handler = forward_logs!()
           r = raw_v1(c, %{"cmd" => "send", "pane_id" => pane, "text" => text})
           logged = await_log(needles, 2_000)
-          :ok = :logger.remove_handler(handler)
+          # Logger may already have removed a handler that raised; keep the capture message.
+          _ = :logger.remove_handler(handler)
           {r, logged}
         end)
 
@@ -735,17 +736,24 @@ defmodule AiPair.NS15G002DaemonRefusalBeforePasteTest do
     do_await_log(needles, deadline, "")
   end
 
+  # The deadline is checked before every receive, so a steady stream of forwarded events
+  # cannot hold the wait past its bound.
   defp do_await_log(needles, deadline, acc) do
-    if Enum.all?(needles, &String.contains?(acc, &1)) do
-      {:ok, acc}
-    else
-      remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+    now = System.monotonic_time(:millisecond)
 
-      receive do
-        {:logged, text} -> do_await_log(needles, deadline, acc <> text)
-      after
-        remaining -> {:timeout, acc}
-      end
+    cond do
+      Enum.all?(needles, &String.contains?(acc, &1)) ->
+        {:ok, acc}
+
+      now >= deadline ->
+        {:timeout, acc}
+
+      true ->
+        receive do
+          {:logged, text} -> do_await_log(needles, deadline, acc <> text)
+        after
+          max(deadline - now, 0) -> {:timeout, acc}
+        end
     end
   end
 
