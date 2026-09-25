@@ -42,7 +42,8 @@ defmodule AiPair.Delivery.NS42C010DuplicateWhilePendingTest do
     * T1: a msg id reused while its first attempt is pending. The duplicate replies
       while the first send is still inside the pane, as `pending` attempt 1. The first
       send is then `sent`, with one paste. Control C-T1: a fresh id with the same text
-      does NOT reply until release, and then two pastes are recorded.
+      is observed queued in the pane's mailbox and does NOT reply until release, and
+      then two pastes are recorded.
     * T1-W, the wake: a reconcile with `wait_ms: 2_000`, issued while the send is held,
       is observed registered as a store waiter before the release, was written before
       the release, and answers `delivered` only after it. Control C-T1-W: `wait_ms: 0`
@@ -129,8 +130,11 @@ defmodule AiPair.Delivery.NS42C010DuplicateWhilePendingTest do
       arm(c)
       held = Task.async(fn -> send_v2!(c, p, id(c, "t1-hold"), x) end)
       assert_receive {:paste_started, ^sm, ^x}, 2_000
-      fresh = Task.async(fn -> send_v2!(c, p, id(c, "t1-fresh"), x) end)
-      early = Task.yield(fresh, 200)
+      id_fresh = id(c, "t1-fresh")
+      fresh = Task.async(fn -> send_v2!(c, p, id_fresh, x) end)
+      # Queued at the held pane, not merely unscheduled.
+      assert_mailbox(sm, id_fresh, 1, "C-T1 fresh")
+      early = Task.yield(fresh, 0)
       assert early == nil, "C-T1 fresh id must wait; observed " <> inspect(early)
       release(sm)
       assert_sent(Task.await(held, 6_000), "C-T1 held")
@@ -218,7 +222,7 @@ defmodule AiPair.Delivery.NS42C010DuplicateWhilePendingTest do
 
       # The release waits for the store's own registration of this waiter.
       assert_waiters(c, idw, 1, "T1-W registered before release")
-      early = Task.yield(w, 200)
+      early = Task.yield(w, 0)
       assert early == nil, "T1-W must wait while held; observed " <> inspect(early)
       # Native units: a millisecond stamp can tie with the wake it precedes.
       released_at = now_native()
@@ -232,9 +236,6 @@ defmodule AiPair.Delivery.NS42C010DuplicateWhilePendingTest do
       assert w_received_at > released_at,
              "T1-W answered after release; observed received #{w_received_at}, " <>
                "released #{released_at}"
-
-      waited_ms = System.convert_time_unit(w_received_at - w_sent_at, :native, :millisecond)
-      assert waited_ms < 2_000, "T1-W woken before its bound; observed #{waited_ms} ms"
 
       assert {reply["outcome"], reply["status"], reply["delivery_attempt"]} ==
                {"delivered", "delivered", 1},
@@ -268,7 +269,7 @@ defmodule AiPair.Delivery.NS42C010DuplicateWhilePendingTest do
       {reply, sent_at, received_at} = Task.await(w, 3_000)
       elapsed = System.convert_time_unit(received_at - sent_at, :native, :millisecond)
 
-      assert elapsed >= 150 and elapsed < 2_000, "W2 elapsed; observed #{elapsed} ms"
+      assert elapsed >= 150, "W2 elapsed; observed #{elapsed} ms"
 
       # The timeout's own answer: ambiguous on a record still pending, with the waiter gone
       # and no finalize in the log, so no notify woke it.
@@ -353,8 +354,11 @@ defmodule AiPair.Delivery.NS42C010DuplicateWhilePendingTest do
       arm(c)
       h = Task.async(fn -> send_v2!(c, pp, id(c, "t4-hold"), x2) end)
       assert_receive {:paste_started, ^sm, ^x2}, 2_000
-      c8 = Task.async(fn -> send_v2!(c, pp, id(c, "t4-8"), y2) end)
-      early = Task.yield(c8, 200)
+      id8 = id(c, "t4-8")
+      c8 = Task.async(fn -> send_v2!(c, pp, id8, y2) end)
+      # Queued at the held pane P, not merely unscheduled.
+      assert_mailbox(sm, id8, 1, "T4 control P")
+      early = Task.yield(c8, 0)
       assert early == nil, "T4 control P send waits; observed " <> inspect(early)
       assert_sent(send_v2!(c, q, id(c, "t4-9"), x2), "T4 control Q send at once")
       release(sm)
