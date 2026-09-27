@@ -23,6 +23,13 @@ defmodule AiPair.NS15G002H2QuarantineRefusalRedTest do
   ns42_c008_timeout_and_validation_test.exs): a `ReceiptStore` on a unique inbox, a
   real `AiPair.IPC.Server` with that store, and a recording `paste_fn`. Pane ids are
   built at runtime.
+
+  The describe "CHARACTERISATION (base-GREEN, never RED)" is NOT a RED row. It was
+  added in S2 step 2G as a base-GREEN characterisation control: a quarantined pane in
+  `:busy` or `:dead` already refuses a v2 send as `pane_quarantined` on the base, it is
+  qualified GREEN before any RED step, and it is never listed in a RED receipt. The
+  "red" in this file's name refers to the H-2 row only. Its panes are started through
+  `start_pane!/4` with a capture marker; the H-2 rows keep the default `IDLE_MARKER`.
   """
 
   use ExUnit.Case, async: false
@@ -109,18 +116,83 @@ defmodule AiPair.NS15G002H2QuarantineRefusalRedTest do
     end
   end
 
+  describe "CHARACTERISATION (base-GREEN, never RED): a quarantined pane in :busy or :dead still refuses a v2 send as pane_quarantined" do
+    test "a quarantined busy pane refuses a v2 send with its own word (base-GREEN characterisation)",
+         c do
+      q = pane_id(c, "qbusy")
+      assert ReceiptLog.valid_pane?(q)
+
+      sm = start_pane!(c, q, make_ref(), "BUSY_MARKER")
+
+      # Preconditions: quarantined, busy, and the fresh id has no record.
+      assert StateMachine.status(sm).quarantined == true
+      assert :ok = await_state(sm, :busy)
+
+      id = id(c, "char-busy")
+      text = "characterisation send to a quarantined busy pane " <> Integer.to_string(c.n)
+      assert reconcile!(c, q, id, text)["outcome"] == "absent"
+
+      reply = send_frame!(c, send_frame(q, id, text))
+
+      assert_quarantined_refusal!(c, sm, q, id, text, reply)
+    end
+
+    test "a quarantined dead pane refuses a v2 send with its own word (base-GREEN characterisation)",
+         c do
+      q = pane_id(c, "qdead")
+      assert ReceiptLog.valid_pane?(q)
+
+      sm = start_pane!(c, q, make_ref(), "IDLE_MARKER")
+
+      # Preconditions: quarantined, then driven from idle to the terminal dead
+      # state, and the fresh id has no record.
+      assert StateMachine.status(sm).quarantined == true
+      assert :ok = await_state(sm, :idle)
+      StateMachine.mark_dead(sm)
+      assert :ok = await_state(sm, :dead)
+
+      id = id(c, "char-dead")
+      text = "characterisation send to a quarantined dead pane " <> Integer.to_string(c.n)
+      assert reconcile!(c, q, id, text)["outcome"] == "absent"
+
+      reply = send_frame!(c, send_frame(q, id, text))
+
+      assert_quarantined_refusal!(c, sm, q, id, text, reply)
+    end
+  end
+
   # ===== helpers =====
+
+  # The same assertions as the RED-H2 row, shared by the two characterisation rows.
+  defp assert_quarantined_refusal!(c, sm, q, id, text, reply) do
+    assert reply["protocol_version"] == 2
+    assert reply["ok"] == false
+    assert reply["pane_id"] == q
+    assert reply["msg_id"] == id
+
+    assert reply["error"] == "pane_quarantined",
+           "a v2 send to a quarantined pane must be refused as pane_quarantined; " <>
+             "observed error " <> inspect(reply["error"])
+
+    # Refused before admission, nothing pasted or queued.
+    assert pastes(c, q) == 0
+    assert StateMachine.pending_count(sm) == 0
+    answer = reconcile!(c, q, id, text)
+    assert answer["outcome"] == "absent"
+    refute Map.has_key?(answer, "delivery_attempt")
+    assert StateMachine.status(sm).quarantined == true
+  end
 
   defp pane_id(c, tag),
     do: "%" <> "ns15_g002_h2_red_" <> Integer.to_string(c.n) <> "_" <> tag
 
-  defp start_pane!(c, pane, token) do
+  defp start_pane!(c, pane, token, marker \\ "IDLE_MARKER") do
     paste = c.paste
 
     {:ok, sm} =
       PaneSupervisor.start_pane(pane,
         receipt_store: c.store,
-        capture_fn: fn _pane_id -> {:ok, "IDLE_MARKER"} end,
+        capture_fn: fn _pane_id -> {:ok, marker} end,
         paste_fn: fn pane_id, _text ->
           Agent.update(paste, &Map.update(&1, pane_id, 1, fn count -> count + 1 end))
           :ok
