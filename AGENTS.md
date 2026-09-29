@@ -18,9 +18,9 @@ assignment wins. It does not change the contribution policy in
 ## Toolchain and verification
 
 - The toolchain is Elixir 1.20.4 with Erlang/OTP 29.0.5 from the pinned Nix
-  development shell, and `bin/verify` enforces it. `.tool-versions` currently
-  lists older versions and conflicts with the gate; follow the Nix shell, not
-  `.tool-versions`.
+  development shell, and `bin/verify` enforces it. `.tool-versions`
+  mirrors these versions as an editor hint only; the Nix shell and `bin/verify`
+  remain authoritative.
 - Run the full gate from a Git checkout:
 
 ```bash
