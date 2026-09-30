@@ -657,6 +657,10 @@ defmodule AiPair.IPC.Server do
     %{ok: false, pane_id: pane_id, error: "pane_dead"}
   end
 
+  defp format_send_result(pane_id, {:error, :pane_quarantined}) do
+    %{ok: false, pane_id: pane_id, error: "pane_quarantined"}
+  end
+
   defp format_send_result(pane_id, {:error, :send_timeout}) do
     %{
       ok: false,
