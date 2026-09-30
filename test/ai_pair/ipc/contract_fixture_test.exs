@@ -186,6 +186,33 @@ defmodule AiPair.IPC.ContractFixtureTest do
     assert actual == fixture("send.error.pane_dead.json")
   end
 
+  test "send quarantined-pane reply matches the v1 fixture", %{sock_path: sock_path} do
+    pane_id = unique_pane("quarantined")
+    owner = self()
+
+    pane =
+      start_fixture_pane(
+        pane_id,
+        "IDLE_MARKER",
+        fn _, text ->
+          send(owner, {:pasted, text})
+          :ok
+        end,
+        quarantine_token: make_ref()
+      )
+
+    wait_for_state(pane_id, :idle)
+    assert %{quarantined: true} = StateMachine.status(pane)
+
+    actual =
+      sock_path
+      |> send_frame(%{"cmd" => "send", "pane_id" => pane_id, "text" => "quarantined"})
+      |> Map.put("pane_id", "<pane_id>")
+
+    assert actual == fixture("send.error.pane_quarantined.json")
+    refute_received {:pasted, _}
+  end
+
   test "send timeout reply matches the v1 fixture", %{sock_path: sock_path} do
     previous = Application.get_env(:ai_pair, :send_call_timeout_ms)
     Application.put_env(:ai_pair, :send_call_timeout_ms, 10)

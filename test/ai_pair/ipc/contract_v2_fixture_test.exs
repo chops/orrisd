@@ -116,7 +116,9 @@ defmodule AiPair.IPC.ContractV2FixtureTest do
   defp prepare("ping.ok.json", _c), do: %{"cmd" => "ping", "protocol_version" => 2}
 
   defp prepare("send." <> rest, c) do
-    start_pane(c, if(rest == "sent.json", do: "IDLE_MARKER", else: "BUSY_MARKER"))
+    marker = if rest == "sent.json", do: "IDLE_MARKER", else: "BUSY_MARKER"
+    opts = if rest == "error.pane_quarantined.json", do: [quarantine_token: make_ref()], else: []
+    start_pane(c, marker, opts)
 
     request = %{
       "cmd" => "send",
@@ -138,6 +140,9 @@ defmodule AiPair.IPC.ContractV2FixtureTest do
 
       "error.conflict.json" ->
         admit(c, c.pane, "sha256:" <> String.duplicate("f", 64), "delivered")
+        request
+
+      "error.pane_quarantined.json" ->
         request
 
       "duplicate." <> status ->
@@ -184,15 +189,19 @@ defmodule AiPair.IPC.ContractV2FixtureTest do
     if status != "pending", do: :ok = ReceiptStore.transition(c.store, @id, token, status)
   end
 
-  defp start_pane(c, marker) do
+  defp start_pane(c, marker, opts \\ []) do
     {:ok, pid} =
-      PaneSupervisor.start_pane(c.pane,
-        receipt_store: c.store,
-        capture_fn: fn _ -> {:ok, marker} end,
-        paste_fn: fn _, _ -> Agent.update(c.pastes, &(&1 + 1)) end,
-        classifier: MarkerClassifier,
-        poll_interval_ms: 5,
-        idle_debounce_ms: 0
+      PaneSupervisor.start_pane(
+        c.pane,
+        opts ++
+          [
+            receipt_store: c.store,
+            capture_fn: fn _ -> {:ok, marker} end,
+            paste_fn: fn _, _ -> Agent.update(c.pastes, &(&1 + 1)) end,
+            classifier: MarkerClassifier,
+            poll_interval_ms: 5,
+            idle_debounce_ms: 0
+          ]
       )
 
     on_exit(fn -> PaneSupervisor.stop_pane(c.pane) end)

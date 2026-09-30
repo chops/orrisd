@@ -392,6 +392,16 @@ nothing to ~test/fixtures/contracts/ipc/v1~ and changes no byte in it:
   set's literal hash, its count of fifteen and its exact filenames, so a change
   to the fixtures AND their ~CONTRACT_HASH~ together still fails.
 
+Amended 2026-09-30 under D2, the dated amendment to the NS-39 v1 fixture ruling:
+the frozen v1 set is now sixteen fixtures, the ratified fifteen plus
+~send.error.pane_quarantined.json~, a ~send~ reply. The property this section
+states is unchanged: this contract adds nothing to ~test/fixtures/contracts/ipc/v1~,
+no ~ping~, ~send~ or ~pane_status~ reply gains a member, and
+~test/ai_pair/contracts/ipc_contract_hash_test.exs~ now pins the count of sixteen.
+The heading and the count above are the text as written before the amendment.
+2026-09-30 is the authoring date; a later landing that changes this note is
+recorded separately.
+
 ** Not promised
 :PROPERTIES:
 :CUSTOM_ID: not-promised

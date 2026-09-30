@@ -364,7 +364,7 @@ defmodule AiPair.Contracts.DurableIPCContractTest do
 
   test "NS-39: no durable member reaches a frozen IPC v1 fixture" do
     paths = @v1_dir |> Path.join("*.json") |> Path.wildcard() |> Enum.sort()
-    assert length(paths) == 15, "the frozen v1 set is fifteen fixtures"
+    assert length(paths) == 16, "the frozen v1 set is sixteen fixtures since D2"
 
     for path <- paths do
       frame = path |> File.read!() |> decode()

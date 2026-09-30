@@ -39,10 +39,10 @@ defmodule AiPair.Contracts.VendoredIPCV2Test do
   @begin_sentinel "# BEGIN VENDORED orris docs/contracts/ipc-v2.org"
   @end_sentinel "# END VENDORED orris docs/contracts/ipc-v2.org"
 
-  @orris_revision "ffe6fb87bb049d604e269ba60891fda1b14dba57"
-  @orris_sha256 "dd121abbd0f4596889d6960b4c1a6273f5c44e3fb6a463b9a56c8b7cc9973315"
-  @fixture_hash "a6f92d537897d30a883a04d29217ff36a4f33db759b87d4e6ccc79ad4c2232fc"
-  @v1_fixture_hash "f1cacf8b53fdd1db37ec968e5476081250804e9c6a4d615215d47d9b77894213"
+  @orris_revision "2aae285f3e8e1f16885b409114492b4574e6603f"
+  @orris_sha256 "c6e35db890a44ab8633194f52d947c4c7efa84edb0d3bcacb96fbac188554577"
+  @fixture_hash "56682bc16bd07dadbd8aa43dfda9ef7ecc84674c1a091279f337b1b16c5ad77f"
+  @v1_fixture_hash "e809de8ea47339c1d6cffca65cc6dee1dc09d99d8f7b242e00296cc1f7f51a88"
 
   @fixtures ~w(
     ping.ok.json
@@ -59,6 +59,7 @@ defmodule AiPair.Contracts.VendoredIPCV2Test do
     send.duplicate.queued.json
     send.error.conflict.json
     send.error.missing_msg_id.json
+    send.error.pane_quarantined.json
     send.queued.json
     send.sent.json
   )
@@ -136,12 +137,15 @@ defmodule AiPair.Contracts.VendoredIPCV2Test do
       # about a document shape that is not the one shipped here.
       assert String.contains?(region, "** Paired producer copy")
       assert String.contains?(region, "- paired_fixture_contract_hash: ~")
+      # The region is the consumer snapshot at @orris_revision, where its own paired set was
+      # still sixteen files. This line moves only at a re-vendoring after the consumer adopts
+      # the seventeenth file; the producer count is the preamble declaration below.
       assert String.contains?(region, "- paired_fixture_count: ~16~")
 
       # The consumer names THIS repository, and the producer names the consumer. Reading
       # the whole file for `- <key>:` would let one stand in for the other; `declared/1`
       # reads the preamble, so these values are the producer declarations and no others.
-      assert declared("paired_fixture_count") == "16"
+      assert declared("paired_fixture_count") == "17"
       assert declared("paired_fixture_contract_hash") == @fixture_hash
       assert declared("source_revision") == @orris_revision
 
@@ -200,8 +204,8 @@ defmodule AiPair.Contracts.VendoredIPCV2Test do
       assert named != [], "the inventory parser found nothing; it, not the document, is wrong"
       assert named == @fixtures
       assert Enum.sort(shipped) == @fixtures
-      assert declared("paired_fixture_count") == "16"
-      assert length(@fixtures) == 16
+      assert declared("paired_fixture_count") == "17"
+      assert length(@fixtures) == 17
     end
   end
 

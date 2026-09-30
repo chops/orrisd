@@ -1,6 +1,6 @@
 defmodule AiPair.Contracts.IPCContractHashTest do
   @moduledoc """
-  Freezes the IPC v1 fixture set under NS-39.A.000/.001: the fifteen files, their exact
+  Freezes the IPC v1 fixture set under NS-39.A.000/.001: the sixteen files, their exact
   names and their pinned content hash. The hash is pinned HERE as well as in
   `CONTRACT_HASH`, because a change that edited a fixture and recomputed the file together
   would satisfy a self-comparison and still break the Orris consumer, which pins the same
@@ -9,13 +9,15 @@ defmodule AiPair.Contracts.IPCContractHashTest do
   (`docs/contracts/durable-attach-detach.org`) can add reply members without touching this
   set. That direction is guarded by
   `test/ai_pair/contracts/durable_ipc_contract_test.exs`.
+  Sixteen since D2, the dated amendment to the NS-39 ruling that preserves the ratified
+  fifteen and adds `send.error.pane_quarantined.json`.
   """
 
   use ExUnit.Case, async: true
 
   @fixture_dir Path.expand("../../fixtures/contracts/ipc/v1", __DIR__)
   @hash_path Path.join(@fixture_dir, "CONTRACT_HASH")
-  @pinned_hash "f1cacf8b53fdd1db37ec968e5476081250804e9c6a4d615215d47d9b77894213"
+  @pinned_hash "e809de8ea47339c1d6cffca65cc6dee1dc09d99d8f7b242e00296cc1f7f51a88"
 
   @fixtures ~w(
     pane_status.error.missing_pane_id.json
@@ -28,6 +30,7 @@ defmodule AiPair.Contracts.IPCContractHashTest do
     send.error.oversize.json
     send.error.pane_dead.json
     send.error.pane_not_found.json
+    send.error.pane_quarantined.json
     send.error.paste_failed.json
     send.error.queue_full.json
     send.error.send_timeout.json
@@ -35,11 +38,11 @@ defmodule AiPair.Contracts.IPCContractHashTest do
     send.sent.json
   )
 
-  test "the IPC v1 fixture set is exactly the fifteen frozen files" do
+  test "the IPC v1 fixture set is exactly the sixteen frozen files" do
     paths = fixture_paths()
 
     assert Enum.map(paths, &Path.basename/1) == @fixtures
-    assert length(@fixtures) == 15
+    assert length(@fixtures) == 16
   end
 
   test "the IPC v1 fixture set matches its pinned content hash" do

@@ -20,9 +20,10 @@ defmodule AiPair.IPC.ContractV1StrictnessTest do
     * a queued send has `queue_reason` equal to `debounce`, `busy`, `dialog` or `unknown`;
     * a `send` request may carry `msg_id`, which is not echoed in a v1 reply.
 
-  Nothing in product code is changed; every row asserts behaviour that is present, and
-  one row pins a known product defect (see "the one v1 send outcome with no fixture
-  reply").
+  Every row asserts behaviour that is present. The quarantined-pane send, which this
+  module used to pin as a known defect (the handler raised and the connection closed
+  without a reply), is the sixteenth v1 fixture reply since D2 and is driven like every
+  other kind, plus the rows in "a send to a quarantined pane is a typed v1 refusal".
   """
 
   # One row changes the send-call timeout in the application environment.
@@ -70,7 +71,8 @@ defmodule AiPair.IPC.ContractV1StrictnessTest do
     :not_found,
     :pane_dead,
     :send_timeout,
-    :paste_failed
+    :paste_failed,
+    :pane_quarantined
   ]
 
   setup do
@@ -220,45 +222,71 @@ defmodule AiPair.IPC.ContractV1StrictnessTest do
     end
   end
 
-  describe "the one v1 send outcome with no fixture reply" do
-    # FINDING, pinned as current behaviour and not asserted as correct. A quarantined
-    # pane answers the v1 send path with {:error, :pane_quarantined}
-    # (state_machine.ex:441-445), and `format_send_result/2` (server.ex:638-680) has no
-    # clause for it. The handler task raises, its socket closes, and the client gets no
-    # reply at all. The v1 fixture table defines no reply for this case, so the reply a
-    # client SHOULD get is a product and contract decision for a follow-up row; when that
-    # lands, this row must change with it.
-    test "a send to a quarantined pane closes without a reply, and the listener survives",
+  describe "a send to a quarantined pane is a typed v1 refusal" do
+    # D2, the dated amendment to the NS-39 ledger ruling, adds the sixteenth v1 fixture,
+    # send.error.pane_quarantined.json. Before it, a quarantined pane answered the v1 send
+    # path with {:error, :pane_quarantined} (the quarantine clause of AiPair.Pane.StateMachine,
+    # ahead of every send clause) and AiPair.IPC.Server.format_send_result/2 had no clause
+    # for it: the handler task raised and the client got no reply. This describe replaces
+    # the row that pinned that closed connection as current behaviour.
+    test "V1-R1: a quarantined idle pane answers the fixture, pastes nothing, queues nothing",
          %{sock_path: sock_path} do
       pane_id = unique_pane("quarantined")
-      pane = start_fixture_pane(pane_id, "IDLE_MARKER", quarantine_token: make_ref())
+      owner = self()
+
+      paste = fn _, text ->
+        send(owner, {:pasted, text})
+        :ok
+      end
+
+      pane =
+        start_fixture_pane(pane_id, "IDLE_MARKER", paste_fn: paste, quarantine_token: make_ref())
+
       wait_for_state(pane_id, :idle)
 
       # Precondition: the pane really is quarantined, or the row proves nothing.
       assert %{quarantined: true} = StateMachine.status(pane)
 
+      msg_id = "msg_ns39_quarantined"
+
       payload = %{
         "cmd" => "send",
         "pane_id" => pane_id,
         "text" => "quarantined",
-        "msg_id" => "msg_ns39_quarantined"
+        "msg_id" => msg_id
       }
 
-      # The close alone would pass for ANY handler crash, so the captured crash report
-      # must name the cause. The report is written by the dying handler task before
-      # it exits, and its socket closes only on that exit, so the close observed here
-      # is ordered after the report.
       {result, log} = with_log(fn -> exchange(sock_path, payload) end)
 
-      assert result == {:error, :closed}
-      assert log =~ "FunctionClauseError", "the close must come from the missing clause"
-      assert log =~ "format_send_result", "the crash must be in format_send_result/2"
-      assert log =~ ":pane_quarantined", "the unmatched value must be the quarantine refusal"
+      assert {:ok, raw} = result, "a quarantined pane must answer, got #{inspect(result)}"
+      conform!(raw, "send.error.pane_quarantined.json", %{pane_id: pane_id})
+      refute_echo!(raw, msg_id)
+      refute log =~ "FunctionClauseError", "the reply must not come from a crashed handler"
 
-      # Nothing was queued behind the refusal, and the listener still answers.
       assert %{pending_count: 0} = StateMachine.status(pane)
-      {raw, bindings} = drive(:ping, sock_path, %{})
-      conform!(raw, "ping.ok.json", bindings)
+      refute_received {:pasted, _}
+
+      {ping, bindings} = drive(:ping, sock_path, %{})
+      conform!(ping, "ping.ok.json", bindings)
+    end
+
+    test "V1-R2: busy and dead quarantined panes answer the same word", %{sock_path: sock_path} do
+      for state <- [:busy, :dead] do
+        {raw, bindings} = send_to_quarantined(sock_path, state)
+        conform!(raw, "send.error.pane_quarantined.json", bindings)
+      end
+    end
+
+    test "V1-R3: the refusal borrows no other v1 send word", %{sock_path: sock_path} do
+      for state <- [:idle, :busy, :dead] do
+        {raw, _bindings} = send_to_quarantined(sock_path, state)
+        error = Jason.decode!(raw)["error"]
+
+        refute error in ~w(pane_dead pane_not_found paste_failed send_timeout queue_full),
+               "#{state}: a quarantined pane answered #{inspect(error)}"
+
+        assert error == "pane_quarantined"
+      end
     end
   end
 
@@ -337,6 +365,7 @@ defmodule AiPair.IPC.ContractV1StrictnessTest do
   defp fixture_name(:pane_dead), do: "send.error.pane_dead.json"
   defp fixture_name(:send_timeout), do: "send.error.send_timeout.json"
   defp fixture_name(:paste_failed), do: "send.error.paste_failed.json"
+  defp fixture_name(:pane_quarantined), do: "send.error.pane_quarantined.json"
 
   defp drive(:ping, sock_path, extra) do
     {request(sock_path, %{"cmd" => "ping"}, extra), %{}}
@@ -467,6 +496,14 @@ defmodule AiPair.IPC.ContractV1StrictnessTest do
     {send_text(sock_path, pane_id, "hello", extra), %{pane_id: pane_id}}
   end
 
+  defp drive(:pane_quarantined, sock_path, extra) do
+    pane_id = unique_pane("quarantined-kind")
+    pane = start_fixture_pane(pane_id, "IDLE_MARKER", quarantine_token: make_ref())
+    wait_for_state(pane_id, :idle)
+    assert %{quarantined: true} = StateMachine.status(pane)
+    {send_text(sock_path, pane_id, "quarantined", extra), %{pane_id: pane_id}}
+  end
+
   defp drive(:send_timeout, sock_path, extra) do
     pane_id = unique_pane("timeout")
 
@@ -550,6 +587,22 @@ defmodule AiPair.IPC.ContractV1StrictnessTest do
   defp expected_reason(state), do: Atom.to_string(state)
 
   defp reason(raw), do: Jason.decode!(raw)["queue_reason"]
+
+  # One v1 send to a quarantined pane held in `state` (:idle, :busy or :dead).
+  defp send_to_quarantined(sock_path, state) do
+    pane_id = unique_pane("quarantined-#{state}")
+    marker = if state == :idle, do: "IDLE_MARKER", else: "BUSY_MARKER"
+    pane = start_fixture_pane(pane_id, marker, quarantine_token: make_ref())
+    wait_for_state(pane_id, if(state == :idle, do: :idle, else: :busy))
+
+    if state == :dead do
+      StateMachine.mark_dead(pane)
+      wait_for_state(pane_id, :dead)
+    end
+
+    assert %{quarantined: true} = StateMachine.status(pane)
+    {send_text(sock_path, pane_id, "state #{state}", %{}), %{pane_id: pane_id}}
+  end
 
   # ===== contract checks =====
 

@@ -44,10 +44,11 @@ defmodule AiPair.NS15G002DaemonRefusalBeforePasteTest do
       main `0be02ccc`, added it to `Delivery`'s request errors). No paste, log
       unchanged, nothing admitted, queue 0. Control: a sibling pane without the token,
       sent once before and once after the negative send.
-    * R6 v1, quarantined: FINDING H-3, pinned as current behaviour. The handler crashes
-      in `format_send_result/2` on `{:error, :pane_quarantined}`, so the socket reads
-      `{:error, :closed}`. The server still answers a ping afterwards. Control: a sibling
-      without the token, v1 sent.
+    * R6 v1, quarantined: refused `pane_quarantined`, the sixteenth v1 fixture reply
+      since D2, with no crashed handler, no paste and queue 0; the server still answers
+      a ping afterwards. This replaces FINDING H-3, which pinned the handler crash in
+      `format_send_result/2` and the `{:error, :closed}` socket as current behaviour.
+      Control: a sibling without the token, v1 sent.
     * R7 v2, simulated capture failure, unreaped: the capture always returns
       `{:error, :pane_gone}` with a reaper threshold of 1_000_000. The send is queued as
       `unknown`, and 20+ polls after it all report `:unknown`. This is a simulated
@@ -395,7 +396,8 @@ defmodule AiPair.NS15G002DaemonRefusalBeforePasteTest do
              "R5 control after must change the log; observed " <> inspect(ctl2_after)
     end
 
-    test "R6 v1: FINDING H-3 pinned; the handler crashes, the server still answers", c do
+    test "R6 v1: pane_quarantined is a typed refusal; no paste, queue 0, ping still answers",
+         c do
       pane = pane!(c, "u")
       sib = pane!(c, "us")
       token = Base.url_encode64(:crypto.strong_rand_bytes(32), padding: false)
@@ -412,35 +414,28 @@ defmodule AiPair.NS15G002DaemonRefusalBeforePasteTest do
       assert_pastes(c, sib, ctl_text, 1, "R6 control")
 
       text = "R6 text " <> Integer.to_string(c.n)
-      needles = ["FunctionClauseError", "format_send_result", ":pane_quarantined"]
 
-      # The crash report is awaited with a bound (2_000 ms), not a fixed sleep: a
-      # forwarding logger handler is polled until every needle appears or the bound passes.
-      # with_log only keeps the report off the console.
-      {{result, {waited, log}}, _console} =
+      # D2 (the sixteenth v1 fixture, send.error.pane_quarantined.json) replaces FINDING
+      # H-3, which pinned a crashed handler and a closed socket here. with_log keeps any
+      # handler crash report off the console and lets the row refuse one.
+      {result, log} =
         ExUnit.CaptureLog.with_log(fn ->
-          handler = forward_logs!()
-          r = raw_v1(c, %{"cmd" => "send", "pane_id" => pane, "text" => text})
-          logged = await_log(needles, 2_000)
-          # Logger may already have removed a handler that raised; keep the capture message.
-          _ = :logger.remove_handler(handler)
-          {r, logged}
+          raw_v1(c, %{"cmd" => "send", "pane_id" => pane, "text" => text})
         end)
 
-      # FINDING H-3, pinned as current behaviour and not asserted as correct
-      assert result == {:error, :closed}, "R6 socket; observed " <> inspect(result)
+      assert {:ok, frame} = result, "R6 socket must carry a reply; observed " <> inspect(result)
+      reply = Jason.decode!(frame)
 
-      assert waited == :ok,
-             "R6 crash report within 2_000 ms; observed #{waited}, capture " <> inspect(log)
+      assert reply == %{"ok" => false, "error" => "pane_quarantined", "pane_id" => pane},
+             "R6 reply; observed " <> inspect(reply)
 
-      for needle <- needles do
-        assert log =~ needle, "R6 log must name #{needle}; observed " <> inspect(log)
-      end
+      refute log =~ "FunctionClauseError",
+             "R6 reply must not come from a crashed handler; observed " <> inspect(log)
 
       ping = send_v1_frame!(c, %{"cmd" => "ping"})
       assert ping["ok"] == true, "R6 ping afterwards; observed " <> inspect(ping)
       q = StateMachine.pending_count(sm)
-      assert q == 0, "R6 queue after the closed socket; observed #{q}"
+      assert q == 0, "R6 queue after the refusal; observed #{q}"
       assert pastes(c, pane, text) == 0, "R6 pastes; observed #{pastes(c, pane, text)}"
     end
   end
@@ -713,48 +708,6 @@ defmodule AiPair.NS15G002DaemonRefusalBeforePasteTest do
     assert stopped == :ok, label <> " stop_pane; observed " <> inspect(stopped)
     gone = await_unregistered(pane)
     assert gone == :ok, label <> " unregistered; observed " <> inspect(gone)
-  end
-
-  # A logger handler forwarding each formatted event to the test process, removed on exit.
-  defp forward_logs! do
-    id = :"ns15_g002_log_#{System.unique_integer([:positive])}"
-    :ok = :logger.add_handler(id, __MODULE__, %{config: %{test: self()}})
-    on_exit(fn -> :logger.remove_handler(id) end)
-    id
-  end
-
-  @doc false
-  def log(event, %{config: %{test: test}}) do
-    {Logger.Formatter, formatter} = Logger.Formatter.new()
-    send(test, {:logged, IO.chardata_to_string(Logger.Formatter.format(event, formatter))})
-  end
-
-  # {:ok | :timeout, text}: the forwarded log text, once every needle appears or the bound
-  # passes.
-  defp await_log(needles, timeout) do
-    deadline = System.monotonic_time(:millisecond) + timeout
-    do_await_log(needles, deadline, "")
-  end
-
-  # The deadline is checked before every receive, so a steady stream of forwarded events
-  # cannot hold the wait past its bound.
-  defp do_await_log(needles, deadline, acc) do
-    now = System.monotonic_time(:millisecond)
-
-    cond do
-      Enum.all?(needles, &String.contains?(acc, &1)) ->
-        {:ok, acc}
-
-      now >= deadline ->
-        {:timeout, acc}
-
-      true ->
-        receive do
-          {:logged, text} -> do_await_log(needles, deadline, acc <> text)
-        after
-          max(deadline - now, 0) -> {:timeout, acc}
-        end
-    end
   end
 
   defp id(c, seed),

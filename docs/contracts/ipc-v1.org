@@ -49,6 +49,7 @@ the Orris consumer. This v1 contract does not add fields to the wire.
 | ~send.error.pane_dead.json~              | The registered pane state machine is terminal.                                             |
 | ~send.error.send_timeout.json~           | The pane state machine missed the configured call deadline; ~<detail>~ is diagnostic text. |
 | ~send.error.paste_failed.json~           | Synchronous tmux paste failed; ~<detail>~ is diagnostic text and is not machine-readable.  |
+| ~send.error.pane_quarantined.json~       | A registered, live pane quarantined after boot restoration refused the send before it was pasted or queued; not terminal, not a request error. |
 
 ~queued~ and ~queue_full~ are typed outcomes, not transport failures. Consumers
 must preserve the distinction. Consumer behavior for each outcome after protocol
@@ -100,6 +101,22 @@ remain ~c290afa11a973c7e32528b66c3d5bbd9c008def7~, with unchanged hash
 This is a fixture-only source-snapshot measurement, not a v1 document alignment
 or completed D01 paired adoption; producer qualification against that source and
 coordinated v2 fixture adoption remain pending as recorded in ~ipc-v2.org~.
+
+Re-measured on 2026-09-30 for the S2 producer change under D2, against consumer
+~2aae285f3e8e1f16885b409114492b4574e6603f~: this revision adds
+~send.error.pane_quarantined.json~ to ~test/fixtures/contracts/ipc/v1/~, so the
+v1 fixture tree here is ~0d3a77b039f9a42c16f9355cf29077d42f794dcf~ and
+~CONTRACT_HASH~ reads
+~e809de8ea47339c1d6cffca65cc6dee1dc09d99d8f7b242e00296cc1f7f51a88~. Its row in
+the fixture table above is byte-identical to the row the consumer added at
+~2aae285f~, the revision ~ipc-v2.org~ now vendors. That consumer revision still
+ships the fifteen-file v1 set (tree ~c290afa11a973c7e32528b66c3d5bbd9c008def7~,
+hash ~f1cacf8b53fdd1db37ec968e5476081250804e9c6a4d615215d47d9b77894213~), so the
+two v1 sets differ by exactly the added file until the consumer adopts it. This
+is a statement about the two named revisions, not about either repository's
+current head or about any installed daemon. 2026-09-30 is the authoring and
+measurement date; if the revision lands later and a value above has changed,
+the landing is recorded separately.
 
 The two repositories' v1 DOCUMENTS were written independently and are not
 byte-identical; only the fixtures and their hash are. The v2 contract text is
