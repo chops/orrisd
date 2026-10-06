@@ -423,7 +423,58 @@ defmodule AiPair.PaneRestore.DurableIPCRedTest do
     end
   end
 
+  # ==========================================================================
+  # NS-15.G.002 B1a-1 (scope r3): the registration a durable attach records.
+  # ==========================================================================
+
+  describe "B1a-1 the registration a durable attach records" do
+    test "M1 a fresh durable attach mints one registration; the child and the record hold the same id",
+         c do
+      durable!(c, happy_script(c.root))
+      store!(c.root)
+
+      assert %{"ok" => true, "persisted" => true} = reply = attach!(c)
+      refute Map.has_key?(reply, "registration_id"), "the v1 attach reply does not carry identity"
+      assert [record] = records(c.root)
+      assert record["schema_version"] == "2.0"
+      assert record["registration_id"] =~ ~r/\Areg_[0-9a-f]{32}\z/
+      assert registration(@pane) == {:ok, record["registration_id"]}
+    end
+
+    test "C2 a durable attach over a running child with no registration records null and mints none",
+         c do
+      durable!(c, happy_script(c.root))
+      store!(c.root)
+      {:ok, _pid} = PaneSupervisor.start_pane(@pane, [])
+      assert registration(@pane) == {:ok, nil}
+
+      assert %{"ok" => true, "persisted" => true} = attach!(c)
+      assert [record] = records(c.root)
+      assert Map.fetch(record, "registration_id") == {:ok, nil}
+      assert registration(@pane) == {:ok, nil}, "the running child acquired no id"
+    end
+
+    test "C3 a failed intent write leaves the minted id uncommitted: the child holds it, no record does",
+         c do
+      durable!(c, happy_script(c.root))
+      fs = FaultFs.new()
+      own_agent(fs)
+      FaultFs.inject(fs, :file_sync, 1, {:error, :eio})
+      store!(c.root, fs: fs)
+
+      assert %{"ok" => false, "error" => "durable_write_failed"} = attach!(c)
+      assert {:ok, id} = registration(@pane)
+      assert id =~ ~r/\Areg_[0-9a-f]{32}\z/
+
+      assert records(c.root) == [],
+             "no record holds the id, so no restart can carry it (admission carries only a recorded id)"
+    end
+  end
+
   # --- helpers ---------------------------------------------------------------
+
+  # apply/3: the function is B1a-1 GREEN's (PaneSupervisor.registration/1), absent at the RED base.
+  defp registration(pane), do: apply(PaneSupervisor, :registration, [pane])
 
   defp durable!(c, steps) do
     dir = scripted_tmux!(steps)
