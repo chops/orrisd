@@ -9,8 +9,9 @@ defmodule AiPair.Delivery.NS42C001RequestVersionTest do
 
   W2, the daemon's request grammar, over a real `ReceiptStore`, `AiPair.IPC.Server` and a
   pane registered through `PaneSupervisor.start_pane/2`. `server.ex:383-397` reads
-  `Map.get(params, "protocol_version", 1)` and matches only integer 1 and integer 2. Every
-  other value -- `"2"`, `2.0`, `true`, JSON `null`, `[2]`, and the mismatched integer `3`
+  `Map.get(params, "protocol_version", 1)` and matches only integers 1, 2 and (since NS-15.G.002
+  B1a-2, the version 3 identity core) 3. Every
+  other value -- `"2"`, `2.0`, `true`, JSON `null`, `[2]`, and the mismatched integer `4`
   -- reaches `Delivery.unsupported/1` (`delivery.ex:58-59`): `ok: false`,
   `error: "unsupported_protocol_version"`, no outcome, no capabilities, no admission.
   Controls: the same frames with integer 2 succeed (C1), and a ping with the key absent is
@@ -61,7 +62,7 @@ defmodule AiPair.Delivery.NS42C001RequestVersionTest do
   @config_dir Path.expand("../../../config", __DIR__)
 
   # Values that are not the integer 2 and not a legacy (absent or integer 1) version.
-  @bad_versions ["2", 2.0, true, nil, [2], 3]
+  @bad_versions ["2", 2.0, true, nil, [2], 4]
 
   # Keys the configured OpenTelemetry text-map propagators may add to a frame.
   @trace_keys ~w(traceparent tracestate baggage)
@@ -185,9 +186,9 @@ defmodule AiPair.Delivery.NS42C001RequestVersionTest do
       assert {:ok, %{"protocol_version" => 2}, {:literal, "input"}} =
                Client.parse_versioned("send", tl(Client.argv()))
 
-      # A non-2 flag value is refused by the parser, not coerced (client.ex:283).
+      # A flag value other than 2 or 3 is refused by the parser, not coerced.
       assert Client.parse_versioned("ping", ["--protocol-version", "1"]) == :error
-      assert Client.parse_versioned("ping", ["--protocol-version", "3"]) == :error
+      assert Client.parse_versioned("ping", ["--protocol-version", "4"]) == :error
     end
 
     test "with the configured propagators the trace carrier cannot carry a version" do

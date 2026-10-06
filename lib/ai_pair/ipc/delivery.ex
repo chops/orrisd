@@ -7,6 +7,7 @@ defmodule AiPair.IPC.Delivery do
 
   @max_text_bytes 524_288
   @default_wait_ms 250
+  @v3_only ["cancel", "subscribe", "status"]
 
   def available?(nil), do: false
 
@@ -46,6 +47,12 @@ defmodule AiPair.IPC.Delivery do
         "send" ->
           send_to_pane(params, store)
 
+        # NS-15.G.002 B1a-2 (Orris ipc-v3.org, B1-K): a command that exists only in version 3,
+        # named in a version 2 request, is a typed refusal echoing cmd; it has no side effect.
+        # Every other unknown command keeps the reply below.
+        cmd when cmd in @v3_only ->
+          %{ok: false, error: "unsupported_command", cmd: cmd}
+
         _ ->
           %{ok: false, error: "unknown command"}
       end
@@ -57,6 +64,35 @@ defmodule AiPair.IPC.Delivery do
 
   def unsupported(params),
     do: Map.merge(%{ok: false, error: "unsupported_protocol_version"}, echo(params))
+
+  # --- shared with the version 3 surface (AiPair.IPC.DeliveryV3) ---------------------------
+
+  @doc false
+  # The request checks a send or reconcile makes before touching anything; nil when valid.
+  def request_refusal(params, "send"), do: first_refusal([identity(params), text(params["text"])])
+
+  def request_refusal(params, "reconcile"),
+    do: first_refusal([identity(params), hash(params["payload_hash"])])
+
+  defp first_refusal(checks) do
+    case Enum.find(checks, &(&1 != :ok)) do
+      nil -> nil
+      {:error, reason} -> rejection(reason)
+    end
+  end
+
+  @doc false
+  def reconcile_core(params, store), do: reconcile(params, store)
+
+  @doc false
+  def send_core(params, store), do: send_to_pane(params, store)
+
+  @doc false
+  def echo(params, version) do
+    %{protocol_version: version}
+    |> maybe_echo(:msg_id, params["msg_id"], ReceiptLog.valid_id?(params["msg_id"]))
+    |> maybe_echo(:pane_id, params["pane_id"], ReceiptLog.valid_pane?(params["pane_id"]))
+  end
 
   defp reconcile(params, store) do
     with :ok <- identity(params),
@@ -156,11 +192,7 @@ defmodule AiPair.IPC.Delivery do
   # hyphen) were echoed and then refused `invalid_pane_id` in the same reply. Calling
   # `ReceiptLog.valid_pane?/1` here removes the second grammar rather than correcting it,
   # because a corrected copy is still a copy that can drift.
-  defp echo(params) do
-    %{protocol_version: 2}
-    |> maybe_echo(:msg_id, params["msg_id"], ReceiptLog.valid_id?(params["msg_id"]))
-    |> maybe_echo(:pane_id, params["pane_id"], ReceiptLog.valid_pane?(params["pane_id"]))
-  end
+  defp echo(params), do: echo(params, 2)
 
   defp maybe_echo(map, key, value, true), do: Map.put(map, key, value)
   defp maybe_echo(map, _key, _value, false), do: map

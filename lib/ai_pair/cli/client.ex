@@ -82,7 +82,7 @@ defmodule AiPair.CLI.Client do
   def main([]), do: ping()
   def main(["ping"]), do: ping()
 
-  def main([verb | rest]) when verb in ["ping", "reconcile"],
+  def main([verb | rest]) when verb in ["ping", "reconcile", "status"],
     do: run_versioned(verb, parse_versioned(verb, rest))
 
   def main(["sessions" | rest]) do
@@ -272,6 +272,9 @@ defmodule AiPair.CLI.Client do
 
         "reconcile" ->
           [protocol_version: :integer, msg_id: :string, payload_hash: :string, wait_ms: :integer]
+
+        "status" ->
+          [protocol_version: :integer]
       end
 
     strict = Enum.map(strict, fn {key, type} -> {key, [type, :keep]} end)
@@ -281,8 +284,10 @@ defmodule AiPair.CLI.Client do
     cond do
       verb == "send" and not Keyword.has_key?(opts, :protocol_version) -> :legacy
       invalid != [] or keys != Enum.uniq(keys) -> :error
-      opts[:protocol_version] != 2 -> :error
-      true -> versioned_arguments(verb, positional, opts)
+      # status exists only at version 3 (NS-15.G.002 B1a-2); the others take 2 or 3.
+      verb == "status" and opts[:protocol_version] != 3 -> :error
+      opts[:protocol_version] not in [2, 3] -> :error
+      true -> versioned(versioned_arguments(verb, positional, opts), opts[:protocol_version])
     end
   rescue
     _ -> :error
@@ -329,7 +334,18 @@ defmodule AiPair.CLI.Client do
     end
   end
 
+  defp versioned_arguments("status", [pane], _opts) do
+    if ReceiptLog.valid_pane?(pane),
+      do: {:ok, %{"cmd" => "status", "protocol_version" => 3, "pane_id" => pane}, :none},
+      else: :error
+  end
+
   defp versioned_arguments(_, _, _), do: :error
+
+  defp versioned({:ok, payload, source}, version),
+    do: {:ok, Map.put(payload, "protocol_version", version), source}
+
+  defp versioned(other, _version), do: other
 
   defp cli_error_span(name, msg) do
     Tracer.with_span "cli.#{name}", %{
@@ -516,8 +532,9 @@ defmodule AiPair.CLI.Client do
     end
   end
 
-  defp bind_versioned_reply({:ok, reply}, %{"protocol_version" => 2} = request) do
-    if is_map(reply) and reply["protocol_version"] === 2 and is_boolean(reply["ok"]) and
+  defp bind_versioned_reply({:ok, reply}, %{"protocol_version" => version} = request)
+       when version in [2, 3] do
+    if is_map(reply) and reply["protocol_version"] === version and is_boolean(reply["ok"]) and
          reply_identity_matches?(reply, request) do
       {:ok, reply}
     else
@@ -531,6 +548,9 @@ defmodule AiPair.CLI.Client do
        when command in ["send", "reconcile"] do
     reply["msg_id"] === request["msg_id"] and reply["pane_id"] === request["pane_id"]
   end
+
+  defp reply_identity_matches?(reply, %{"cmd" => "status"} = request),
+    do: reply["pane_id"] === request["pane_id"]
 
   defp reply_identity_matches?(_reply, _request), do: true
 

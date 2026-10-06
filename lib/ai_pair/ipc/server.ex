@@ -392,6 +392,9 @@ defmodule AiPair.IPC.Server do
           Jason.encode!(Delivery.dispatch(params, store))
         end
 
+      3 ->
+        Jason.encode!(AiPair.IPC.DeliveryV3.dispatch(params, v3_context(context)))
+
       _ ->
         Jason.encode!(Delivery.unsupported(params))
     end
@@ -972,6 +975,42 @@ defmodule AiPair.IPC.Server do
     # A stopped or unresponsive adapter means the query could not be made, which
     # is not evidence about the pane either way.
     :exit, _reason -> :error
+  end
+
+  # NS-15.G.002 B1a-2: what the version 3 surface needs from this server. Durable means the mode
+  # is on AND this server captured a boot generation; the committed record and the current pid are
+  # read only when a v3 command asks, under that command's pane fence.
+  defp v3_context(context) do
+    %{
+      receipt_store: context.receipt_store,
+      durable: durable_enabled?() and is_binary(context.boot_generation),
+      committed: &committed_record/1,
+      current_pid: &current_pane_pid/1
+    }
+  end
+
+  defp committed_record(pane) do
+    with inbox when is_binary(inbox) <- configured_binding().project_inbox,
+         {:ok, store} <- durable_store(inbox),
+         {:ok, records} <- AiPair.PaneIntentStore.list(store) do
+      case Enum.filter(records, &(&1["pane_id"] == pane)) do
+        [record] -> {:ok, record}
+        [] -> :none
+      end
+    else
+      _ -> :error
+    end
+  catch
+    :exit, _ -> :error
+  end
+
+  defp current_pane_pid(pane) do
+    tmux = Application.get_env(:ai_pair, :tmux_server, AiPair.Tmux)
+
+    case observe_unique_pane(pane, tmux) do
+      {:ok, observation} -> {:ok, observation.pane_pid}
+      {:error, :observation, _error} -> :error
+    end
   end
 
   # The registration the live child holds (nil if it has none or is gone).

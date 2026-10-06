@@ -103,12 +103,18 @@ at the next boot. The daemon-wide setting is the only gate (~lane:53-61,872-874~
   is the only path that knows ~attach_pane~ and ~detach_pane~
   (~main:217-223~; ~lane:271-282~).
 - A frame with ~protocol_version: 2~ goes to ~AiPair.IPC.Delivery~, which
-  handles only ~ping~, ~reconcile~ and ~send~; anything else answers
-  ~%{ok: false, error: "unknown command"}~ merged with the v2 echo
+  handles only ~ping~, ~reconcile~ and ~send~; ~cancel~, ~subscribe~ and
+  ~status~ (commands that exist only at version 3) answer
+  ~%{ok: false, error: "unsupported_command", cmd: ...}~ (NS-15.G.002 B1a-2,
+  ~ipc-v3.org~), and anything else answers
+  ~%{ok: false, error: "unknown command"}~, each merged with the v2 echo
   (~protocol_version: 2~, plus ~msg_id~ and ~pane_id~ when valid)
   (~delivery.ex:19-52,143-154~). Durable attach and detach are therefore
   **v1-only**: a client that negotiates v2 for delivery still sends attach and
   detach as v1 frames.
+- A frame with ~protocol_version: 3~ goes to ~AiPair.IPC.DeliveryV3~, the
+  version 3 identity core (~ipc-v3.org~); attach and detach stay v1-only there
+  too.
 - Any other ~protocol_version~ answers ~unsupported_protocol_version~
   (~1018ad9b:lib/ai_pair/ipc/delivery.ex:54-55~, historical source snapshot).
 - The historical R04 S9 baseline's v2 ~ping~ advertised
