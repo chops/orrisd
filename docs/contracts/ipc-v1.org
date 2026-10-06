@@ -118,6 +118,15 @@ current head or about any installed daemon. 2026-09-30 is the authoring and
 measurement date; if the revision lands later and a value above has changed,
 the landing is recorded separately.
 
+Re-measured on 2026-10-06 for the NS-15.G.003 S1-C C2 adoption, against consumer
+~bbd416fb516645d8eb563d8f1b8d3f7b7c544bba~, the revision ~ipc-v2.org~ now
+vendors. The consumer adopted the sixteenth v1 file at ~e20c474~. So the v1 fixture
+trees in the two repositories are now identical: ~0d3a77b039f9a42c16f9355cf29077d42f794dcf~
+in both, with ~CONTRACT_HASH~
+~e809de8ea47339c1d6cffca65cc6dee1dc09d99d8f7b242e00296cc1f7f51a88~ in both. This
+adoption adds no v1 fixture: the three new replies are fixtured here for v2
+only.
+
 The two repositories' v1 DOCUMENTS were written independently and are not
 byte-identical; only the fixtures and their hash are. The v2 contract text is
 the other way round: [[./ipc-v2.org][the version 2 contract]] vendors the

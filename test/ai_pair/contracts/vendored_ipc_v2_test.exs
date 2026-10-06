@@ -39,9 +39,9 @@ defmodule AiPair.Contracts.VendoredIPCV2Test do
   @begin_sentinel "# BEGIN VENDORED orris docs/contracts/ipc-v2.org"
   @end_sentinel "# END VENDORED orris docs/contracts/ipc-v2.org"
 
-  @orris_revision "2aae285f3e8e1f16885b409114492b4574e6603f"
-  @orris_sha256 "c6e35db890a44ab8633194f52d947c4c7efa84edb0d3bcacb96fbac188554577"
-  @fixture_hash "56682bc16bd07dadbd8aa43dfda9ef7ecc84674c1a091279f337b1b16c5ad77f"
+  @orris_revision "bbd416fb516645d8eb563d8f1b8d3f7b7c544bba"
+  @orris_sha256 "ff75187917ead27923d2368aa86336a4036208fc9f465c240af6e1201936a5e1"
+  @fixture_hash "f23caceb6ae106238da82f35e469f022f18c24b1296c78c3f96021eb15dc8497"
   @v1_fixture_hash "e809de8ea47339c1d6cffca65cc6dee1dc09d99d8f7b242e00296cc1f7f51a88"
 
   @fixtures ~w(
@@ -60,6 +60,9 @@ defmodule AiPair.Contracts.VendoredIPCV2Test do
     send.error.conflict.json
     send.error.missing_msg_id.json
     send.error.pane_quarantined.json
+    send.error.payload_store_full.json
+    send.error.payload_store_unavailable.json
+    send.error.queue_full.json
     send.queued.json
     send.sent.json
   )
@@ -137,15 +140,16 @@ defmodule AiPair.Contracts.VendoredIPCV2Test do
       # about a document shape that is not the one shipped here.
       assert String.contains?(region, "** Paired producer copy")
       assert String.contains?(region, "- paired_fixture_contract_hash: ~")
-      # The region is the consumer snapshot at @orris_revision, where its own paired set was
-      # still sixteen files. This line moves only at a re-vendoring after the consumer adopts
-      # the seventeenth file; the producer count is the preamble declaration below.
-      assert String.contains?(region, "- paired_fixture_count: ~16~")
+      # The region is the consumer snapshot at @orris_revision, where its own paired set is
+      # seventeen files. This line moves only at a re-vendoring after the consumer adopts the
+      # three store-refusal files (S1-C C3); the producer count is the preamble declaration
+      # below.
+      assert String.contains?(region, "- paired_fixture_count: ~17~")
 
       # The consumer names THIS repository, and the producer names the consumer. Reading
       # the whole file for `- <key>:` would let one stand in for the other; `declared/1`
       # reads the preamble, so these values are the producer declarations and no others.
-      assert declared("paired_fixture_count") == "17"
+      assert declared("paired_fixture_count") == "20"
       assert declared("paired_fixture_contract_hash") == @fixture_hash
       assert declared("source_revision") == @orris_revision
 
@@ -204,8 +208,8 @@ defmodule AiPair.Contracts.VendoredIPCV2Test do
       assert named != [], "the inventory parser found nothing; it, not the document, is wrong"
       assert named == @fixtures
       assert Enum.sort(shipped) == @fixtures
-      assert declared("paired_fixture_count") == "17"
-      assert length(@fixtures) == 17
+      assert declared("paired_fixture_count") == "20"
+      assert length(@fixtures) == 20
     end
   end
 

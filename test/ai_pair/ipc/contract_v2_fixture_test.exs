@@ -15,12 +15,20 @@ defmodule AiPair.IPC.ContractV2FixtureTest do
   @id "snd_" <> String.duplicate("a", 64)
   @hash "sha256:" <> Base.encode16(:crypto.hash(:sha256, @text), case: :lower)
 
-  setup do
+  setup c do
     suffix = System.unique_integer([:positive])
     inbox = Path.join(System.tmp_dir!(), "ipc-fixture-#{suffix}")
     File.mkdir_p!(inbox)
     on_exit(fn -> File.rm_rf!(inbox) end)
-    store = start_supervised!({ReceiptStore, inbox: inbox})
+
+    # payload_store_unavailable: a payload directory that is not 0700 disables the store at boot.
+    if c[:unsafe_payload_dir] do
+      dir = Path.join([inbox, "delivery", "payloads"])
+      File.mkdir_p!(dir)
+      File.chmod!(dir, 0o755)
+    end
+
+    store = start_supervised!({ReceiptStore, [inbox: inbox] ++ Map.get(c, :store_opts, [])})
     pastes = start_supervised!({Agent, fn -> 0 end})
     {:ok, store: store, pane: "%fixture_#{suffix}", inbox: inbox, pastes: pastes}
   end
@@ -95,6 +103,13 @@ defmodule AiPair.IPC.ContractV2FixtureTest do
   for path <- @root |> Path.join("*.json") |> Path.wildcard() |> Enum.sort() do
     name = Path.basename(path)
 
+    # payload_store_full: an object limit of zero refuses the first queued payload.
+    @tag store_opts:
+           if(name == "send.error.payload_store_full.json",
+             do: [payload_limit_objects: 0],
+             else: []
+           )
+    @tag unsafe_payload_dir: name == "send.error.payload_store_unavailable.json"
     test "runtime producer matches #{name}", c do
       name = unquote(name)
       request = prepare(name, c)
@@ -143,6 +158,22 @@ defmodule AiPair.IPC.ContractV2FixtureTest do
         request
 
       "error.pane_quarantined.json" ->
+        request
+
+      # The busy pane's pending queue is filled to its cap (32) by other receipted sends, so
+      # this one is refused queue_full.
+      "error.queue_full.json" ->
+        for n <- 1..32 do
+          id = "snd_" <> Base.encode16(:crypto.hash(:sha256, "queue fill #{n}"), case: :lower)
+          fill = %{request | "msg_id" => id, "text" => "queue fill #{n}"}
+          reply = fill |> Delivery.dispatch(c.store) |> Jason.encode!() |> Jason.decode!()
+          assert reply["status"] == "queued", "fill #{n}: #{inspect(reply)}"
+        end
+
+        request
+
+      # The store was started with a zero object limit or an unsafe directory (tags above).
+      name when name in ["error.payload_store_full.json", "error.payload_store_unavailable.json"] ->
         request
 
       "duplicate." <> status ->
