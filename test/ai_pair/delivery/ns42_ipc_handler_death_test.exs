@@ -18,7 +18,8 @@ defmodule AiPair.Delivery.NS42IPCHandlerDeathTest do
 
   The row kills it at the latest moment it exists instead: after the receipt is admitted
   and its `queued` line is written, and before the handler has replied. The store's
-  `sync` of that `queued` line is held by a `FaultFs` hook (no product code is changed).
+  `sync` of that `queued` line is held by a `FaultFs` hook (no product code is changed);
+  since NS-15.G.003 S1 it is the store's third sync, after the payload object's.
   The hook runs before `SystemFs.sync`, so at the kill the pending line is written and
   synced, while the queued line is written but NOT yet synced, hence not yet durable. The
   handler is still waiting on the pane for its answer. It is killed there, the hook is
@@ -62,15 +63,16 @@ defmodule AiPair.Delivery.NS42IPCHandlerDeathTest do
     fs = FaultFs.new()
 
     # The store's first sync is the admission's pending line; its second is the queued
-    # line. `ReceiptLog.open/2` issues no `sync` (it uses `dir_sync`), so the numbering
-    # starts at admission. The hook runs BEFORE `SystemFs.sync`: it holds the store after
-    # the queued bytes are written and before they are synced, until the test releases it.
-    # The 5 s bound only matters if the test dies first; it is never reached in a passing
-    # run.
+    # send's payload object (NS-15.G.003 S1: the object is durable before the queued
+    # receipt); its third is the queued line. `ReceiptLog.open/2` issues no `sync` (it uses
+    # `dir_sync`), so the numbering starts at admission. The hook runs BEFORE
+    # `SystemFs.sync`: it holds the store after the queued bytes are written and before they
+    # are synced, until the test releases it. The 5 s bound only matters if the test dies
+    # first; it is never reached in a passing run.
     FaultFs.inject(
       fs,
       :sync,
-      2,
+      3,
       {:hook,
        fn ->
          send(test, {:queued_sync_held, self()})
@@ -123,9 +125,10 @@ defmodule AiPair.Delivery.NS42IPCHandlerDeathTest do
            ] = decode_lines(held_bytes)
 
     assert id == ctx.id
-    assert FaultFs.count(fs, :write) == 2
-    # The second sync is counted when it is entered; it is the one being held.
-    assert FaultFs.count(fs, :sync) == 2
+    # Writes: the pending line, the payload object (S1), the queued line.
+    assert FaultFs.count(fs, :write) == 3
+    # The third sync is counted when it is entered; it is the one being held.
+    assert FaultFs.count(fs, :sync) == 3
 
     # 2. Exactly one new child of the connection supervisor, started by this server.
     assert [handler] = Task.Supervisor.children(@connections) -- before,
@@ -163,7 +166,7 @@ defmodule AiPair.Delivery.NS42IPCHandlerDeathTest do
     assert File.read!(path) == held_bytes,
            "the connection handler is not the operation owner; its death writes nothing"
 
-    assert FaultFs.count(fs, :write) == 2
+    assert FaultFs.count(fs, :write) == 3
 
     assert {:ok, %{outcome: "queued", status: "queued", delivery_attempt: 1}} =
              reconcile(store, ctx)
