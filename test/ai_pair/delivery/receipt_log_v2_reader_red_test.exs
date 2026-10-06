@@ -17,6 +17,9 @@ defmodule AiPair.Delivery.ReceiptLogV2ReaderRedTest do
     * R0.6 an S0a store boot finalizes v2 pending, queued and paste_started as `ambiguous`
       by appending VERSION 1 records after the byte-identical original log (ReceiptStore
       boot, not ReceiptLog replay).
+    * R0.9 (design r3) within one attempt only nonterminal -> ambiguous may change version;
+      every other same-attempt cross-version edge, including laundering chains, is
+      `receipt_log_corrupt` at the first cross-version line, file bytes unchanged.
     * R0.7 every status an S0a store appends through its API (pending, queued, delivered,
       not_delivered, retry pending) is a version 1 record, after loading v2 history. The
       boot-time `ambiguous` append is R0.6.
@@ -85,7 +88,10 @@ defmodule AiPair.Delivery.ReceiptLogV2ReaderRedTest do
      {1, "ambiguous", 1, 3}},
     {"v2 not_delivered -> v1 pending attempt 2",
      [{2, "a", "pending", 1}, {2, "a", "not_delivered", 1}, {1, "a", "pending", 2}],
-     {1, "pending", 2, 3}}
+     {1, "pending", 2, 3}},
+    {"v2 paste_started -> v2 delivered",
+     [{2, "a", "pending", 1}, {2, "a", "paste_started", 1}, {2, "a", "delivered", 1}],
+     {2, "delivered", 1, 3}}
   ]
 
   for {label, rows, final} <- allowed do
@@ -110,6 +116,43 @@ defmodule AiPair.Delivery.ReceiptLogV2ReaderRedTest do
 
   for {label, rows, seq} <- forbidden do
     test "R0.4 forbidden edge is corrupt at its line, bytes unchanged: #{label}", %{inbox: dir} do
+      rows = unquote(Macro.escape(rows))
+      write_log!(dir, chain(rows))
+      assert_refuses!(dir, {:receipt_log_corrupt, unquote(seq)})
+    end
+  end
+
+  # Within one attempt only the boot-finalization edges (nonterminal -> ambiguous) may change
+  # version. Every other cross-version edge would let one writer's attempt acquire the other
+  # writer's records (e.g. a v1 attempt a v2 queued record that looks marker-attested), so it
+  # is corrupt at the first cross-version line. {label, rows, corrupt seq}
+  laundering = [
+    {"v1 pending -> v2 queued", [{1, "a", "pending", 1}, {2, "a", "queued", 1}], 2},
+    {"v1 pending -> v2 queued -> v2 paste_started",
+     [{1, "a", "pending", 1}, {2, "a", "queued", 1}, {2, "a", "paste_started", 1}], 2},
+    {"v1 pending -> v2 delivered", [{1, "a", "pending", 1}, {2, "a", "delivered", 1}], 2},
+    {"v1 pending -> v2 not_delivered", [{1, "a", "pending", 1}, {2, "a", "not_delivered", 1}], 2},
+    {"v1 queued -> v2 delivered",
+     [{1, "a", "pending", 1}, {1, "a", "queued", 1}, {2, "a", "delivered", 1}], 3},
+    {"v1 queued -> v2 not_delivered",
+     [{1, "a", "pending", 1}, {1, "a", "queued", 1}, {2, "a", "not_delivered", 1}], 3},
+    {"v2 pending -> v1 queued", [{2, "a", "pending", 1}, {1, "a", "queued", 1}], 2},
+    {"v2 pending -> v1 queued -> v1 delivered",
+     [{2, "a", "pending", 1}, {1, "a", "queued", 1}, {1, "a", "delivered", 1}], 2},
+    {"v2 pending -> v1 delivered", [{2, "a", "pending", 1}, {1, "a", "delivered", 1}], 2},
+    {"v2 pending -> v1 not_delivered", [{2, "a", "pending", 1}, {1, "a", "not_delivered", 1}], 2},
+    {"v2 queued -> v1 delivered",
+     [{2, "a", "pending", 1}, {2, "a", "queued", 1}, {1, "a", "delivered", 1}], 3},
+    {"v2 queued -> v1 not_delivered",
+     [{2, "a", "pending", 1}, {2, "a", "queued", 1}, {1, "a", "not_delivered", 1}], 3},
+    {"v2 paste_started -> v1 delivered",
+     [{2, "a", "pending", 1}, {2, "a", "paste_started", 1}, {1, "a", "delivered", 1}], 3}
+  ]
+
+  for {label, rows, seq} <- laundering do
+    test "R0.9 same-attempt cross-version edge is corrupt, bytes unchanged: #{label}", %{
+      inbox: dir
+    } do
       rows = unquote(Macro.escape(rows))
       write_log!(dir, chain(rows))
       assert_refuses!(dir, {:receipt_log_corrupt, unquote(seq)})
