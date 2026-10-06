@@ -19,8 +19,10 @@ defmodule AiPair.Delivery.ReceiptStore do
   alias AiPair.Delivery.{Lineage, Payload, PayloadStore, ReceiptLog, SystemFs}
   alias AiPair.PaneRestore.Coordinator
 
-  @terminal ~w(delivered not_delivered ambiguous)
-  @statuses ["pending", "queued" | @terminal]
+  # `cancelled` (receipt schema 3, RS3) is terminal when read, but this build never writes it:
+  # the transition API below admits only @statuses, which excludes it (B2 owns its emission).
+  @terminal ~w(delivered not_delivered ambiguous cancelled)
+  @statuses ~w(pending queued delivered not_delivered ambiguous)
   @max_wait_ms 5_000
 
   @type receipt :: %{
@@ -179,11 +181,12 @@ defmodule AiPair.Delivery.ReceiptStore do
     end)
   end
 
-  # (b) and (L): the attempt's latest record is a v2 queued record of an attested epoch. The
-  # range consistency of every attested epoch's records was checked by Lineage.load/3; (c)
-  # and (d), the exact verified object, are checked by the caller.
+  # (b) and (L): the attempt's latest record is a v2 or v3 queued record of an attested epoch
+  # (v3, RS3, also carries the attempt's registration pair into the restored view). The range
+  # consistency of every attested epoch's records was checked by Lineage.load/3; (c) and (d),
+  # the exact verified object, are checked by the caller.
   defp restorable?(record, ranges) do
-    record["status"] == "queued" and record["schema_version"] == 2 and
+    record["status"] == "queued" and record["schema_version"] in [2, 3] and
       Map.has_key?(ranges, record["daemon_epoch"])
   end
 
@@ -201,7 +204,8 @@ defmodule AiPair.Delivery.ReceiptStore do
   defp boot_payloads(stop, _opts), do: stop
 
   # Design r6 step 6: each restored attempt gets a token minted in this epoch and an unheld
-  # registry entry under its pane, in receipt seq order.
+  # registry entry under its pane, in receipt seq order. The entry carries the attempt's
+  # registration pair (RS3; null for a version 2 attempt) through the registry and the handover.
   defp build_registry(state) do
     Enum.reduce(state.restored, state, fn view, acc ->
       token = make_ref()
@@ -210,6 +214,8 @@ defmodule AiPair.Delivery.ReceiptStore do
         msg_id: view.message_id,
         attempt: view.delivery_attempt,
         payload_hash: view.payload_hash,
+        registration_id: view.registration_id,
+        generation: view.generation,
         token: token,
         holder: nil
       }
@@ -258,7 +264,11 @@ defmodule AiPair.Delivery.ReceiptStore do
   def handle_call(:restore_registry, _from, state) do
     registry =
       Map.new(state.restore, fn {pane, entries} ->
-        {pane, Enum.map(entries, &Map.take(&1, [:msg_id, :attempt, :payload_hash, :holder]))}
+        {pane,
+         Enum.map(
+           entries,
+           &Map.take(&1, [:msg_id, :attempt, :payload_hash, :registration_id, :generation, :holder])
+         )}
       end)
 
     {:reply, registry, state}
@@ -500,6 +510,8 @@ defmodule AiPair.Delivery.ReceiptStore do
         msg_id: entry.msg_id,
         attempt: entry.attempt,
         payload_hash: entry.payload_hash,
+        registration_id: entry.registration_id,
+        generation: entry.generation,
         token: entry.token,
         object: PayloadStore.object_path(state.payload, entry),
         owner_uid: state.payload.uid
@@ -741,6 +753,11 @@ defmodule AiPair.Delivery.ReceiptStore do
     case current(state, id) do
       {:ok, %{status: "paste_started"} = view} ->
         {:ok, %{view | status: Map.get(state.pre_paste, id, "pending")}}
+
+      # RS3: a stored cancelled reads as ambiguous on every reply this build serves (the v2
+      # duplicate and reconcile shapes); a v2 client already refuses and never resends it.
+      {:ok, %{status: "cancelled"} = view} ->
+        {:ok, %{view | status: "ambiguous"}}
 
       other ->
         other

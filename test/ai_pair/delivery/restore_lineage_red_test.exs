@@ -109,7 +109,9 @@ defmodule AiPair.Delivery.RestoreLineageRedTest do
        c do
     text = "p4 bytes"
     {msg, ^text} = queued_under_real_store!(c.inbox, "p4", text)
-    append_receipts!(c.inbox, ep(), [{msg, text, "paste_started", 1, 2}])
+    # RS3: the real store wrote this attempt's queued record as version 3, and a version 2
+    # line after it within the same attempt is corruption, so the marker is version 3.
+    append_receipts!(c.inbox, ep(), [{msg, text, "paste_started", 1, 3}])
 
     store = start_store!(c.inbox, SystemFs.new())
     assert last_status(c.inbox, msg) == {"ambiguous", 1}
@@ -136,11 +138,13 @@ defmodule AiPair.Delivery.RestoreLineageRedTest do
     stop(store)
   end
 
-  test "P6 control: a rollback boot finalizes the queued attempt; the next boot restores nothing",
+  test "P6 control: a boot that finalized the queued attempt ambiguous leaves the next boot nothing to restore",
        c do
     text = "p6 bytes"
     {msg, ^text} = queued_under_real_store!(c.inbox, "p6", text)
-    append_receipts!(c.inbox, ep(), [{msg, text, "ambiguous", 1, 2}])
+    # RS3: the queued record is version 3 and no version 2 line may follow it within the attempt
+    # (a pre-RS3 build cannot open this log at all), so the finalizing line is version 3.
+    append_receipts!(c.inbox, ep(), [{msg, text, "ambiguous", 1, 3}])
 
     store = start_store!(c.inbox, SystemFs.new())
     assert last_status(c.inbox, msg) == {"ambiguous", 1}
@@ -560,19 +564,24 @@ defmodule AiPair.Delivery.RestoreLineageRedTest do
 
     {lines, _} =
       Enum.map_reduce(records, {seq, prev}, fn {msg, text, status, attempt, version}, {s, p} ->
-        line =
-          Jason.encode!(%{
-            "schema" => "ai-pair/delivery-receipt",
-            "schema_version" => version,
-            "seq" => s + 1,
-            "prev_line_sha256" => p,
-            "daemon_epoch" => epoch,
-            "message_id" => msg,
-            "pane_id" => @pane,
-            "payload_hash" => hash(text),
-            "status" => status,
-            "delivery_attempt" => attempt
-          }) <> "\n"
+        record =
+          with_pair(
+            %{
+              "schema" => "ai-pair/delivery-receipt",
+              "schema_version" => version,
+              "seq" => s + 1,
+              "prev_line_sha256" => p,
+              "daemon_epoch" => epoch,
+              "message_id" => msg,
+              "pane_id" => @pane,
+              "payload_hash" => hash(text),
+              "status" => status,
+              "delivery_attempt" => attempt
+            },
+            version
+          )
+
+        line = Jason.encode!(record) <> "\n"
 
         {line, {s + 1, digest(line)}}
       end)
@@ -580,6 +589,10 @@ defmodule AiPair.Delivery.RestoreLineageRedTest do
     File.write!(receipts_path(inbox), Enum.join(lines), [:append])
     File.chmod!(receipts_path(inbox), 0o600)
   end
+
+  # RS3: a version 3 record carries the attempt's registration pair (null here).
+  defp with_pair(record, 3), do: Map.merge(record, %{"registration_id" => nil, "generation" => nil})
+  defp with_pair(record, _version), do: record
 
   defp chain_state(inbox) do
     case File.read(receipts_path(inbox)) do

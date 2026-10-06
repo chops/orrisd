@@ -196,13 +196,14 @@ defmodule AiPair.Delivery.ReceiptLogV2ReaderRedTest do
 
     appended = Enum.drop(log_lines(dir), 5)
 
+    # RS3 re-point: the store writes version 3, so the finalizing records are version 3.
     assert Enum.map(appended, &{&1["message_id"], &1["status"], &1["schema_version"]}) ==
-             [{id("a"), "ambiguous", 2}, {id("b"), "ambiguous", 2}, {id("c"), "ambiguous", 2}]
+             [{id("a"), "ambiguous", 3}, {id("b"), "ambiguous", 3}, {id("c"), "ambiguous", 3}]
 
     assert_opens!(dir, 8, %{
-      "a" => {2, "ambiguous", 1, 6},
-      "b" => {2, "ambiguous", 1, 7},
-      "c" => {2, "ambiguous", 1, 8}
+      "a" => {3, "ambiguous", 1, 6},
+      "b" => {3, "ambiguous", 1, 7},
+      "c" => {3, "ambiguous", 1, 8}
     })
   end
 
@@ -210,7 +211,7 @@ defmodule AiPair.Delivery.ReceiptLogV2ReaderRedTest do
   # and begin_paste appends a durable paste_started marker before the delivered record (S0a
   # appended version 1 records and no marker). The byte-identical prefix and the exact
   # sequence are kept; the reopened seq grows by the marker.
-  test "R0.7 every status the store appends after loading v2 history is version 2, with the marker",
+  test "R0.7 every status the store appends after loading v2 history is the current write version, with the marker",
        %{
          inbox: dir
        } do
@@ -245,13 +246,14 @@ defmodule AiPair.Delivery.ReceiptLogV2ReaderRedTest do
     assert Enum.map(appended, fn r ->
              {r["message_id"], r["status"], r["delivery_attempt"], r["schema_version"]}
            end) == [
-             {id("x"), "pending", 1, 2},
-             {id("x"), "queued", 1, 2},
-             {id("x"), "paste_started", 1, 2},
-             {id("x"), "delivered", 1, 2},
-             {id("y"), "pending", 1, 2},
-             {id("y"), "not_delivered", 1, 2},
-             {id("y"), "pending", 2, 2}
+             # RS3 re-point: every record this build appends is version 3.
+             {id("x"), "pending", 1, 3},
+             {id("x"), "queued", 1, 3},
+             {id("x"), "paste_started", 1, 3},
+             {id("x"), "delivered", 1, 3},
+             {id("y"), "pending", 1, 3},
+             {id("y"), "not_delivered", 1, 3},
+             {id("y"), "pending", 2, 3}
            ]
 
     assert {:ok, log} = ReceiptLog.open(SystemFs.new(), dir)

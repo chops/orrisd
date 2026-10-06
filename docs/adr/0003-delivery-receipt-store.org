@@ -50,7 +50,7 @@ service begins. A complete unterminated tail that fails that validation, lacks a
 schema key, or decodes to a non-object is corruption and is refused with the file
 unchanged. A complete invalid last record is corruption, not a removable tail.
 
-This build reads ~schema_version~ 1 and 2 and writes only 2. Version 2 has the same
+The S0b build read ~schema_version~ 1 and 2 and wrote only 2 (RS3, below, now writes 3). Version 2 has the same
 keys and adds the status ~paste_started~. ~begin_paste~ appends and fsyncs a
 ~paste_started~ record before it authorizes the paste, so no receipted paste starts
 without that durable marker; if the marker cannot be written the store is poisoned,
@@ -68,11 +68,26 @@ other writer generation would trust. A new attempt (~not_delivered~ then ~pendin
 with the next attempt number) may change version. ~paste_started~ in a version 1
 line is corruption.
 
+Receipt schema 3 (RS3, NS-15.G.002 B1b). This build reads ~schema_version~ 1, 2 and 3
+and writes only 3. A version 3 line has the version 2 keys plus ~registration_id~ and
+~generation~, both null or both set (~reg_~ plus 32 lowercase hex; a decimal string): the
+registration the pane served when the attempt was admitted. Every line of one attempt
+repeats its pair (a pre-3 line reads as null); a new attempt after ~not_delivered~ may
+carry a new one. A version 2 attempt continues under version 3 by the version 2 edges;
+a version 3 attempt never continues as version 2, boot finalization included. Version 3
+adds the terminal status ~cancelled~, legal only after ~queued~: nothing follows it in that
+attempt and no new attempt opens. This build reads ~cancelled~ but never writes it; a
+stored one reads as ~ambiguous~ in every reply and is never restored. A restored queued
+attempt carries its pair into the restore registry and the entry handed to the pane. This
+build writes every pair as null; filling it is B1b's. Rollback floor: a build before RS3 refuses any version 3 line as
+incompatible and leaves the log unchanged, so a rollback after the first RS3 write fails
+closed.
+
 A line with another ~schema~ or an unsupported ~schema_version~, newline-terminated
 or not, is refused with
 ~{:receipt_log_incompatible, %{seq: n, found: ..., expected: ...}}~ naming the line,
 the found pair and the supported set
-~%{schema: "ai-pair/delivery-receipt", schema_versions: [1, 2]}~, and the file is
+~%{schema: "ai-pair/delivery-receipt", schema_versions: [1, 2, 3]}~, and the file is
 left unchanged. The classification precedes chain, key-set and history validation, and
 a present but unsupported version type is incompatible, not corrupt. Found values
 are echoed only when bounded: a schema name matching
@@ -96,7 +111,7 @@ or ~paste_started~ attempt durably ambiguous. Restart likewise appends ambiguity
 accepting new calls, for every unresolved prior-epoch pending or ~paste_started~ attempt and
 for every queued attempt it cannot restore. A queued attempt stays queued across a restart
 only when its epoch is attested in ~delivery/lineage.jsonl~ and its record lies in that
-epoch's range, its latest record is a version 2 queued record with no ~paste_started~
+epoch's range, its latest record is a version 2 or 3 queued record with no ~paste_started~
 recorded for it, and its exact payload object passes the verified read. A corrupt or
 inconsistent lineage file refuses the store unchanged (NS-15.G.003 S2).
 

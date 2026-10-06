@@ -5,13 +5,19 @@ defmodule AiPair.Delivery.ReceiptLog do
 
   @anchor "sha256:" <> Base.encode16(:crypto.hash(:sha256, ""), case: :lower)
   @schema "ai-pair/delivery-receipt"
-  # This build reads versions 1 and 2 and writes only version 2 (NS-15.G.003 S0b). Version 2
-  # adds `paste_started`, which the store appends durably before any paste. Version 1 stays
-  # readable for logs written before S0b; an S0a build is the rollback floor that reads both.
-  @schema_versions [1, 2]
+  # This build reads versions 1, 2 and 3 and writes only version 3 (RS3, NS-15.G.002 B1b).
+  # Version 2 (S0b) added `paste_started`, which the store appends durably before any paste.
+  # Version 3 adds the attempt's registration pair (`registration_id`, `generation`; both null
+  # or both set, the same on every line of one attempt) and the terminal status `cancelled`,
+  # which only follows `queued` and which this build READS but never writes (B2 owns its
+  # emission). A pre-RS3 build refuses a version 3 line as receipt_log_incompatible: that
+  # refusal, unchanged and fail-closed, is the rollback floor.
+  @schema_versions [1, 2, 3]
   @statuses ~w(pending queued delivered not_delivered ambiguous)
   @v2_statuses @statuses ++ ~w(paste_started)
+  @v3_statuses @v2_statuses ++ ~w(cancelled)
   @fields ~w(schema schema_version seq prev_line_sha256 daemon_epoch message_id pane_id payload_hash status delivery_attempt)
+  @v3_fields @fields ++ ~w(registration_id generation)
   # runs: contiguous same-epoch seq runs, newest first, as {daemon_epoch, first_seq, last_seq}
   # (S2 lineage range checks).
   defstruct [:fs, :fd, :path, seq: 0, previous: @anchor, entries: %{}, runs: []]
@@ -43,7 +49,7 @@ defmodule AiPair.Delivery.ReceiptLog do
   def append(log, view, epoch) do
     record = %{
       "schema" => "ai-pair/delivery-receipt",
-      "schema_version" => 2,
+      "schema_version" => 3,
       "seq" => log.seq + 1,
       "prev_line_sha256" => log.previous,
       "daemon_epoch" => epoch,
@@ -51,7 +57,10 @@ defmodule AiPair.Delivery.ReceiptLog do
       "pane_id" => view.pane_id,
       "payload_hash" => view.payload_hash,
       "status" => view.status,
-      "delivery_attempt" => view.delivery_attempt
+      "delivery_attempt" => view.delivery_attempt,
+      # The attempt's admitted pair, carried by its view; RS3 admits with none (null/null).
+      "registration_id" => Map.get(view, :registration_id),
+      "generation" => Map.get(view, :generation)
     }
 
     line = Jason.encode!(record) <> "\n"
@@ -69,7 +78,8 @@ defmodule AiPair.Delivery.ReceiptLog do
   def valid_pane?(value), do: matches?(value, ~r/\A%[a-zA-Z0-9_]{1,128}\z/)
 
   def transition?("pending", next), do: next in ~w(queued delivered not_delivered ambiguous)
-  def transition?("queued", next), do: next in ~w(delivered not_delivered ambiguous)
+  # `cancelled` is legal only from `queued`, and is terminal (no clause below leaves it).
+  def transition?("queued", next), do: next in ~w(delivered not_delivered ambiguous cancelled)
   def transition?("paste_started", next), do: next in ~w(delivered ambiguous)
   def transition?(_, _), do: false
 
@@ -79,7 +89,10 @@ defmodule AiPair.Delivery.ReceiptLog do
       pane_id: record["pane_id"],
       payload_hash: record["payload_hash"],
       status: record["status"],
-      delivery_attempt: record["delivery_attempt"]
+      delivery_attempt: record["delivery_attempt"],
+      # absent before version 3: read as null (no registration)
+      registration_id: record["registration_id"],
+      generation: record["generation"]
     }
   end
 
@@ -186,9 +199,9 @@ defmodule AiPair.Delivery.ReceiptLog do
   defp corrupt(seq), do: {:error, {:receipt_log_corrupt, seq}}
 
   defp valid_record?(r, log) do
-    Enum.sort(Map.keys(r)) == Enum.sort(@fields) and
-      r["schema"] == "ai-pair/delivery-receipt" and is_integer(r["schema_version"]) and
-      r["schema_version"] in @schema_versions and
+    is_integer(r["schema_version"]) and r["schema_version"] in @schema_versions and
+      Enum.sort(Map.keys(r)) == Enum.sort(fields(r["schema_version"])) and
+      r["schema"] == "ai-pair/delivery-receipt" and pair?(r) and
       r["seq"] === log.seq + 1 and r["prev_line_sha256"] == log.previous and
       matches?(r["daemon_epoch"], ~r/\Aep_[0-9a-f]{24}\z/) and
       valid_id?(r["message_id"]) and valid_hash?(r["payload_hash"]) and
@@ -196,16 +209,33 @@ defmodule AiPair.Delivery.ReceiptLog do
       is_integer(r["delivery_attempt"]) and history_valid?(log.entries[r["message_id"]], r)
   end
 
+  defp statuses(3), do: @v3_statuses
   defp statuses(2), do: @v2_statuses
   defp statuses(_), do: @statuses
 
+  defp fields(3), do: @v3_fields
+  defp fields(_), do: @fields
+
+  # A version 3 pair is both null or both set (reg_ + 32 lowercase hex, a decimal string).
+  defp pair?(%{"schema_version" => 3, "registration_id" => nil, "generation" => nil}), do: true
+
+  defp pair?(%{"schema_version" => 3, "registration_id" => id, "generation" => gen}),
+    do: matches?(id, ~r/\Areg_[0-9a-f]{32}\z/) and matches?(gen, ~r/\A[0-9]+\z/)
+
+  defp pair?(_earlier_version), do: true
+
   defp history_valid?(nil, r), do: r["status"] == "pending" and r["delivery_attempt"] == 1
 
+  # Within one attempt every line repeats the attempt's pair (a line before version 3 reads as
+  # null); a new attempt, after not_delivered, is a new admission and may carry a new pair.
   defp history_valid?(old, r) do
     same_identity = old["pane_id"] == r["pane_id"] and old["payload_hash"] == r["payload_hash"]
 
+    same_pair =
+      old["registration_id"] == r["registration_id"] and old["generation"] == r["generation"]
+
     same_identity and
-      ((r["delivery_attempt"] == old["delivery_attempt"] and replayable?(old, r)) or
+      ((r["delivery_attempt"] == old["delivery_attempt"] and same_pair and replayable?(old, r)) or
          (old["status"] == "not_delivered" and r["status"] == "pending" and
             r["delivery_attempt"] == old["delivery_attempt"] + 1))
   end
@@ -217,6 +247,16 @@ defmodule AiPair.Delivery.ReceiptLog do
   # queued and is followed only by `delivered` or `ambiguous`, never `not_delivered`.
   defp replayable?(%{"schema_version" => v} = old, %{"schema_version" => v} = r),
     do: same_version?(old["status"], r["status"])
+
+  # Version 3 is a superset of version 2: an attempt begun under version 2 (a restored queued
+  # one, say) continues under the version 3 writer by the same edges. Every other
+  # cross-version edge keeps the boot-finalization rule.
+  defp replayable?(%{"schema_version" => 2} = old, %{"schema_version" => 3} = r),
+    do: same_version?(old["status"], r["status"])
+
+  # No edge leads from version 3 back to an earlier version inside one attempt, boot
+  # finalization included: an earlier writer cannot read a version 3 log.
+  defp replayable?(%{"schema_version" => 3}, %{"schema_version" => v}) when v < 3, do: false
 
   defp replayable?(old, r),
     do: r["status"] == "ambiguous" and old["status"] in ["pending", "queued", "paste_started"]

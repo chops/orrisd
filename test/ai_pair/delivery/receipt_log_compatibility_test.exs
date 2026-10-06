@@ -16,7 +16,8 @@ defmodule AiPair.Delivery.ReceiptLogCompatibilityTest do
 
   NS-15.G.003 S0a (the reader accepts schema versions 1 and 2) moved every unsupported
   future-version example from `2` to `3` and the refusal's `expected` to the version set
-  `schema_versions: [1, 2]`.
+  `schema_versions: [1, 2]`. RS3 (the reader accepts 1, 2 and 3) moved them again, from
+  `3` to `4`, and the `expected` set to `schema_versions: [1, 2, 3]`.
 
   Rows A1-A7, AC3, B1-B3 and B5 are expected to fail before the product change. AC1,
   AC2 (an in-file mirror of the existing decode-error fragment repair) and B4 are
@@ -49,7 +50,7 @@ defmodule AiPair.Delivery.ReceiptLogCompatibilityTest do
          %{inbox: dir} do
       first = first_line()
       control = seq2(first)
-      future = %{control | "schema_version" => 3}
+      future = %{control | "schema_version" => 4}
       tail = Jason.encode!(future)
       write_log!(dir, first <> tail)
 
@@ -57,7 +58,7 @@ defmodule AiPair.Delivery.ReceiptLogCompatibilityTest do
       assert {:ok, %{}} = Jason.decode(tail)
       assert changed_keys(control, future) == ["schema_version"]
 
-      reason = incompatible(2, @schema, 3)
+      reason = incompatible(2, @schema, 4)
       assert_fa_open_refuses!(dir, reason)
       assert_store_refuses!(dir, reason)
       assert_no_truncate!(dir, reason)
@@ -65,12 +66,12 @@ defmodule AiPair.Delivery.ReceiptLogCompatibilityTest do
 
     test "A2 single-line log, future schema_version, no newline anywhere, refuses at seq 1",
          %{inbox: dir} do
-      future = %{record(1, @anchor, "only") | "schema_version" => 3}
+      future = %{record(1, @anchor, "only") | "schema_version" => 4}
       write_log!(dir, Jason.encode!(future))
 
       refute String.contains?(File.read!(log_path(dir)), "\n")
 
-      reason = incompatible(1, @schema, 3)
+      reason = incompatible(1, @schema, 4)
       assert_fa_open_refuses!(dir, reason)
       assert_no_truncate!(dir, reason)
     end
@@ -245,18 +246,18 @@ defmodule AiPair.Delivery.ReceiptLogCompatibilityTest do
     test "AC3 the A1 future line WITH its newline refuses with the same reason",
          %{inbox: dir} do
       first = first_line()
-      future = %{seq2(first) | "schema_version" => 3}
+      future = %{seq2(first) | "schema_version" => 4}
       write_log!(dir, first <> encode_line(future))
 
       assert String.ends_with?(File.read!(log_path(dir)), "\n")
 
-      assert_open_refuses!(dir, incompatible(2, @schema, 3))
+      assert_open_refuses!(dir, incompatible(2, @schema, 4))
     end
   end
 
   describe "F-B: a version mismatch is reported as incompatible" do
     b1_rows = [
-      {"schema_version 3", "schema_version", 3, @schema, 3},
+      {"schema_version 4", "schema_version", 4, @schema, 4},
       {"schema_version string", "schema_version", "1", @schema, {:unsupported_type, :string}},
       {"schema_version float", "schema_version", 1.0, @schema, {:unsupported_type, :float}},
       {"schema_version null", "schema_version", nil, @schema, {:unsupported_type, :null}},
@@ -284,9 +285,9 @@ defmodule AiPair.Delivery.ReceiptLogCompatibilityTest do
 
     test "B2 terminated seq-1 future line gives the incompatible term at seq 1",
          %{inbox: dir} do
-      write_log!(dir, encode_line(%{record(1, @anchor, "only") | "schema_version" => 3}))
+      write_log!(dir, encode_line(%{record(1, @anchor, "only") | "schema_version" => 4}))
 
-      assert_open_refuses!(dir, incompatible(1, @schema, 3))
+      assert_open_refuses!(dir, incompatible(1, @schema, 4))
     end
 
     test "B3a future version with a wrong chain link is incompatible, not corrupt",
@@ -296,11 +297,11 @@ defmodule AiPair.Delivery.ReceiptLogCompatibilityTest do
       assert wrong != digest(first)
 
       line =
-        encode_line(%{seq2(first) | "schema_version" => 3, "prev_line_sha256" => wrong})
+        encode_line(%{seq2(first) | "schema_version" => 4, "prev_line_sha256" => wrong})
 
       write_log!(dir, first <> line)
 
-      assert_open_refuses!(dir, incompatible(2, @schema, 3))
+      assert_open_refuses!(dir, incompatible(2, @schema, 4))
     end
 
     test "B3b future version with an extra key is incompatible, not corrupt", %{inbox: dir} do
@@ -309,13 +310,13 @@ defmodule AiPair.Delivery.ReceiptLogCompatibilityTest do
       line =
         encode_line(
           seq2(first)
-          |> Map.put("schema_version", 3)
+          |> Map.put("schema_version", 4)
           |> Map.put("extra", "x")
         )
 
       write_log!(dir, first <> line)
 
-      assert_open_refuses!(dir, incompatible(2, @schema, 3))
+      assert_open_refuses!(dir, incompatible(2, @schema, 4))
     end
   end
 
@@ -406,7 +407,7 @@ defmodule AiPair.Delivery.ReceiptLogCompatibilityTest do
      %{
        seq: seq,
        found: %{schema: found_schema, schema_version: found_version},
-       expected: %{schema: @schema, schema_versions: [1, 2]}
+       expected: %{schema: @schema, schema_versions: [1, 2, 3]}
      }}
   end
 

@@ -44,7 +44,7 @@ defmodule AiPair.Delivery.ReceiptWriterV2RedTest do
     {:ok, inbox: inbox}
   end
 
-  test "W1 every record an S0b store appends is version 2", %{inbox: dir} do
+  test "W1 every record the store appends is the current write version (3 since RS3)", %{inbox: dir} do
     store = start_store!(dir, SystemFs.new())
 
     try do
@@ -59,18 +59,19 @@ defmodule AiPair.Delivery.ReceiptWriterV2RedTest do
       stop(store)
     end
 
+    # RS3: this build writes only version 3 (the row's name keeps its S0b label).
     assert Enum.map(
              log_lines(dir),
              &{&1["message_id"], &1["status"], &1["delivery_attempt"], &1["schema_version"]}
            ) ==
              [
-               {id("x"), "pending", 1, 2},
-               {id("x"), "queued", 1, 2},
-               {id("x"), "paste_started", 1, 2},
-               {id("x"), "delivered", 1, 2},
-               {id("y"), "pending", 1, 2},
-               {id("y"), "not_delivered", 1, 2},
-               {id("y"), "pending", 2, 2}
+               {id("x"), "pending", 1, 3},
+               {id("x"), "queued", 1, 3},
+               {id("x"), "paste_started", 1, 3},
+               {id("x"), "delivered", 1, 3},
+               {id("y"), "pending", 1, 3},
+               {id("y"), "not_delivered", 1, 3},
+               {id("y"), "pending", 2, 3}
              ]
 
     assert {:ok, log} = ReceiptLog.open(SystemFs.new(), dir)
@@ -190,12 +191,12 @@ defmodule AiPair.Delivery.ReceiptWriterV2RedTest do
     end
 
     assert Enum.map(log_lines(dir), &{&1["message_id"], &1["status"], &1["schema_version"]}) == [
-             {id("x"), "pending", 2},
-             {id("x"), "paste_started", 2},
-             {id("x"), "delivered", 2},
-             {id("y"), "pending", 2},
-             {id("y"), "paste_started", 2},
-             {id("y"), "ambiguous", 2}
+             {id("x"), "pending", 3},
+             {id("x"), "paste_started", 3},
+             {id("x"), "delivered", 3},
+             {id("y"), "pending", 3},
+             {id("y"), "paste_started", 3},
+             {id("y"), "ambiguous", 3}
            ]
   end
 
@@ -207,7 +208,7 @@ defmodule AiPair.Delivery.ReceiptWriterV2RedTest do
     try do
       x = admit!(store, id("x"))
       assert :ok = ReceiptStore.begin_paste(store, id("x"), x)
-      assert last_status(dir) == {"paste_started", 2}
+      assert last_status(dir) == {"paste_started", 3}
       bytes = File.read!(log_path(dir))
 
       assert ReceiptStore.transition(store, id("x"), x, "not_delivered") ==
@@ -223,9 +224,10 @@ defmodule AiPair.Delivery.ReceiptWriterV2RedTest do
     end
   end
 
-  test "W6 boot finalizes v1 nonterminal and v2 queued-without-marker as v2 ambiguous", %{
-    inbox: dir
-  } do
+  test "W6 boot finalizes v1 nonterminal and v2 queued-without-marker as ambiguous at the write version",
+       %{
+         inbox: dir
+       } do
     write_log!(
       dir,
       chain([
@@ -244,11 +246,12 @@ defmodule AiPair.Delivery.ReceiptWriterV2RedTest do
     try do
       appended = Enum.drop(log_lines(dir), 7)
 
+      # RS3: the finalizing records are written as version 3.
       assert Enum.map(appended, &{&1["message_id"], &1["status"], &1["schema_version"]}) == [
-               {id("a"), "ambiguous", 2},
-               {id("b"), "ambiguous", 2},
-               {id("c"), "ambiguous", 2},
-               {id("d"), "ambiguous", 2}
+               {id("a"), "ambiguous", 3},
+               {id("b"), "ambiguous", 3},
+               {id("c"), "ambiguous", 3},
+               {id("d"), "ambiguous", 3}
              ]
 
       assert {:ok, %{outcome: "ambiguous"}} =
@@ -268,7 +271,7 @@ defmodule AiPair.Delivery.ReceiptWriterV2RedTest do
       stop(store)
     end
 
-    assert %{"status" => "pending", "delivery_attempt" => 2, "schema_version" => 2} =
+    assert %{"status" => "pending", "delivery_attempt" => 2, "schema_version" => 3} =
              List.last(log_lines(dir))
   end
 
@@ -280,7 +283,7 @@ defmodule AiPair.Delivery.ReceiptWriterV2RedTest do
     try do
       x = admit!(store, id("x"))
       assert :ok = ReceiptStore.begin_paste(store, id("x"), x)
-      assert last_status(dir) == {"paste_started", 2}
+      assert last_status(dir) == {"paste_started", 3}
 
       assert {:ok, {:duplicate, view}} = ReceiptStore.admit(store, id("x"), @pane, @payload, self())
       assert view.status == "pending"
@@ -318,7 +321,7 @@ defmodule AiPair.Delivery.ReceiptWriterV2RedTest do
       x = admit!(store, id("x"))
       assert :ok = ReceiptStore.transition(store, id("x"), x, "queued")
       assert :ok = ReceiptStore.begin_paste(store, id("x"), x)
-      assert last_status(dir) == {"paste_started", 2}
+      assert last_status(dir) == {"paste_started", 3}
 
       assert {:ok, {:duplicate, view}} = ReceiptStore.admit(store, id("x"), @pane, @payload, self())
       assert view.status == "queued"
@@ -356,9 +359,10 @@ defmodule AiPair.Delivery.ReceiptWriterV2RedTest do
   defp marker_line(dir, store, msg_id, attempt) do
     lines = raw_lines(dir)
 
+    # RS3: the marker is a version 3 record carrying the attempt's (null) pair.
     record = %{
       "schema" => @schema,
-      "schema_version" => 2,
+      "schema_version" => 3,
       "seq" => length(lines) + 1,
       "prev_line_sha256" => digest(List.last(lines)),
       "daemon_epoch" => ReceiptStore.daemon_epoch(store),
@@ -366,7 +370,9 @@ defmodule AiPair.Delivery.ReceiptWriterV2RedTest do
       "pane_id" => @pane,
       "payload_hash" => @payload,
       "status" => "paste_started",
-      "delivery_attempt" => attempt
+      "delivery_attempt" => attempt,
+      "registration_id" => nil,
+      "generation" => nil
     }
 
     Jason.encode!(record) <> "\n"
@@ -391,9 +397,9 @@ defmodule AiPair.Delivery.ReceiptWriterV2RedTest do
   # Design r3 boot table: no marker byte on disk (or a torn tail, repaired at open) ends the
   # attempt at its pending record; a complete marker replays. Either way boot appends ambiguous.
   defp boot_expectation(:write, fault) when fault in [{:error, :eio}, :torn_prefix],
-    do: [{"pending", 2}, {"ambiguous", 2}]
+    do: [{"pending", 3}, {"ambiguous", 3}]
 
-  defp boot_expectation(_op, _fault), do: [{"pending", 2}, {"paste_started", 2}, {"ambiguous", 2}]
+  defp boot_expectation(_op, _fault), do: [{"pending", 3}, {"paste_started", 3}, {"ambiguous", 3}]
 
   defp marker_write?([_fd, data]), do: IO.iodata_to_binary(data) =~ ~s("status":"paste_started")
 

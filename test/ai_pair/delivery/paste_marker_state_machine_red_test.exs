@@ -55,8 +55,9 @@ defmodule AiPair.Delivery.PasteMarkerStateMachineRedTest do
 
     assert reply.status == "sent"
     assert performed(c) == 1
-    assert seen(c) == [{id(c, "m1"), "paste_started", 2}]
-    assert last_record(c) == {id(c, "m1"), "delivered", 2}
+    # RS3: this build writes version 3 records.
+    assert seen(c) == [{id(c, "m1"), "paste_started", 3}]
+    assert last_record(c) == {id(c, "m1"), "delivered", 3}
     stop_all([sm, store])
   end
 
@@ -72,8 +73,8 @@ defmodule AiPair.Delivery.PasteMarkerStateMachineRedTest do
     Agent.update(c.screen, fn _ -> "IDLE_MARKER" end)
 
     assert eventually(fn -> performed(c) == 1 end, @paste_deadline_ms)
-    assert seen(c) == [{id(c, "m2"), "paste_started", 2}]
-    assert eventually(fn -> last_record(c) == {id(c, "m2"), "delivered", 2} end, @paste_deadline_ms)
+    assert seen(c) == [{id(c, "m2"), "paste_started", 3}]
+    assert eventually(fn -> last_record(c) == {id(c, "m2"), "delivered", 3} end, @paste_deadline_ms)
     stop_all([sm, store])
   end
 
@@ -175,12 +176,12 @@ defmodule AiPair.Delivery.PasteMarkerStateMachineRedTest do
     assert %{ok: false, error: "paste_failed"} =
              Delivery.dispatch(send_frame(pane, id(c, "m4"), "m4 text"), store)
 
-    assert seen(c) == [{id(c, "m4"), "paste_started", 2}]
+    assert seen(c) == [{id(c, "m4"), "paste_started", 3}]
 
     assert Enum.map(records(c), &{&1["status"], &1["schema_version"]}) == [
-             {"pending", 2},
-             {"paste_started", 2},
-             {"ambiguous", 2}
+             {"pending", 3},
+             {"paste_started", 3},
+             {"ambiguous", 3}
            ]
 
     stop_all([sm, store])
@@ -206,7 +207,7 @@ defmodule AiPair.Delivery.PasteMarkerStateMachineRedTest do
 
     sm =
       start_pane!(c, pane, store, fn _p, _t ->
-        send(coordinator, {:at_paste_entry, self(), last_record(c) == {msg, "paste_started", 2}})
+        send(coordinator, {:at_paste_entry, self(), last_record(c) == {msg, "paste_started", 3}})
         block()
       end)
 
@@ -221,9 +222,9 @@ defmodule AiPair.Delivery.PasteMarkerStateMachineRedTest do
     restarted = start_store!(c, SystemFs.new())
 
     assert Enum.map(records(c), &{&1["status"], &1["schema_version"]}) == [
-             {"pending", 2},
-             {"paste_started", 2},
-             {"ambiguous", 2}
+             {"pending", 3},
+             {"paste_started", 3},
+             {"ambiguous", 3}
            ]
 
     sm2 = start_pane!(c, pane, restarted, &observing_paste(c, &1, &2))
@@ -246,7 +247,7 @@ defmodule AiPair.Delivery.PasteMarkerStateMachineRedTest do
     sm =
       start_pane!(c, pane, store, fn _p, _t ->
         Agent.update(c.performed, &(&1 + 1))
-        send(coordinator, {:after_paste, self(), last_record(c) == {msg, "paste_started", 2}})
+        send(coordinator, {:after_paste, self(), last_record(c) == {msg, "paste_started", 3}})
         block()
       end)
 
@@ -261,9 +262,9 @@ defmodule AiPair.Delivery.PasteMarkerStateMachineRedTest do
     restarted = start_store!(c, SystemFs.new())
 
     assert Enum.map(records(c), &{&1["status"], &1["schema_version"]}) == [
-             {"pending", 2},
-             {"paste_started", 2},
-             {"ambiguous", 2}
+             {"pending", 3},
+             {"paste_started", 3},
+             {"ambiguous", 3}
            ]
 
     sm2 = start_pane!(c, pane, restarted, &observing_paste(c, &1, &2))
@@ -357,7 +358,8 @@ defmodule AiPair.Delivery.PasteMarkerStateMachineRedTest do
   defp torn_full(pane, msg, text) do
     record = %{
       "schema" => "ai-pair/delivery-receipt",
-      "schema_version" => 2,
+      # RS3: the marker is a version 3 record with the attempt's (null) pair.
+      "schema_version" => 3,
       "seq" => 2,
       "prev_line_sha256" => "sha256:" <> String.duplicate("0", 64),
       "daemon_epoch" => "ep_" <> String.duplicate("0", 24),
@@ -365,7 +367,9 @@ defmodule AiPair.Delivery.PasteMarkerStateMachineRedTest do
       "pane_id" => pane,
       "payload_hash" => Payload.hash(Payload.new(text)),
       "status" => "paste_started",
-      "delivery_attempt" => 1
+      "delivery_attempt" => 1,
+      "registration_id" => nil,
+      "generation" => nil
     }
 
     {:torn, byte_size(Jason.encode!(record) <> "\n")}

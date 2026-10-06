@@ -48,6 +48,12 @@ defmodule AiPair.Delivery.NS42TerminalCoordinatesTest do
   @record_fields ~w(schema schema_version seq prev_line_sha256 daemon_epoch
                     message_id pane_id payload_hash status delivery_attempt)
 
+  # RS3: a version 3 record (the only version this build writes) adds the attempt's
+  # registration pair, and ReceiptLog.view/1 and every served view carry it (nil when
+  # absent). Admission here carries no pair, so both are nil.
+  @pair_keys [:registration_id, :generation]
+  @v3_record_fields @record_fields ++ ~w(registration_id generation)
+
   setup do
     inbox = Path.join(System.tmp_dir!(), "ns42_c007_#{System.unique_integer([:positive])}")
 
@@ -73,20 +79,23 @@ defmodule AiPair.Delivery.NS42TerminalCoordinatesTest do
         assert Map.take(served, @coordinates) == expected,
                "the served receipt view must be exactly the bound tuple"
 
-        assert Enum.sort(Map.keys(served)) == Enum.sort([:outcome | @coordinates]),
+        assert Enum.sort(Map.keys(served)) == Enum.sort([:outcome | @coordinates ++ @pair_keys]),
                "no coordinate may be missing from, or added to, the served view"
+
+        assert Map.take(served, @pair_keys) == %{registration_id: nil, generation: nil}
 
         epoch = ReceiptStore.daemon_epoch(store)
         path = ReceiptStore.path(store)
         assert [first_line, terminal_line] = lines(path)
         terminal = decode_line!(terminal_line)
 
-        assert Enum.sort(Map.keys(terminal)) == Enum.sort(@record_fields)
+        assert Enum.sort(Map.keys(terminal)) == Enum.sort(@v3_record_fields)
 
         # NS-15.G.003 S0b: the writer writes schema version 2 (it was 1 before S0b).
+        # RS3: the writer writes schema version 3, with the attempt's (null) pair.
         assert terminal == %{
                  "schema" => "ai-pair/delivery-receipt",
-                 "schema_version" => 2,
+                 "schema_version" => 3,
                  "seq" => 2,
                  "prev_line_sha256" => digest(first_line),
                  "daemon_epoch" => epoch,
@@ -94,10 +103,12 @@ defmodule AiPair.Delivery.NS42TerminalCoordinatesTest do
                  "pane_id" => @pane,
                  "payload_hash" => @payload,
                  "status" => status,
-                 "delivery_attempt" => 1
+                 "delivery_attempt" => 1,
+                 "registration_id" => nil,
+                 "generation" => nil
                }
 
-        assert ReceiptLog.view(terminal) == expected
+        assert ReceiptLog.view(terminal) == with_pair(expected)
 
         before = File.read!(path)
         :ok = stop_store(store)
@@ -161,12 +172,12 @@ defmodule AiPair.Delivery.NS42TerminalCoordinatesTest do
         assert {:error, {:conflict, pane_conflict}} =
                  ReceiptStore.admit(store, id, @other_pane, @payload, owner)
 
-        assert pane_conflict == expected
+        assert pane_conflict == with_pair(expected)
 
         assert {:error, {:conflict, hash_conflict}} =
                  ReceiptStore.admit(store, id, @pane, @other_payload, owner)
 
-        assert hash_conflict == expected
+        assert hash_conflict == with_pair(expected)
 
         # delivery_attempt: only proven non-delivery opens another attempt. Delivered and
         # ambiguous may already have reached the pane, so the same identity is a duplicate.
@@ -174,7 +185,7 @@ defmodule AiPair.Delivery.NS42TerminalCoordinatesTest do
           assert {:ok, {:duplicate, duplicate}} =
                    ReceiptStore.admit(store, id, @pane, @payload, owner)
 
-          assert duplicate == expected
+          assert duplicate == with_pair(expected)
         end
 
         assert File.read!(path) == before,
@@ -202,7 +213,7 @@ defmodule AiPair.Delivery.NS42TerminalCoordinatesTest do
                    {:error, {:stale_operation_token, 1, 2}}
 
           assert [_pending, terminal_line | _] = lines(path)
-          assert ReceiptLog.view(decode_line!(terminal_line)) == expected
+          assert ReceiptLog.view(decode_line!(terminal_line)) == with_pair(expected)
         end
       end
     end
@@ -238,7 +249,7 @@ defmodule AiPair.Delivery.NS42TerminalCoordinatesTest do
 
         try do
           assert log.seq == 2
-          assert ReceiptLog.view(log.entries[expected.message_id]) == expected
+          assert ReceiptLog.view(log.entries[expected.message_id]) == with_pair(expected)
         after
           ReceiptLog.close(log)
         end
@@ -384,7 +395,7 @@ defmodule AiPair.Delivery.NS42TerminalCoordinatesTest do
 
       try do
         assert log.seq == 1
-        assert ReceiptLog.view(log.entries[id]) == tuple(id, "pending")
+        assert ReceiptLog.view(log.entries[id]) == with_pair(tuple(id, "pending"))
       after
         ReceiptLog.close(log)
       end
@@ -475,6 +486,10 @@ defmodule AiPair.Delivery.NS42TerminalCoordinatesTest do
       delivery_attempt: 1
     }
   end
+
+  # The full view as ReceiptLog.view/1 and the store serve it since RS3: the five
+  # coordinates plus the attempt's registration pair, which is null here.
+  defp with_pair(tuple), do: Map.merge(tuple, %{registration_id: nil, generation: nil})
 
   # Each entry changes exactly one coordinate of `view` to a well-formed other value.
   defp one_coordinate_changes(view) do

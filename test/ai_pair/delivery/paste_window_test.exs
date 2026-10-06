@@ -44,7 +44,8 @@ defmodule AiPair.Delivery.PasteWindowTest do
       |> String.split("\n", trim: true)
       |> Enum.map(&Jason.decode!/1)
 
-    assert [%{"message_id" => @id, "status" => "paste_started", "schema_version" => 2}] = added
+    # RS3: the marker is written as version 3.
+    assert [%{"message_id" => @id, "status" => "paste_started", "schema_version" => 3}] = added
   end
 
   test "an in-flight queued waiter sees finalization rather than stale queued", c do
