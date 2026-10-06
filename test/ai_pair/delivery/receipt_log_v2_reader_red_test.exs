@@ -26,6 +26,9 @@ defmodule AiPair.Delivery.ReceiptLogV2ReaderRedTest do
 
   Expected at Orrisd b79863cd: every row except R0.5 fails (a v2 line is refused as
   incompatible today). R0.5 passes before and after.
+
+  NS-15.G.003 S0b re-points R0.6 and R0.7 to the version 2 writer: boot and API appends are
+  version 2, and begin_paste appends a paste_started marker (see each row).
   """
 
   use ExUnit.Case, async: true
@@ -164,9 +167,13 @@ defmodule AiPair.Delivery.ReceiptLogV2ReaderRedTest do
     assert_refuses!(dir, {:receipt_log_corrupt, 2})
   end
 
-  test "R0.6 an S0a store boot finalizes v2 non-terminal attempts as version 1 ambiguous", %{
-    inbox: dir
-  } do
+  # NS-15.G.003 S0b re-point: the store now writes version 2, so boot finalization appends
+  # version 2 ambiguous records (S0a appended version 1). The byte-identical prefix and the
+  # exact reopened entries are kept.
+  test "R0.6 a store boot finalizes v2 non-terminal attempts as ambiguous after the original log",
+       %{
+         inbox: dir
+       } do
     history =
       chain([
         {2, "a", "pending", 1},
@@ -190,18 +197,23 @@ defmodule AiPair.Delivery.ReceiptLogV2ReaderRedTest do
     appended = Enum.drop(log_lines(dir), 5)
 
     assert Enum.map(appended, &{&1["message_id"], &1["status"], &1["schema_version"]}) ==
-             [{id("a"), "ambiguous", 1}, {id("b"), "ambiguous", 1}, {id("c"), "ambiguous", 1}]
+             [{id("a"), "ambiguous", 2}, {id("b"), "ambiguous", 2}, {id("c"), "ambiguous", 2}]
 
     assert_opens!(dir, 8, %{
-      "a" => {1, "ambiguous", 1, 6},
-      "b" => {1, "ambiguous", 1, 7},
-      "c" => {1, "ambiguous", 1, 8}
+      "a" => {2, "ambiguous", 1, 6},
+      "b" => {2, "ambiguous", 1, 7},
+      "c" => {2, "ambiguous", 1, 8}
     })
   end
 
-  test "R0.7 every status an S0a store appends after loading v2 history is version 1", %{
-    inbox: dir
-  } do
+  # NS-15.G.003 S0b re-point: every record the store appends after v2 history is now version 2,
+  # and begin_paste appends a durable paste_started marker before the delivered record (S0a
+  # appended version 1 records and no marker). The byte-identical prefix and the exact
+  # sequence are kept; the reopened seq grows by the marker.
+  test "R0.7 every status the store appends after loading v2 history is version 2, with the marker",
+       %{
+         inbox: dir
+       } do
     write_log!(dir, chain([{2, "a", "pending", 1}, {2, "a", "delivered", 1}]))
     original = File.read!(log_path(dir))
     assert {:ok, pid} = GenServer.start(ReceiptStore, inbox: dir)
@@ -233,17 +245,18 @@ defmodule AiPair.Delivery.ReceiptLogV2ReaderRedTest do
     assert Enum.map(appended, fn r ->
              {r["message_id"], r["status"], r["delivery_attempt"], r["schema_version"]}
            end) == [
-             {id("x"), "pending", 1, 1},
-             {id("x"), "queued", 1, 1},
-             {id("x"), "delivered", 1, 1},
-             {id("y"), "pending", 1, 1},
-             {id("y"), "not_delivered", 1, 1},
-             {id("y"), "pending", 2, 1}
+             {id("x"), "pending", 1, 2},
+             {id("x"), "queued", 1, 2},
+             {id("x"), "paste_started", 1, 2},
+             {id("x"), "delivered", 1, 2},
+             {id("y"), "pending", 1, 2},
+             {id("y"), "not_delivered", 1, 2},
+             {id("y"), "pending", 2, 2}
            ]
 
     assert {:ok, log} = ReceiptLog.open(SystemFs.new(), dir)
     ReceiptLog.close(log)
-    assert log.seq == 8
+    assert log.seq == 9
   end
 
   # ----- helpers -----

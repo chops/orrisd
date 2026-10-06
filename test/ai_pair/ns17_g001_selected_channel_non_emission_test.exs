@@ -160,7 +160,8 @@ defmodule AiPair.NS17G001SelectedChannelNonEmissionTest do
           assert %{"outcome" => "delivered", "delivery_attempt" => 1} =
                    reconcile!(c, id, text)
 
-          assert statuses(c, id) == [{1, "pending"}, {1, "delivered"}]
+          # NS-15.G.003 S0b: the durable paste_started marker precedes every paste's outcome.
+          assert statuses(c, id) == [{1, "pending"}, {1, "paste_started"}, {1, "delivered"}]
 
           # V1: the canary entered the daemon and left it through the paste double.
           assert text in pasted(c)
@@ -201,7 +202,12 @@ defmodule AiPair.NS17G001SelectedChannelNonEmissionTest do
           assert %{"outcome" => "delivered", "delivery_attempt" => 1} =
                    reconcile!(c, id, text)
 
-          assert statuses(c, id) == [{1, "pending"}, {1, "queued"}, {1, "delivered"}]
+          assert statuses(c, id) == [
+                   {1, "pending"},
+                   {1, "queued"},
+                   {1, "paste_started"},
+                   {1, "delivered"}
+                 ]
 
           # V1: the drained paste carried the canary.
           assert text in pasted(c)
@@ -312,7 +318,7 @@ defmodule AiPair.NS17G001SelectedChannelNonEmissionTest do
           assert %{"ok" => true, "status" => "sent"} =
                    send_frame!(c, v2_send(c, id, first_text))
 
-          assert statuses(c, id) == [{1, "pending"}, {1, "delivered"}]
+          assert statuses(c, id) == [{1, "pending"}, {1, "paste_started"}, {1, "delivered"}]
           assert first_text in pasted(c)
           before = File.read!(c.log)
 

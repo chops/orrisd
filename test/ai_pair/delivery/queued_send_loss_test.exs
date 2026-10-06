@@ -90,7 +90,13 @@ defmodule AiPair.Delivery.QueuedSendLossTest do
 
       assert_receive {:receipt_finalized, @msg_a, "delivered"}, 2_000
 
-      assert statuses(ctx, @msg_a) == [{1, "pending"}, {1, "queued"}, {1, "delivered"}],
+      # NS-15.G.003 S0b: the durable paste_started marker precedes every paste's outcome.
+      assert statuses(ctx, @msg_a) == [
+               {1, "pending"},
+               {1, "queued"},
+               {1, "paste_started"},
+               {1, "delivered"}
+             ],
              "queued is a waypoint that must converge, not a terminal state"
 
       assert {:ok, %{outcome: "delivered"}} = reconcile(ctx, @msg_a)
@@ -215,6 +221,7 @@ defmodule AiPair.Delivery.QueuedSendLossTest do
                {1, "not_delivered"},
                {2, "pending"},
                {2, "queued"},
+               {2, "paste_started"},
                {2, "delivered"}
              ],
              "the closed attempt is kept, and only the new attempt reaches the pane"
@@ -308,9 +315,10 @@ defmodule AiPair.Delivery.QueuedSendLossTest do
       assert {:queued, _} = StateMachine.send_text(sm, @prompt, 1_000, @msg_a)
       go_idle(pane)
 
-      # The paste is under way and durably recorded as queued. Nothing has answered yet.
+      # The paste is under way and durably recorded: since NS-15.G.003 S0b the paste_started
+      # marker follows queued before paste_fn runs. Nothing has answered yet.
       assert_receive :paste_entered, 2_000
-      assert statuses(ctx, @msg_a) == [{1, "pending"}, {1, "queued"}]
+      assert statuses(ctx, @msg_a) == [{1, "pending"}, {1, "queued"}, {1, "paste_started"}]
       assert Agent.get(pastes, & &1) == 1
 
       revived = restart_store!(ctx)
@@ -322,13 +330,23 @@ defmodule AiPair.Delivery.QueuedSendLossTest do
       assert {:ok, %{outcome: "ambiguous", delivery_attempt: 1}} =
                ReceiptStore.reconcile(revived, @msg_a, @pane, payload_hash(@prompt), wait_ms: 0)
 
-      assert statuses(ctx, @msg_a) == [{1, "pending"}, {1, "queued"}, {1, "ambiguous"}],
+      assert statuses(ctx, @msg_a) == [
+               {1, "pending"},
+               {1, "queued"},
+               {1, "paste_started"},
+               {1, "ambiguous"}
+             ],
              "the crossed epoch is finalized once, durably, rather than re-derived per query"
 
       assert {:ok, %{outcome: "ambiguous", delivery_attempt: 1}} =
                ReceiptStore.reconcile(revived, @msg_a, @pane, payload_hash(@prompt), wait_ms: 0)
 
-      assert statuses(ctx, @msg_a) == [{1, "pending"}, {1, "queued"}, {1, "ambiguous"}],
+      assert statuses(ctx, @msg_a) == [
+               {1, "pending"},
+               {1, "queued"},
+               {1, "paste_started"},
+               {1, "ambiguous"}
+             ],
              "reconciliation is a query, so repeating it must not grow the evidence log"
 
       {resumed_sm, _pane} = start_pane(%{ctx | store: revived}, paste_fn: paste_fn)
@@ -355,7 +373,13 @@ defmodule AiPair.Delivery.QueuedSendLossTest do
                ReceiptStore.reconcile(revived, @msg_a, @pane, payload_hash(@prompt), wait_ms: 0),
              "a terminal record outlives the epoch that wrote it"
 
-      assert statuses(ctx, @msg_a) == [{1, "pending"}, {1, "queued"}, {1, "delivered"}]
+      # NS-15.G.003 S0b: the durable paste_started marker precedes every paste's outcome.
+      assert statuses(ctx, @msg_a) == [
+               {1, "pending"},
+               {1, "queued"},
+               {1, "paste_started"},
+               {1, "delivered"}
+             ]
     end
   end
 

@@ -121,7 +121,8 @@ defmodule AiPair.Delivery.NS42C008TimeoutAndValidationTest do
 
       assert %{"outcome" => "delivered", "delivery_attempt" => 1} = reconcile!(c, id1, text1)
       assert pastes(c, text1) == 1
-      assert statuses(c, id1) == [{1, "pending"}, {1, "delivered"}]
+      # NS-15.G.003 S0b: the durable paste_started marker precedes every paste's outcome.
+      assert statuses(c, id1) == [{1, "pending"}, {1, "paste_started"}, {1, "delivered"}]
 
       # ---- the gate is released with a generic paste error ----
       id2 = id(c, "w1-error")
@@ -142,7 +143,7 @@ defmodule AiPair.Delivery.NS42C008TimeoutAndValidationTest do
       assert %{"outcome" => "ambiguous", "delivery_attempt" => 1} = reconcile!(c, id2, text2)
 
       recorded = statuses(c, id2)
-      assert recorded == [{1, "pending"}, {1, "ambiguous"}]
+      assert recorded == [{1, "pending"}, {1, "paste_started"}, {1, "ambiguous"}]
 
       refute Enum.any?(recorded, &match?({_, "not_delivered"}, &1)),
              "a generic paste error after a send_timeout is ambiguous, never not_delivered"

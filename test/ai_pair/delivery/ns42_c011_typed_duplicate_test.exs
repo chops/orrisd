@@ -89,7 +89,9 @@ defmodule AiPair.Delivery.NS42C011TypedDuplicateTest do
       assert_receive {:paste_started, ^sm, ^x, _}, 2_000
       held = statuses(c, id1)
 
-      assert held == [{1, "pending"}],
+      # NS-15.G.003 S0b: the durable paste_started marker precedes every paste; the replies
+      # below are unchanged because the marker is projected as its pre-marker status.
+      assert held == [{1, "pending"}, {1, "paste_started"}],
              "pending: the first send was not held at attempt 1; got #{inspect(held)}"
 
       rec = reconcile!(c, p.pane, id1, x)
@@ -150,7 +152,7 @@ defmodule AiPair.Delivery.NS42C011TypedDuplicateTest do
 
       final = statuses(c, id1)
 
-      assert final == [{1, "pending"}, {1, "delivered"}],
+      assert final == [{1, "pending"}, {1, "paste_started"}, {1, "delivered"}],
              "pending: the held attempt did not finalize delivered; got #{inspect(final)}"
     end
 
@@ -227,12 +229,13 @@ defmodule AiPair.Delivery.NS42C011TypedDuplicateTest do
 
       h3 = statuses(c, id3)
 
-      assert h3 == [{1, "pending"}, {1, "queued"}, {1, "delivered"}],
+      # NS-15.G.003 S0b: each drained paste is preceded by its durable paste_started marker.
+      assert h3 == [{1, "pending"}, {1, "queued"}, {1, "paste_started"}, {1, "delivered"}],
              "queued: the duplicate changed the row id history; got #{inspect(h3)}"
 
       h4 = statuses(c, id4)
 
-      assert h4 == [{1, "pending"}, {1, "queued"}, {1, "delivered"}],
+      assert h4 == [{1, "pending"}, {1, "queued"}, {1, "paste_started"}, {1, "delivered"}],
              "queued: the control id history is not one queued-then-delivered attempt; " <>
                "got #{inspect(h4)}"
     end
@@ -255,7 +258,9 @@ defmodule AiPair.Delivery.NS42C011TypedDuplicateTest do
       assert_receive {:paste_started, ^sm, ^z, _}, 2_000
       held = statuses(c, id5)
 
-      assert held == [{1, "pending"}, {1, "queued"}],
+      # NS-15.G.003 S0b: the held drain's marker is durable; the reconcile and duplicate
+      # replies below still read queued (the marker is projected as its pre-marker status).
+      assert held == [{1, "pending"}, {1, "queued"}, {1, "paste_started"}],
              "queued in flight: the held drain is not attempt 1 queued; got #{inspect(held)}"
 
       rec = reconcile!(c, p.pane, id5, z)
@@ -310,7 +315,8 @@ defmodule AiPair.Delivery.NS42C011TypedDuplicateTest do
 
       held = statuses(c, id6)
 
-      assert held == [{1, "pending"}, {1, "delivered"}],
+      # NS-15.G.003 S0b: the durable paste_started marker precedes every paste's outcome.
+      assert held == [{1, "pending"}, {1, "paste_started"}, {1, "delivered"}],
              "delivered: the first send was not delivered at attempt 1; got #{inspect(held)}"
 
       rec = reconcile!(c, p.pane, id6, v)
@@ -373,7 +379,8 @@ defmodule AiPair.Delivery.NS42C011TypedDuplicateTest do
 
       held = statuses(c, id8)
 
-      assert held == [{1, "pending"}, {1, "ambiguous"}],
+      # NS-15.G.003 S0b: the durable paste_started marker precedes every paste's outcome.
+      assert held == [{1, "pending"}, {1, "paste_started"}, {1, "ambiguous"}],
              "ambiguous: the failed paste was not recorded ambiguous; got #{inspect(held)}"
 
       rec = reconcile!(c, p.pane, id8, w)
@@ -403,12 +410,12 @@ defmodule AiPair.Delivery.NS42C011TypedDuplicateTest do
 
       ctl_log = statuses(c, id9)
 
-      assert ctl_log == [{1, "pending"}, {1, "ambiguous"}],
+      assert ctl_log == [{1, "pending"}, {1, "paste_started"}, {1, "ambiguous"}],
              "control: the fresh id was not its own ambiguous attempt 1; got #{inspect(ctl_log)}"
 
       row_log = statuses(c, id8)
 
-      assert row_log == [{1, "pending"}, {1, "ambiguous"}],
+      assert row_log == [{1, "pending"}, {1, "paste_started"}, {1, "ambiguous"}],
              "control: the fresh id changed the row id history; got #{inspect(row_log)}"
 
       assert dup == expected_dup(p.pane, id8, w, "ambiguous", 1),
@@ -519,7 +526,8 @@ defmodule AiPair.Delivery.NS42C011TypedDuplicateTest do
 
       held = statuses(c, id_k)
 
-      assert held == [{1, "pending"}, {1, "delivered"}],
+      # NS-15.G.003 S0b: the durable paste_started marker precedes every paste's outcome.
+      assert held == [{1, "pending"}, {1, "paste_started"}, {1, "delivered"}],
              "conflict: the first send was not delivered at attempt 1; got #{inspect(held)}"
 
       log_before = File.read!(c.log)

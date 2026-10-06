@@ -26,13 +26,25 @@ defmodule AiPair.Delivery.PasteWindowTest do
   defp reconcile(store, wait \\ 0),
     do: ReceiptStore.reconcile(store, @id, @pane, @hash, wait_ms: wait)
 
-  test "queued is held until authenticated paste start, then unresolved without a new record", c do
+  # NS-15.G.003 S0b re-point: paste start now appends exactly one durable paste_started record
+  # (before S0b it appended none); the reconcile answers are unchanged.
+  test "queued is held until authenticated paste start, then unresolved with only the paste marker",
+       c do
     assert :ok = ReceiptStore.transition(c.store, @id, c.token, "queued")
     assert {:ok, %{outcome: "queued"}} = reconcile(c.store)
     before = File.read!(ReceiptStore.path(c.store))
     assert :ok = begin_paste(c.store, c.token)
     assert {:ok, %{outcome: "ambiguous"}} = reconcile(c.store)
-    assert File.read!(ReceiptStore.path(c.store)) == before
+    after_paste = File.read!(ReceiptStore.path(c.store))
+    assert String.starts_with?(after_paste, before)
+
+    added =
+      after_paste
+      |> binary_part(byte_size(before), byte_size(after_paste) - byte_size(before))
+      |> String.split("\n", trim: true)
+      |> Enum.map(&Jason.decode!/1)
+
+    assert [%{"message_id" => @id, "status" => "paste_started", "schema_version" => 2}] = added
   end
 
   test "an in-flight queued waiter sees finalization rather than stale queued", c do

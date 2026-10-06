@@ -190,26 +190,30 @@ defmodule AiPair.Delivery.NS42AttemptFinalizationTest do
       delivered = message_id("recover-delivered")
       refused = message_id("recover-refused")
 
-      # seq 1: pending, then the paste boundary is crossed.
+      # NS-15.G.003 S0b re-point: begin_paste now appends a durable paste_started marker, so
+      # crossing the paste boundary adds one record and the marker is the crash evidence
+      # (before S0b it appended nothing and the pending or queued record was).
+
+      # seq 1-2: pending, then the paste boundary is crossed (paste_started).
       pasted_token = admit!(store, pasted, owner).operation_token
       assert :ok = ReceiptStore.begin_paste(store, pasted, pasted_token)
 
-      # seq 2-3: pending, queued, then the paste boundary is crossed.
+      # seq 3-5: pending, queued, then the paste boundary is crossed (paste_started).
       queued_token = admit!(store, queued, owner).operation_token
       assert :ok = ReceiptStore.transition(store, queued, queued_token, "queued")
       assert :ok = ReceiptStore.begin_paste(store, queued, queued_token)
 
-      # seq 4: pending, paste not yet authorized.
+      # seq 6: pending, paste not yet authorized.
       waiting_token = admit!(store, waiting, owner).operation_token
 
-      # seq 5-8: two attempts that were finalized before the crash.
+      # seq 7-10: two attempts that were finalized before the crash.
       delivered_token = admit!(store, delivered, owner).operation_token
       assert :ok = ReceiptStore.transition(store, delivered, delivered_token, "delivered")
       refused_token = admit!(store, refused, owner).operation_token
       assert :ok = ReceiptStore.transition(store, refused, refused_token, "not_delivered")
 
-      assert length(lines(path)) == 8,
-             "begin_paste appends nothing: the pending or queued record is the crash evidence"
+      assert length(lines(path)) == 10,
+             "begin_paste appends one paste_started marker: the marker is the crash evidence"
 
       crash!(store)
       before = File.read!(path)
@@ -229,7 +233,7 @@ defmodule AiPair.Delivery.NS42AttemptFinalizationTest do
       new_epoch = ReceiptStore.daemon_epoch(revived)
       refute new_epoch == old_epoch
 
-      for {line, seq} <- Enum.zip(appended, 9..11) do
+      for {line, seq} <- Enum.zip(appended, 11..13) do
         record = decode_line!(line)
         assert record["status"] == "ambiguous"
         assert record["seq"] == seq
@@ -309,7 +313,8 @@ defmodule AiPair.Delivery.NS42AttemptFinalizationTest do
       assert File.read!(path) == before
 
       revived = start_store!(inbox, :second)
-      assert statuses(path, id) == [{1, "pending"}, {1, "ambiguous"}]
+      # NS-15.G.003 S0b: begin_paste's durable paste_started marker precedes the recovery.
+      assert statuses(path, id) == [{1, "pending"}, {1, "paste_started"}, {1, "ambiguous"}]
       assert {:ok, %{outcome: "ambiguous"}} = reconcile(revived, id, 0)
     end
 
@@ -335,12 +340,13 @@ defmodule AiPair.Delivery.NS42AttemptFinalizationTest do
 
       assert_receive :paste_entered, 2_000
       path = ReceiptStore.path(store)
-      assert statuses(path, id) == [{1, "pending"}]
+      # NS-15.G.003 S0b: the paste_started marker is durable before paste_fn runs.
+      assert statuses(path, id) == [{1, "pending"}, {1, "paste_started"}]
 
       crash!(store)
       revived = start_store!(inbox, :second)
 
-      assert statuses(path, id) == [{1, "pending"}, {1, "ambiguous"}]
+      assert statuses(path, id) == [{1, "pending"}, {1, "paste_started"}, {1, "ambiguous"}]
 
       assert {:ok, %{outcome: "ambiguous", delivery_attempt: 1}} =
                ReceiptStore.reconcile(revived, id, @pane, hash, wait_ms: 0)

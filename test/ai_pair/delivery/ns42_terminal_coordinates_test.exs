@@ -83,9 +83,10 @@ defmodule AiPair.Delivery.NS42TerminalCoordinatesTest do
 
         assert Enum.sort(Map.keys(terminal)) == Enum.sort(@record_fields)
 
+        # NS-15.G.003 S0b: the writer writes schema version 2 (it was 1 before S0b).
         assert terminal == %{
                  "schema" => "ai-pair/delivery-receipt",
-                 "schema_version" => 1,
+                 "schema_version" => 2,
                  "seq" => 2,
                  "prev_line_sha256" => digest(first_line),
                  "daemon_epoch" => epoch,

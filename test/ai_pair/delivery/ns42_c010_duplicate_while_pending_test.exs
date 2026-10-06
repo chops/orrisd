@@ -167,7 +167,8 @@ defmodule AiPair.Delivery.NS42C010DuplicateWhilePendingTest do
       release(sm)
       assert_sent(Task.await(a, 6_000), "T1 A")
       assert_delta(c, p, x, base, 1, "T1")
-      assert_statuses(c, id1, [{1, "pending"}, {1, "delivered"}], "T1")
+      # NS-15.G.003 S0b: the durable paste_started marker precedes every paste's outcome.
+      assert_statuses(c, id1, [{1, "pending"}, {1, "paste_started"}, {1, "delivered"}], "T1")
 
       third = send_v2!(c, p, id1, x)
 
@@ -244,7 +245,7 @@ defmodule AiPair.Delivery.NS42C010DuplicateWhilePendingTest do
       assert_waiters(c, idw, 0, "T1-W after the wake")
       assert_sent(Task.await(s, 6_000), "T1-W send")
       assert_delta(c, p, t, base, 1, "T1-W")
-      assert_statuses(c, idw, [{1, "pending"}, {1, "delivered"}], "T1-W")
+      assert_statuses(c, idw, [{1, "pending"}, {1, "paste_started"}, {1, "delivered"}], "T1-W")
     end
 
     test "W2: wait_ms 150 with no release answers ambiguous after at least 150 ms", c do
@@ -278,11 +279,20 @@ defmodule AiPair.Delivery.NS42C010DuplicateWhilePendingTest do
              "W2 reply; observed " <> inspect(reply)
 
       assert_waiters(c, id2, 0, "W2 after the timeout")
-      assert_statuses(c, id2, [{1, "pending"}], "W2 while held")
+      # NS-15.G.003 S0b: while the paste is held the marker is already durable; the reply
+      # above still reads pending (the marker is projected as its pre-marker status).
+      assert_statuses(c, id2, [{1, "pending"}, {1, "paste_started"}], "W2 while held")
 
       release(sm)
       assert_sent(Task.await(a, 6_000), "W2 A")
-      assert_statuses(c, id2, [{1, "pending"}, {1, "delivered"}], "W2 after release")
+
+      assert_statuses(
+        c,
+        id2,
+        [{1, "pending"}, {1, "paste_started"}, {1, "delivered"}],
+        "W2 after release"
+      )
+
       assert_delta(c, p, t, base, 1, "W2")
     end
   end
@@ -332,7 +342,7 @@ defmodule AiPair.Delivery.NS42C010DuplicateWhilePendingTest do
              "T3 duplicate; observed " <> inspect(d)
 
       assert_delta(c, p, z, base, 1, "T3")
-      assert_statuses(c, id4, [{1, "pending"}, {1, "delivered"}], "T3")
+      assert_statuses(c, id4, [{1, "pending"}, {1, "paste_started"}, {1, "delivered"}], "T3")
     end
   end
 
@@ -395,7 +405,7 @@ defmodule AiPair.Delivery.NS42C010DuplicateWhilePendingTest do
 
       release(sm)
       assert_sent(Task.await(h7, 6_000), "T4 hold")
-      assert_statuses(c, id7, [{1, "pending"}, {1, "delivered"}], "T4 id7")
+      assert_statuses(c, id7, [{1, "pending"}, {1, "paste_started"}, {1, "delivered"}], "T4 id7")
       assert_delta(c, pp, y2, y_base, 0, "T4 Y2")
       qp = pane_pastes(c, q) - q_base
       assert qp == 0, "T4 Q pastes; observed #{qp}"
@@ -419,7 +429,13 @@ defmodule AiPair.Delivery.NS42C010DuplicateWhilePendingTest do
                {true, "delivered", 1},
              "T5 control resend; observed " <> inspect(again)
 
-      assert_statuses(c, idc, [{1, "pending"}, {1, "delivered"}], "T5 control")
+      assert_statuses(
+        c,
+        idc,
+        [{1, "pending"}, {1, "paste_started"}, {1, "delivered"}],
+        "T5 control"
+      )
+
       base = pastes(c, d, v)
 
       # Dead by the reaper (H-4: idle -> unknown on the first pane_gone, then dead).
@@ -436,7 +452,13 @@ defmodule AiPair.Delivery.NS42C010DuplicateWhilePendingTest do
       assert_statuses(
         c,
         id10,
-        [{1, "pending"}, {1, "not_delivered"}, {2, "pending"}, {2, "delivered"}],
+        [
+          {1, "pending"},
+          {1, "not_delivered"},
+          {2, "pending"},
+          {2, "paste_started"},
+          {2, "delivered"}
+        ],
         "T5"
       )
 
@@ -477,7 +499,13 @@ defmodule AiPair.Delivery.NS42C010DuplicateWhilePendingTest do
         assert_statuses(
           c,
           i,
-          [{1, "pending"}, {1, "not_delivered"}, {2, "pending"}, {2, "delivered"}],
+          [
+            {1, "pending"},
+            {1, "not_delivered"},
+            {2, "pending"},
+            {2, "paste_started"},
+            {2, "delivered"}
+          ],
           "T6 control"
         )
       end
@@ -505,6 +533,7 @@ defmodule AiPair.Delivery.NS42C010DuplicateWhilePendingTest do
                {1, "pending"},
                {1, "not_delivered"},
                {2, "pending"},
+               {2, "paste_started"},
                {2, "delivered"}
              ],
              "T6 id12 statuses; observed " <> inspect(recorded)
