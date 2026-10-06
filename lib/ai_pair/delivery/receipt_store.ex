@@ -12,7 +12,7 @@ defmodule AiPair.Delivery.ReceiptStore do
 
   use GenServer
   require Logger
-  alias AiPair.Delivery.{ReceiptLog, SystemFs}
+  alias AiPair.Delivery.{Payload, PayloadStore, ReceiptLog, SystemFs}
 
   @terminal ~w(delivered not_delivered ambiguous)
   @statuses ["pending", "queued" | @terminal]
@@ -54,6 +54,18 @@ defmodule AiPair.Delivery.ReceiptStore do
           :ok | {:error, rejection()}
   def transition(store, id, token, status),
     do: GenServer.call(store, {:transition, id, token, status})
+
+  @doc """
+  Queue a pending attempt: publish its payload object durably, then append the queued
+  receipt. A refusal finalizes the attempt not_delivered and answers payload_store_full or
+  payload_store_unavailable.
+  """
+  @spec queue(GenServer.server(), String.t(), reference(), binary()) :: :ok | {:error, rejection()}
+  def queue(store, id, token, bytes), do: GenServer.call(store, {:queue, id, token, bytes})
+
+  @doc "The default global payload limits: {objects, bytes}."
+  @spec payload_limits() :: {pos_integer(), pos_integer()}
+  def payload_limits, do: PayloadStore.limits()
 
   @doc "Authorize crossing the paste boundary once, under the current attempt's token."
   @spec begin_paste(GenServer.server(), String.t(), reference()) :: :ok | {:error, rejection()}
@@ -102,14 +114,60 @@ defmodule AiPair.Delivery.ReceiptStore do
               {:halt, {:stop, reason}}
           end
         end)
+        |> boot_payloads(opts)
 
       {:error, reason} ->
         {:stop, reason}
     end
   end
 
+  # After boot finalization: open and clean the payload directory. S1 restores nothing, so
+  # no attempt is queued any more and every object of ours is removed.
+  defp boot_payloads({:ok, state}, opts) do
+    keep = fn {id, attempt, hash} ->
+      match?(
+        %{"status" => "queued", "delivery_attempt" => ^attempt, "payload_hash" => ^hash},
+        Map.get(state.log.entries, id)
+      )
+    end
+
+    inbox = Keyword.fetch!(opts, :inbox)
+
+    {:ok,
+     Map.put(state, :payload, PayloadStore.boot(state.log.fs, inbox, state.log.path, opts, keep))}
+  end
+
+  defp boot_payloads(stop, _opts), do: stop
+
   @impl true
   def handle_call(:daemon_epoch, _from, state), do: {:reply, state.epoch, state}
+
+  def handle_call({:queue, id, token, bytes}, _from, state) do
+    with :ok <- writable(state),
+         :ok <- valid_id(id),
+         {:ok, current} <- current(state, id),
+         :ok <- authority(state, id, token, current.delivery_attempt),
+         :ok <- legal(current.status, "queued") do
+      hash = Payload.hash(Payload.new(bytes))
+
+      case PayloadStore.publish(state.payload, current, bytes, hash) do
+        {:ok, payload} ->
+          case persist(%{state | payload: payload}, %{current | status: "queued"}) do
+            {:ok, updated} -> {:reply, :ok, notify(updated, id)}
+            {:error, reason, failed} -> {:reply, {:error, reason}, failed}
+          end
+
+        {:error, kind, payload} ->
+          case persist(%{state | payload: payload}, %{current | status: "not_delivered"}) do
+            {:ok, updated} -> {:reply, {:error, kind}, notify(updated, id)}
+            {:error, _reason, failed} -> {:reply, {:error, kind}, failed}
+          end
+      end
+    else
+      {:error, _} = error -> {:reply, error, state}
+    end
+  end
+
   def handle_call(:path, _from, state), do: {:reply, state.log.path, state}
 
   def handle_call({:observe, id}, {pid, _}, state) do
@@ -315,7 +373,7 @@ defmodule AiPair.Delivery.ReceiptStore do
 
   defp persist(state, view) do
     case ReceiptLog.append(state.log, view, state.epoch) do
-      {:ok, log} -> {:ok, %{state | log: log}}
+      {:ok, log} -> {:ok, release_payload(%{state | log: log}, view)}
       {:error, reason} -> {:error, reason, fail_waiters(%{state | poisoned: true})}
     end
   end
@@ -466,6 +524,13 @@ defmodule AiPair.Delivery.ReceiptStore do
   defp valid_id(id) do
     if ReceiptLog.valid_id?(id), do: :ok, else: {:error, {:invalid_message_id, :grammar}}
   end
+
+  # A terminal receipt is durable before its payload object is removed (receipt first).
+  defp release_payload(%{payload: %PayloadStore{} = payload} = state, %{status: status} = view)
+       when status in @terminal,
+       do: %{state | payload: PayloadStore.release(payload, view)}
+
+  defp release_payload(state, _view), do: state
 
   defp writable(%{poisoned: true}), do: {:error, :receipt_store_unavailable}
   defp writable(_), do: :ok

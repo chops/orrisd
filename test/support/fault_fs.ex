@@ -116,6 +116,34 @@ defmodule AiPair.Test.FaultFs do
     end
   end
 
+  @impl true
+  def open_exclusive(agent, path),
+    do: perform(agent, :open_exclusive, [path], fn -> SystemFs.open_exclusive(nil, path) end)
+
+  @impl true
+  def open_read(agent, path),
+    do: perform(agent, :open_read, [path], fn -> SystemFs.open_read(nil, path) end)
+
+  @impl true
+  def read_handle(agent, fd),
+    do: perform(agent, :read_handle, [fd], fn -> SystemFs.read_handle(nil, fd) end)
+
+  @impl true
+  def fstat(agent, fd), do: perform(agent, :fstat, [fd], fn -> SystemFs.fstat(nil, fd) end)
+
+  @impl true
+  def lstat(agent, path), do: perform(agent, :lstat, [path], fn -> SystemFs.lstat(nil, path) end)
+
+  @impl true
+  def link(agent, existing, new),
+    do: perform(agent, :link, [existing, new], fn -> SystemFs.link(nil, existing, new) end)
+
+  @impl true
+  def unlink(agent, path), do: perform(agent, :unlink, [path], fn -> SystemFs.unlink(nil, path) end)
+
+  @impl true
+  def list(agent, dir), do: perform(agent, :list, [dir], fn -> SystemFs.list(nil, dir) end)
+
   defp perform(agent, op, args, run, special \\ fn _ -> :no_special_case end) do
     case record(agent, op, args) do
       :halted ->

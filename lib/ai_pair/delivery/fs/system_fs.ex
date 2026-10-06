@@ -83,4 +83,41 @@ defmodule AiPair.Delivery.SystemFs do
 
   @impl true
   def exists?(_state, path), do: File.exists?(path)
+
+  @impl true
+  def open_exclusive(_state, path), do: :file.open(path, [:write, :exclusive, :raw, :binary])
+
+  @impl true
+  def open_read(_state, path), do: :file.open(path, [:read, :raw, :binary])
+
+  @impl true
+  def read_handle(_state, fd), do: read_all(fd, [])
+
+  @impl true
+  def fstat(_state, fd) do
+    case :file.read_file_info(fd, time: :posix) do
+      {:ok, info} -> {:ok, File.Stat.from_record(info)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @impl true
+  def lstat(_state, path), do: File.lstat(path, time: :posix)
+
+  @impl true
+  def link(_state, existing, new), do: :file.make_link(existing, new)
+
+  @impl true
+  def unlink(_state, path), do: :file.delete(path)
+
+  @impl true
+  def list(_state, dir), do: File.ls(dir)
+
+  defp read_all(fd, acc) do
+    case :file.read(fd, 65_536) do
+      {:ok, chunk} -> read_all(fd, [acc | chunk])
+      :eof -> {:ok, IO.iodata_to_binary(acc)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
 end

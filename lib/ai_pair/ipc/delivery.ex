@@ -183,6 +183,8 @@ defmodule AiPair.IPC.Delivery do
   defp rejection(reason) when reason in @request_errors,
     do: %{ok: false, error: Atom.to_string(reason)}
 
+  defp rejection(:payload_store_full), do: %{ok: false, error: "payload_store_full"}
+  defp rejection(:payload_store_unavailable), do: %{ok: false, error: "payload_store_unavailable"}
   defp rejection({:conflict, _view}), do: %{ok: false, error: "conflict"}
   defp rejection({:queue_full, _cap}), do: %{ok: false, error: "queue_full"}
   defp rejection({:paste_failed, _reason}), do: %{ok: false, error: "paste_failed"}

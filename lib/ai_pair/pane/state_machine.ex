@@ -538,8 +538,10 @@ defmodule AiPair.Pane.StateMachine do
         {:keep_state_and_data, [{:reply, from, result}]}
 
       true ->
+        # The store publishes the payload object durably before the queued receipt; a
+        # refusal there has already been finalized not_delivered by the store.
         case receipt_call(fn ->
-               ReceiptStore.transition(data.receipt_store, msg_id, token, "queued")
+               ReceiptStore.queue(data.receipt_store, msg_id, token, Payload.reveal(text))
              end) do
           :ok ->
             entry = {:receipted, text, ctx, msg_id, now_ms(), token}

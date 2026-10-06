@@ -56,6 +56,30 @@ defmodule AiPair.Delivery.Fs do
 
   @callback exists?(term(), Path.t()) :: boolean()
 
+  @doc "Create a new file for writing; fails with :eexist if any entry (a symlink included) exists."
+  @callback open_exclusive(term(), Path.t()) :: {:ok, fd()} | {:error, posix()}
+
+  @doc "Open an existing file read-only."
+  @callback open_read(term(), Path.t()) :: {:ok, fd()} | {:error, posix()}
+
+  @doc "Read every byte of an open handle."
+  @callback read_handle(term(), fd()) :: {:ok, binary()} | {:error, posix()}
+
+  @doc "Stat the OPEN handle itself (fstat): the file it refers to, whatever its path now names."
+  @callback fstat(term(), fd()) :: {:ok, File.Stat.t()} | {:error, posix()}
+
+  @doc "Stat a path without following a final symlink (lstat)."
+  @callback lstat(term(), Path.t()) :: {:ok, File.Stat.t()} | {:error, posix()}
+
+  @doc "Create a hard link; fails with :eexist if the new name exists."
+  @callback link(term(), Path.t(), Path.t()) :: :ok | {:error, posix()}
+
+  @doc "Remove a directory entry; a symlink entry is removed, never followed."
+  @callback unlink(term(), Path.t()) :: :ok | {:error, posix()}
+
+  @doc "The entry names of a directory."
+  @callback list(term(), Path.t()) :: {:ok, [String.t()]} | {:error, posix()}
+
   @spec mkdir_p(t(), Path.t(), non_neg_integer()) :: :ok | {:error, posix()}
   def mkdir_p({mod, state}, dir, mode), do: mod.mkdir_p(state, dir, mode)
 
@@ -85,4 +109,28 @@ defmodule AiPair.Delivery.Fs do
 
   @spec exists?(t(), Path.t()) :: boolean()
   def exists?({mod, state}, path), do: mod.exists?(state, path)
+
+  @spec open_exclusive(t(), Path.t()) :: {:ok, fd()} | {:error, posix()}
+  def open_exclusive({mod, state}, path), do: mod.open_exclusive(state, path)
+
+  @spec open_read(t(), Path.t()) :: {:ok, fd()} | {:error, posix()}
+  def open_read({mod, state}, path), do: mod.open_read(state, path)
+
+  @spec read_handle(t(), fd()) :: {:ok, binary()} | {:error, posix()}
+  def read_handle({mod, state}, fd), do: mod.read_handle(state, fd)
+
+  @spec fstat(t(), fd()) :: {:ok, File.Stat.t()} | {:error, posix()}
+  def fstat({mod, state}, fd), do: mod.fstat(state, fd)
+
+  @spec lstat(t(), Path.t()) :: {:ok, File.Stat.t()} | {:error, posix()}
+  def lstat({mod, state}, path), do: mod.lstat(state, path)
+
+  @spec link(t(), Path.t(), Path.t()) :: :ok | {:error, posix()}
+  def link({mod, state}, existing, new), do: mod.link(state, existing, new)
+
+  @spec unlink(t(), Path.t()) :: :ok | {:error, posix()}
+  def unlink({mod, state}, path), do: mod.unlink(state, path)
+
+  @spec list(t(), Path.t()) :: {:ok, [String.t()]} | {:error, posix()}
+  def list({mod, state}, dir), do: mod.list(state, dir)
 end
