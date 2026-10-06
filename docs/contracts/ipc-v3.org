@@ -1,0 +1,385 @@
+#+options: ^:nil
+
+* ai-pair IPC contract v3, producer copy
+:PROPERTIES:
+:CUSTOM_ID: ai-pair-ipc-contract-v3-producer-copy
+:END:
+This repository is the PRODUCER of the version 3 identity-core frames
+(NS-15.G.002 B1a-2). The contract text lives in the consumer repository, orris,
+and is vendored verbatim below, as version 2 is (=ipc-v2.org=).
+
+** Paired revisions
+:PROPERTIES:
+:CUSTOM_ID: paired-revisions
+:END:
+- source_repository: =orris=
+- source_path: =docs/contracts/ipc-v3.org=
+- source_revision: =6bb62f3e47c48ebcb29cb5c8f8d590cc18fd2ba0=
+- source_sha256: =9362517dda20c4f50600ba49db9dc5b837113e254dcff21904c312b29b590669=
+- paired_fixture_dir: =test/fixtures/contracts/ipc/v3/=
+- paired_fixture_contract_hash: =9f84d375bf6084ad8d703fe46de6605114167a3eed515dfaf22e9beac09a76fd=
+- paired_fixture_count: 46
+
+=source_sha256= is the digest of the vendored bytes exactly as delimited by the
+two sentinel comment lines below. It is pinned again in
+=test/ai_pair/contracts/vendored_ipc_v3_test.exs=, for the reason =ipc-v2.org= gives.
+
+** What this producer emits
+:PROPERTIES:
+:CUSTOM_ID: what-this-producer-emits
+:END:
+The identity core only (=AiPair.IPC.DeliveryV3=). Of the 46 fixtures, the 13
+/core reply/ files are produced by the real dispatch path in
+=test/ai_pair/ipc/contract_v3_fixture_test.exs=, and the 2 /client request/ files
+are exercised there unchanged against the version 2 dispatch. The 31 /example/
+files are neither produced nor claimed. A pane identity is reported only when
+the pane's live child holds the registration id of its committed intent record,
+in durable mode; every pane-bound command runs inside that pane's Coordinator
+fence, the send identity check precedes any effect, and status measures the
+current =pane_pid= with one census or refuses.
+
+# BEGIN VENDORED orris docs/contracts/ipc-v3.org
+#+options: ^:nil
+
+* ai-pair IPC contract, protocol version 3
+:PROPERTIES:
+:CUSTOM_ID: ai-pair-ipc-contract-protocol-version-3
+:END:
+** Implementation status
+:PROPERTIES:
+:CUSTOM_ID: implementation-status
+:END:
+Specified, not implemented. Neither the consumer in this repository nor the
+producer (the ai-pair daemon, Orrisd) speaks version 3 yet, and no client may send
+a version 3 request until the daemon advertises the capability tokens below in a
+version 3 ~ping~. Version 2 (~ipc-v2.org~) is unchanged and stays the wire for
+every existing client; a daemon serves both versions side by side.
+
+The fixture bytes in ~test/fixtures/contracts/ipc/v3/~ are the version 3 shapes
+this repository pins, with their ~CONTRACT_HASH~ computed under the v1 hash rule
+(see ~ipc-v1.org~), checked by ~test/contracts/ipc_v3_contract_hash_test.exs~.
+They are written from this text, not frames captured from a daemon, and each
+belongs to one of the classes below. The producer owns the frames: when it
+implements the identity core it vendors this document verbatim and replaces each
+/core reply/ file with the byte-identical frame its real implementation produces,
+or this text changes first. A /client request/ file is never replaced; it becomes
+an exercised request as described under its class. An /example/ file is not
+replaced by that implementation and stays shape only. Until a pairing records
+produced frames, the set proves shape agreement only.
+
+*** Identity core
+The first producer implements a bounded subset, the /identity core/: ~ping~,
+~status~, ~send~ and ~reconcile~ at version 3 with ~pane_identity~, the
+~pane_identity_unavailable~ refusal, and the version 2 refusal of version 3
+commands. ~cancel~ and ~subscribe~ stay specified and are not part of it; a daemon
+that implements only the identity core advertises ~pane_identity~ and neither
+~cancel~ nor ~subscribe~ (~ping.ok.identity_core.json~), so no client sends them.
+
+Every fixture belongs to exactly one class:
+- /core reply/: a reply the identity-core producer emits byte for byte
+  (placeholders aside). These are the only files a pairing replaces with produced
+  frames.
+- /client request/: a request frame a client sends. The daemon never produces it.
+  It counts as an exercised request only once a producer test sends it unchanged
+  to the real dispatch path and receives its paired reply.
+- /example/: shape only, including every ~cancel~, ~subscribe~, event, loss and
+  sequence file, the full-token ~ping.ok.json~, the client-side
+  ~ping.missing_tokens.json~, and the negative ~send.sent.no_pane_identity.json~,
+  which a correct daemon never emits. An example stays an example until the
+  feature that produces it is implemented and this text changes first.
+The class of each file is listed in the example set below. No file is a produced
+frame until a pairing records it.
+
+What version 3 adds, and why each piece exists:
+- pane identity in every pane-bound reply, so a pre-dispatch claim check can tell
+  a registration apart from a later one on the same tmux pane;
+- a per-pane ~status~ read for observation without the version 1 ~pane_status~;
+- ~cancel~, which withdraws a queued send and never un-pastes one;
+- ~subscribe~, a pushed stream of pane, receipt and registration changes, so a
+  client polls only when the stream is lost.
+
+** Pairing
+:PROPERTIES:
+:CUSTOM_ID: pairing
+:END:
+Not yet paired. The producer vendors this document between ~BEGIN VENDORED~ /
+~END VENDORED~ markers when it adopts version 3, as it does for version 2, and the
+reciprocal ~paired_*~ block is added here in that re-pairing. Until then no
+statement in this file is a claim about any producer revision. A pairing of the
+identity core claims only the /core reply/ files and the /client request/ files it
+exercised; every /example/ file stays unclaimed.
+
+** Framing and version
+:PROPERTIES:
+:CUSTOM_ID: framing-and-version
+:END:
+- A request that carries ~"protocol_version": 3~ is a version 3 request. Every
+  version 3 reply and frame carries ~"protocol_version": 3~ and ~ok~. Every reply to
+  a message-bound command echoes ~msg_id~ and ~pane_id~, as in version 2. A reply
+  without the version, or a version 2 reply to a version 3 request, is not a
+  version 3 answer and a client MUST refuse it.
+- ~ping~ at version 3 answers ~capabilities~. The tokens this version defines are
+  ~pane_identity~, ~cancel~ and ~subscribe~; ~delivery_reconcile~ keeps its version
+  2 meaning. A client MUST NOT send a command whose token is absent and fails closed
+  instead (~ping.missing_tokens.json~). Unknown well-formed extra tokens are
+  admissible.
+- A version 2 request naming a command that exists only in version 3 (~subscribe~,
+  ~cancel~, or ~status~) is refused by the daemon with ~unsupported_command~ in a
+  version 2 reply that echoes ~cmd~ and any ~msg_id~ / ~pane_id~ the request carried.
+  The refusal has no side effect: no subscription opens, no receipt changes, nothing
+  is pasted, and it never hangs. The pairs ~v2_request.subscribe.json~ /
+  ~v2_reply.subscribe.unsupported_command.json~ and ~v2_request.cancel.json~ /
+  ~v2_reply.cancel.unsupported_command.json~ show it. These four files, and the
+  ~request~ / ~reply~ inside the ~scenario.*~ files, are the only version 2 bytes in
+  this set.
+- ~send~ and ~reconcile~ keep their version 2 requests, grammars and refusals.
+  Their version 3 replies add ~pane_identity~ (~send.sent.json~,
+  ~send.queued.json~, ~reconcile.queued.json~, ~reconcile.delivered.json~);
+  ~reconcile~ adds the outcome ~cancelled~ (below).
+- ~pane_identity_unavailable~: a daemon that cannot produce a complete
+  ~pane_identity~ for a pane (for example one that mints no registrations, or one
+  without a pane-intent generation) refuses every version 3 pane-bound command --
+  ~status~, ~send~ and ~reconcile~ -- with ~ok: false~ and error
+  ~pane_identity_unavailable~ in a version 3 reply that echoes ~pane_id~, and
+  ~msg_id~ for ~send~ and ~reconcile~
+  (~status.error.pane_identity_unavailable.json~,
+  ~send.error.pane_identity_unavailable.json~,
+  ~reconcile.error.pane_identity_unavailable.json~). The refusal comes before any
+  effect: no receipt is admitted or changed and nothing is pasted. Such a daemon does
+  not advertise ~pane_identity~ in its version 3 ~ping~. It never answers a version
+  3 pane-bound command with success without ~pane_identity~. A client treats the
+  refusal as the daemon being unavailable for an identity-gated claim and does not
+  dispatch. Version 1 and version 2 are unchanged.
+
+** Pane identity
+:PROPERTIES:
+:CUSTOM_ID: pane-identity
+:END:
+- ~pane_identity~ is ~{pane_id, registration_id, generation}~. ~registration_id~ is
+  minted by the daemon when a pane is attached and is never reused; a pane that is
+  detached and attached again, even on the same tmux pane id, is a NEW registration
+  with a new ~registration_id~. ~generation~ is the pane-intent record generation the
+  daemon's boot reconciliation already compares. On the wire it is a JSON STRING of
+  one or more decimal digits (~[0-9]+~), exactly the pane-intent record's
+  ~session_gen~ and the session marker's generation in the daemon, which mint it from
+  16 random bytes rendered in decimal (1 to 39 digits) and compare it as text. It is
+  never converted to a number: it can exceed any fixed-width integer, and a client
+  compares it byte for byte.
+- ~registration_id~ is ~reg_~ followed by exactly 32 lowercase hex characters. It
+  appears only in replies and frames; no version 3 request carries one. A client
+  that reads a ~registration_id~ outside this grammar, or a ~generation~ that is not
+  a string of decimal digits (a JSON number included), refuses the reply as a reply-identity error, exactly as it
+  refuses a mismatched ~msg_id~ or ~pane_id~ echo in version 2, and never uses it for
+  a claim comparison.
+- Which replies carry ~pane_identity~: every version 3 reply or frame that reports a
+  receipt or the state of a registered pane -- ~send~ results and duplicates,
+  ~reconcile~ outcomes that carry a receipt view (~delivered~, ~queued~,
+  ~ambiguous~, ~cancelled~), ~cancel~ outcomes that carry a receipt view
+  (~cancelled~, ~too_late~, ~ambiguous~), successful ~status~, every snapshot entry
+  and every pane or registration event. Replies that name no registration omit it:
+  ~reconcile~ and ~cancel~ ~absent~ and ~conflict~ (no stored record, or the caller's
+  identities only), every refusal (~ok: false~, for example ~pane_not_found~ and
+  ~pane_identity_unavailable~), and
+  ~ping~ and ~subscription_lost~. A client MUST NOT require ~pane_identity~ on those
+  and MUST NOT treat its absence there as proof of anything about the pane.
+- A client holding a claim for a pane MUST compare the reply's ~registration_id~ and
+  ~generation~ with the identity recorded in its claim before dispatch; a reply that
+  should carry ~pane_identity~ but does not (~send.sent.no_pane_identity.json~), or a
+  mismatch, refuses dispatch and opens a diagnosis that names the pane, the claim and
+  the observed daemon state.
+- The process id of the pane is NOT identity: tmux ~respawn-pane~ keeps the pane id
+  and changes the pid. It appears only in ~status~ as ~pane_pid~.
+
+** Status
+:PROPERTIES:
+:CUSTOM_ID: status
+:END:
+- ~status~ ~{pane_id}~ answers ~state~, ~quarantined~, ~queue_depth~, ~pane_pid~ and
+  ~pane_identity~ (~status.ok.json~, ~status.quarantined.json~), or a typed refusal
+  such as ~pane_not_found~ (~status.error.pane_not_found.json~) or
+  ~pane_identity_unavailable~ (above).
+- It is a per-pane read. The registry-wide read and its JSON shape are not defined
+  here.
+
+** Cancel
+:PROPERTIES:
+:CUSTOM_ID: cancel
+:END:
+- ~cancel~ carries ~msg_id~ and ~pane_id~ and answers exactly one ~outcome~:
+  | outcome     | meaning                                                                                         |
+  |-------------+-------------------------------------------------------------------------------------------------|
+  | ~cancelled~ | the send was queued and is withdrawn; its receipt is now ~cancelled~                            |
+  | ~too_late~  | the send was already delivered; nothing changes                                                 |
+  | ~ambiguous~ | the paste is in flight or pending; the daemon does not wait for it and nothing is withdrawn     |
+  | ~absent~    | no receipt exists for these identities                                                          |
+  | ~conflict~  | the ~msg_id~ exists with a different pane; echoes the identities presented, never the stored ones |
+- ~cancel~ never pastes and never un-pastes.
+- ~cancelled~ is a NEW TERMINAL receipt status, distinct from ~not_delivered~. It is
+  never stored as ~not_delivered~, because version 2 admission opens a new attempt
+  for a ~not_delivered~ receipt and a cancelled send MUST NOT be re-admitted.
+- At version 3, ~reconcile~ of a cancelled send answers the sixth outcome
+  ~cancelled~ with the receipt view (~reconcile.cancelled.json~), and a ~send~ that
+  repeats its ~msg_id~ is refused as a duplicate with ~status~ ~cancelled~
+  (~send.duplicate.cancelled.json~).
+- At version 2 a cancelled receipt is read as ~ambiguous~: a version 2 ~reconcile~
+  answers the existing ~reconcile.ambiguous~ shape and a version 2 duplicate answers
+  ~send.duplicate.ambiguous~. Version 2 already requires a client to refuse
+  ~ambiguous~ and never resend it, so a version 2 client can neither re-admit nor
+  report delivery for a cancelled send. No version 2 shape changes. The two
+  projections are shown as scenarios: ~scenario.cancelled.v2_reconcile.json~ and
+  ~scenario.cancelled.v2_send.json~ each name the state they start from
+  (~cancel.cancelled.json~), the version 2 request, and the reply, which is
+  structurally equal (same keys and values once decoded) to the existing version 2
+  fixture it names in ~projection_of~; that fixture's own bytes stay pinned by the
+  version 2 hash, so the projection uses the unchanged version 2 shape.
+
+** Subscribe
+:PROPERTIES:
+:CUSTOM_ID: subscribe
+:END:
+*** Frames
+- ~subscribe~ ~{panes: [pane_id, ...]}~ or ~{panes: "all"}~ opens a dedicated
+  connection. The first frame is a ~snapshot~ (~seq~ 0); later frames are ~event~
+  frames with a per-subscription ~seq~ that increases by exactly 1, or one
+  ~subscription_lost~ frame before close.
+- Event ~kind~ values: ~pane_state~, ~receipt~, ~pane_gone~ and ~registration~
+  (~change~ ~attach~ or ~detach~).
+- Each pane has a ~version~ that increases by exactly 1 on every observable change.
+  Every snapshot entry and every pane event carries it. Registering the subscriber
+  and reading a pane's snapshot entry happen in one serialized step of that pane's
+  owner, so the first event for a pane carries the snapshot entry's version plus 1.
+
+*** Subscribe to all panes: the registry handoff
+- Membership has one serializing owner, the registry, with a ~registry_epoch~ that
+  increases by exactly 1 on every attach and every detach. Everything below is keyed
+  by ~registration_id~, never by ~pane_id~ alone.
+- Each subscriber has one outbound queue. Enqueue appends to a bounded buffer and
+  returns; it never waits on the client socket.
+- Capture: in one registry step the daemon adds the subscriber and records the
+  member set M (registration ids) and the epoch E. From then on every attach and
+  detach is enqueued to this subscriber as a ~registration~ event with its epoch;
+  the first carries E + 1.
+- Tombstones: until this subscriber's snapshot is emitted, a member of M that
+  detaches leaves a tombstone with its final entry. A pane owner that terminates
+  abnormally leaves a tombstone with ~final_state~ ~unknown~ and no version, and the
+  registry treats that termination as a detach. Tombstones are released when every
+  pending subscriber that pinned them has emitted its snapshot or closed; a pending
+  subscriber whose snapshot is not emitted within a fixed deadline is closed (reason
+  ~snapshot_timeout~, or a bare close).
+- Snapshot read: each entry is read from the owner of THAT registration id. If the
+  owner has stopped, or the pane id now belongs to another registration, the
+  tombstone is used and the entry is marked ~detached~. A new registration on the
+  same pane id never enters this snapshot; it arrives only as its own attach event.
+- The snapshot frame carries ~epoch~ (E) and ~max_epoch_at_snapshot~, the registry
+  epoch when the last entry was read. With an empty M, ~max_epoch_at_snapshot~ is E
+  (~subscribe.all.empty.json~).
+- Attach is one registry step in this order: mint the registration id and advance
+  the epoch; enqueue the attach event, carrying the initial entry at version 0, to
+  every all-panes subscriber including pending ones; only then start the pane owner.
+  The owner does not exist before every enqueue has returned, so no pane event can
+  precede its registration on any subscriber's queue.
+- Detach is one registry step: stop admitting sends for that registration, write any
+  pinned tombstones, stop the owner, advance the epoch, enqueue the detach event.
+- Events produced between capture and the snapshot frame wait in the subscriber's
+  queue, count against its bound, and are sent after the snapshot frame in enqueue
+  order.
+- A snapshot captures STATE at the version each entry was read, not the transitions
+  between capture and that read; the version number is the only trace of them.
+
+*** Client view and protocol errors
+- The view is keyed by ~registration_id~. An entry marked ~detached~ is in view as
+  detached-pending and pairs with exactly one later detach event, which removes it;
+  it causes neither a second detach nor a resubscribe.
+- Each of these is a protocol error that makes the client discard its view and
+  resubscribe: a ~seq~ gap or repeat; a pane ~version~ gap, or an event at or below
+  the version in view; an epoch gap or repeat; an attach for a registration already
+  in view; a detach for a registration not in view; a pane event for a registration
+  not in view or detached-pending; a detached-pending entry still unmatched after
+  every registration event up to ~max_epoch_at_snapshot~ has been applied.
+
+*** Loss, overflow and restart
+- Overflow: when a subscriber's buffer is full the daemon stops enqueueing for it,
+  writes ~subscription_lost~ ~{reason: overflow}~ only if that write would not block,
+  and closes either way. Delivery and other subscribers are never slowed by a slow
+  subscriber.
+- Restart: subscriptions are not durable. A daemon restart closes them with no final
+  frame.
+- A final frame is NOT guaranteed. A bare close (~seq.close_no_frame.*.json~) is a
+  complete loss signal, classified the same as the matching ~subscription_lost~
+  frame; it does not require one.
+- What ~seq~, ~version~ and ~epoch~ prove: only that this stream has no gap. They
+  never prove a delivery outcome. Delivery truth comes only from ~reconcile~.
+
+*** After loss
+- The client discards its view and treats every pane state it held as UNKNOWN. It
+  reconciles every send that is not terminal in its journal before any other action;
+  ~ambiguous~ raises attention and is never resent; a resend happens only after
+  ~reconcile~ answers ~absent~.
+- It resubscribes with bounded backoff and meanwhile observes with version 3
+  ~status~. A status reply clears UNKNOWN for that pane only when it arrived after
+  the loss, succeeded, carries a ~pane_identity~ equal to the identity in that pane's
+  claim, and reports the pane live and not quarantined. A stale, missing, failed or
+  contradictory reply never clears it; it refuses dispatch to that pane and opens the
+  claim-refusal diagnosis. No dispatch goes to an UNKNOWN pane.
+- Degraded polling is bounded. Dispatch to cleared panes continues only with a fresh
+  identity-matching ~status~ before each dispatch. A snapshot before a fixed
+  deadline ends degraded mode. At the deadline without one, the run reaches attention
+  ~daemon_subscription_degraded~ and dispatches nothing more. If resubscription and
+  ~status~ both fail past a fixed deadline, the run reaches attention
+  ~daemon_observation_lost~. A later snapshot never resolves either attention or
+  resumes dispatch; only an authorized ~resolve_attention~ does, after a snapshot
+  received since the attention opened, identity checks of the panes to be
+  dispatched, and reconciliation of the non-terminal sends.
+
+*** Bounds
+The per-subscriber buffer size, the snapshot deadline, the resubscription backoff,
+the status poll interval and the two attention deadlines are fixed and finite. Their
+values are chosen with the first producer and consumer tests and recorded here then;
+until they are, no implementation may claim conformance.
+
+** Example set
+:PROPERTIES:
+:CUSTOM_ID: example-set
+:END:
+| Fixture                                          | Class          | Shows                                                                     |
+|--------------------------------------------------+----------------+---------------------------------------------------------------------------|
+| ~ping.ok.identity_core.json~                     | core reply     | version 3 ping of an identity-core daemon: no ~cancel~ or ~subscribe~     |
+| ~ping.ok.json~                                   | example        | version 3 ping with all tokens                                            |
+| ~ping.missing_tokens.json~                       | example        | a daemon without the version 3 tokens; the client fails closed            |
+| ~send.sent.json~, ~send.queued.json~             | core reply     | version 2 send replies plus ~pane_identity~                               |
+| ~send.error.pane_identity_unavailable.json~      | core reply     | send refused: no complete pane identity                                   |
+| ~send.sent.no_pane_identity.json~                | example        | a reply the client MUST refuse for missing identity (never emitted)       |
+| ~send.duplicate.cancelled.json~                  | example        | duplicate of a cancelled send                                             |
+| ~status.ok.json~, ~status.quarantined.json~      | core reply     | per-pane status: live and quarantined                                     |
+| ~status.error.pane_not_found.json~               | core reply     | status refused: unknown pane                                              |
+| ~status.error.pane_identity_unavailable.json~    | core reply     | status refused: no complete pane identity                                 |
+| ~reconcile.queued.json~                          | core reply     | version 2 reconcile outcome ~queued~ plus ~pane_identity~                 |
+| ~reconcile.delivered.json~                       | core reply     | version 2 reconcile outcome ~delivered~ plus ~pane_identity~              |
+| ~reconcile.error.pane_identity_unavailable.json~ | core reply     | reconcile refused: no complete pane identity                              |
+| ~cancel.*.json~                                  | example        | the five cancel outcomes                                                  |
+| ~reconcile.cancelled.json~                       | example        | the sixth reconcile outcome                                               |
+| ~v2_request.subscribe.json~                      | client request | version 2 request for ~subscribe~                                         |
+| ~v2_request.cancel.json~                         | client request | version 2 request for ~cancel~                                            |
+| ~v2_reply.subscribe.unsupported_command.json~    | core reply     | its typed version 2 refusal                                               |
+| ~v2_reply.cancel.unsupported_command.json~       | core reply     | its typed version 2 refusal                                               |
+| ~scenario.cancelled.*.json~                      | example        | a cancelled receipt read through version 2 reconcile and send             |
+| ~subscribe.pane.snapshot.json~                   | example        | per-pane snapshot                                                         |
+| ~subscribe.all.*.json~                           | example        | all-panes snapshots: ordinary, empty, with a detached entry, unknown state |
+| ~event.*.json~                                   | example        | one of each event kind                                                    |
+| ~subscription_lost.*.json~                       | example        | the two loss frames                                                       |
+| ~seq.close_no_frame.*.json~                      | example        | frames then close with no final frame: overflow, restart, snapshot timeout |
+| ~seq.race.*.json~                                | example        | attach, detach, detach-then-reattach, owner exit before the read          |
+
+A ~seq.*~ file is a sequence: ~frames~ in order, then ~then~ ~close~.
+
+** Placeholders
+:PROPERTIES:
+:CUSTOM_ID: placeholders
+:END:
+~<msg_id>~, ~<pane_id>~, ~<payload_hash>~, ~<version>~, ~<text>~,
+~<registration_id>~ and ~<generation>~ are dynamic and substituted by tests (a
+substituted ~registration_id~ or ~generation~ follows its grammar above); ~<pane_id_1>~, ~<pane_id_2>~ and
+~<registration_id_1>~ to ~<registration_id_3>~ name distinct panes and registrations
+within one file. Pane ids are placeholders because ~bin/redaction-check~ refuses a
+literal tmux pane id in the tree. Everything else is exact bytes.
+# END VENDORED orris docs/contracts/ipc-v3.org

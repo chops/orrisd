@@ -472,6 +472,39 @@ defmodule AiPair.PaneRestore.DurableIPCRedTest do
     end
   end
 
+  # ==========================================================================
+  # NS-15.G.002 B1a-2: the version 3 identity core over the real socket.
+  # ==========================================================================
+
+  describe "B1a-2 version 3 over the server" do
+    test "V1 after a durable attach, v3 status reports the committed identity and the census pid",
+         c do
+      durable!(c, happy_script(c.root) ++ [census([row(pane_pid: 6161)])])
+      store!(c.root)
+
+      assert %{"ok" => true, "persisted" => true} = attach!(c)
+      assert [record] = records(c.root)
+
+      reply =
+        decode(request(c, %{"cmd" => "status", "protocol_version" => 3, "pane_id" => @pane}))
+
+      assert reply["ok"] == true and reply["protocol_version"] == 3
+      assert reply["pane_pid"] == 6161, "the CURRENT census pid, not the attach-time record pid"
+
+      assert reply["pane_identity"] == %{
+               "pane_id" => @pane,
+               "registration_id" => record["registration_id"],
+               "generation" => record["session_gen"]
+             }
+    end
+
+    test "V2 a v3 ping advertises pane_identity only in durable mode", c do
+      durable!(c, [])
+      ping = decode(request(c, %{"cmd" => "ping", "protocol_version" => 3}))
+      assert "pane_identity" in ping["capabilities"]
+    end
+  end
+
   # --- helpers ---------------------------------------------------------------
 
   # apply/3: the function is B1a-1 GREEN's (PaneSupervisor.registration/1), absent at the RED base.
