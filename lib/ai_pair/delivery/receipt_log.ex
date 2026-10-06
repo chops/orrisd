@@ -5,9 +5,9 @@ defmodule AiPair.Delivery.ReceiptLog do
 
   @anchor "sha256:" <> Base.encode16(:crypto.hash(:sha256, ""), case: :lower)
   @schema "ai-pair/delivery-receipt"
-  # This build reads versions 1 and 2 and writes only version 1 (NS-15.G.003 S0a). Version 2
-  # adds `paste_started`, written by a later generation before any paste; reading it here
-  # keeps a rollback to this build able to open that generation's log.
+  # This build reads versions 1 and 2 and writes only version 2 (NS-15.G.003 S0b). Version 2
+  # adds `paste_started`, which the store appends durably before any paste. Version 1 stays
+  # readable for logs written before S0b; an S0a build is the rollback floor that reads both.
   @schema_versions [1, 2]
   @statuses ~w(pending queued delivered not_delivered ambiguous)
   @v2_statuses @statuses ++ ~w(paste_started)
@@ -41,7 +41,7 @@ defmodule AiPair.Delivery.ReceiptLog do
   def append(log, view, epoch) do
     record = %{
       "schema" => "ai-pair/delivery-receipt",
-      "schema_version" => 1,
+      "schema_version" => 2,
       "seq" => log.seq + 1,
       "prev_line_sha256" => log.previous,
       "daemon_epoch" => epoch,
@@ -68,6 +68,7 @@ defmodule AiPair.Delivery.ReceiptLog do
 
   def transition?("pending", next), do: next in ~w(queued delivered not_delivered ambiguous)
   def transition?("queued", next), do: next in ~w(delivered not_delivered ambiguous)
+  def transition?("paste_started", next), do: next in ~w(delivered ambiguous)
   def transition?(_, _), do: false
 
   def view(record) do

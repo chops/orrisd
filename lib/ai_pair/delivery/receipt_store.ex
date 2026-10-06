@@ -84,6 +84,7 @@ defmodule AiPair.Delivery.ReceiptStore do
           observers: %{},
           waiters: %{},
           in_flight: MapSet.new(),
+          pre_paste: %{},
           poisoned: false
         }
 
@@ -154,7 +155,19 @@ defmodule AiPair.Delivery.ReceiptStore do
          {:ok, current} <- current(state, id),
          :ok <- authority(state, id, token, current.delivery_attempt),
          :ok <- paste_start(state, id, current.status) do
-      {:reply, :ok, %{state | in_flight: MapSet.put(state.in_flight, id)}}
+      # The marker is durable before :ok, so paste_fn never runs without it on disk.
+      case persist(state, %{current | status: "paste_started"}) do
+        {:ok, updated} ->
+          {:reply, :ok,
+           %{
+             updated
+             | in_flight: MapSet.put(updated.in_flight, id),
+               pre_paste: Map.put(updated.pre_paste, id, current.status)
+           }}
+
+        {:error, _reason, failed} ->
+          {:reply, {:error, :receipt_store_unavailable}, failed}
+      end
     else
       {:error, _} = error -> {:reply, error, state}
     end
@@ -178,7 +191,7 @@ defmodule AiPair.Delivery.ReceiptStore do
 
       {%{from: from, id: id, monitor: monitor}, rest} ->
         Process.demonitor(monitor, [:flush])
-        {:ok, view} = current(state, id)
+        {:ok, view} = public(state, id)
 
         # A poisoned store can no longer finalize this record; never answer it as pending.
         reply =
@@ -200,7 +213,8 @@ defmodule AiPair.Delivery.ReceiptStore do
         state = %{state | owners: owners}
         {:ok, view} = current(state, id)
 
-        if view.delivery_attempt == attempt and view.status in ["pending", "queued"] do
+        if view.delivery_attempt == attempt and
+             view.status in ["pending", "queued", "paste_started"] do
           case persist(state, %{view | status: "ambiguous"}) do
             {:ok, updated} -> {:noreply, notify(updated, id)}
             {:error, _reason, failed} -> {:noreply, failed}
@@ -215,7 +229,7 @@ defmodule AiPair.Delivery.ReceiptStore do
   def terminate(_reason, state), do: close_on_failure(state)
 
   defp admit_current(state, id, pane, hash, owner) do
-    case current(state, id) do
+    case public(state, id) do
       {:error, {:unknown_message_id, _}} ->
         admit_attempt(state, id, pane, hash, owner, 1)
 
@@ -258,7 +272,7 @@ defmodule AiPair.Delivery.ReceiptStore do
   end
 
   defp reconcile_current(state, id, pane, hash, wait, from) do
-    case current(state, id) do
+    case public(state, id) do
       {:error, {:unknown_message_id, _}} ->
         {:reply, {:ok, %{outcome: "absent", message_id: id, pane_id: pane}}, state}
 
@@ -320,7 +334,7 @@ defmodule AiPair.Delivery.ReceiptStore do
   end
 
   defp notify(state, id) do
-    {:ok, view} = current(state, id)
+    {:ok, view} = public(state, id)
 
     state =
       Enum.reduce(state.waiters, state, fn {ref, waiter}, acc ->
@@ -351,7 +365,8 @@ defmodule AiPair.Delivery.ReceiptStore do
         state
         | owners: owners,
           observers: Map.delete(state.observers, id),
-          in_flight: MapSet.delete(state.in_flight, id)
+          in_flight: MapSet.delete(state.in_flight, id),
+          pre_paste: Map.delete(state.pre_paste, id)
       }
     else
       state
@@ -379,6 +394,18 @@ defmodule AiPair.Delivery.ReceiptStore do
     end
   end
 
+  # What callers see: `paste_started` is internal and reads as the status the live attempt had
+  # just before its marker, so every v2 reply is the one it was before the marker existed.
+  defp public(state, id) do
+    case current(state, id) do
+      {:ok, %{status: "paste_started"} = view} ->
+        {:ok, %{view | status: Map.get(state.pre_paste, id, "pending")}}
+
+      other ->
+        other
+    end
+  end
+
   defp authority(state, id, token, attempt) do
     case Map.get(state.tokens, token) do
       {^id, ^attempt} -> :ok
@@ -402,9 +429,14 @@ defmodule AiPair.Delivery.ReceiptStore do
 
   defp paste_start(state, id, status) do
     cond do
-      status not in ["pending", "queued"] -> {:error, :paste_not_pending}
-      MapSet.member?(state.in_flight, id) -> {:error, :paste_already_started}
-      true -> :ok
+      status == "paste_started" or MapSet.member?(state.in_flight, id) ->
+        {:error, :paste_already_started}
+
+      status not in ["pending", "queued"] ->
+        {:error, :paste_not_pending}
+
+      true ->
+        :ok
     end
   end
 

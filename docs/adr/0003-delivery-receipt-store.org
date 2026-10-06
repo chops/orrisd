@@ -50,9 +50,16 @@ service begins. A complete unterminated tail that fails that validation, lacks a
 schema key, or decodes to a non-object is corruption and is refused with the file
 unchanged. A complete invalid last record is corruption, not a removable tail.
 
-This build reads ~schema_version~ 1 and 2 and writes only 1. Version 2 has the same
-keys and adds the status ~paste_started~, recorded by a later writer before a paste
-begins. Within one version the version 1 history holds, and ~paste_started~ may
+This build reads ~schema_version~ 1 and 2 and writes only 2. Version 2 has the same
+keys and adds the status ~paste_started~. ~begin_paste~ appends and fsyncs a
+~paste_started~ record before it authorizes the paste, so no receipted paste starts
+without that durable marker; if the marker cannot be written the store is poisoned,
+the caller is told ~receipt_store_unavailable~ and nothing is pasted. Version 2 means
+"written by a marker-capable writer": the writer change and the marker landed in one
+atomic integration, so no build on main writes version 2 without the marker. While an
+attempt is live, ~paste_started~ is internal: replies show the status the attempt had
+just before its marker (~pending~ or ~queued~), so every reply is the one it was before
+the marker existed. Within one version the version 1 history holds, and ~paste_started~ may
 follow only ~pending~ or ~queued~ and be followed only by ~delivered~ or ~ambiguous~,
 never ~not_delivered~. Within one attempt the version may change only where boot
 finalizes a ~pending~, ~queued~ or ~paste_started~ record as ~ambiguous~; every other
@@ -84,8 +91,8 @@ who can rewrite the entire log.
 :CUSTOM_ID: ownership-and-recovery
 :END:
 The store mints its epoch once at initialization and monitors the actual delivery
-operation owner, not the requesting connection. Owner loss makes a pending or
-queued attempt durably ambiguous. Restart likewise appends ambiguity for every
+operation owner, not the requesting connection. Owner loss makes a pending, queued
+or ~paste_started~ attempt durably ambiguous. Restart likewise appends ambiguity for every
 unresolved prior-epoch attempt (pending, queued or ~paste_started~) before accepting
 new calls.
 
@@ -107,17 +114,21 @@ queried as absent because that operation was never authorized to paste.
 :CUSTOM_ID: crossing-the-paste-boundary
 :END:
 ~begin_paste/3~ authenticates the current operation token immediately before the
-pane invokes the physical paste. It grants that permission once per attempt and
-marks the attempt in flight in memory. It does not append a new durable status:
-the existing pending/queued record already makes a crash ambiguous. A queued
-attempt in flight uses the pending bounded-wait behavior, not an immediate
-queued answer. Terminal finalization removes the runtime mark; owner loss wakes
+pane invokes the physical paste. It grants that permission once per attempt,
+appends and fsyncs a version 2 ~paste_started~ record before replying ~:ok~, and
+marks the attempt in flight in memory together with its pre-marker status. That
+durable marker is the crash evidence that a paste may have begun; a crash before it
+leaves the pending or queued record, which boot also finalizes as ambiguous. A
+failed marker write poisons the store and authorizes nothing. A queued attempt in
+flight uses the pending bounded-wait behavior, not an immediate queued answer, and
+its replies still show ~queued~. Terminal finalization removes the runtime mark; owner loss wakes
 waiters with durably recorded ambiguity. Once paste is authorized, neither
 ~not_delivered~ nor a return to ~queued~ is accepted from that token.
 
 This extends the component for its pane-wiring obligation; IPC and pane callers
-must use it before the side effect. It does not make the filesystem record alone
-proof of an in-flight operation and does not introduce a durable ~pasting~ state.
+must use it before the side effect. The ~paste_started~ record proves only that
+a paste may have begun, never that it completed; it is never projected on the wire
+and never restored as queued.
 
 ** Scope Limits
 :PROPERTIES:
