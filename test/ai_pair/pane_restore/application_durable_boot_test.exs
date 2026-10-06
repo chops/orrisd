@@ -167,12 +167,13 @@ defmodule AiPair.ApplicationDurableBootTest do
   ]
 
   # The eleven children a durable boot starts, in `which_children` order: the
-  # reverse of the contract's frozen start order.
+  # reverse of the contract's frozen start order (NS-15.G.003 S2 amendment: the
+  # receipt store starts before Boot).
   @durable_child_ids [
     AiPair.IPC.Server,
-    AiPair.Delivery.ReceiptStore,
     AiPair.IPC.ConnectionSupervisor,
     AiPair.PaneRestore.Boot,
+    AiPair.Delivery.ReceiptStore,
     AiPair.PaneIntentStore,
     AiPair.PaneRestore.Coordinator,
     AiPair.Tmux,

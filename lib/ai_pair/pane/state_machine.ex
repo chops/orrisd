@@ -74,8 +74,11 @@ defmodule AiPair.Pane.StateMachine do
   # dumps, SASL supervisor reports, and any error tuple carrying the state.
   # The field is untouched and quarantine still derives from it at `init/1`;
   # only its rendering is suppressed.
-  @derive {Inspect, except: [:quarantine_token]}
+  @derive {Inspect, except: [:quarantine_token, :restore_capability]}
   defstruct [
+    :restore_capability,
+    :restore_claim_timeout_ms,
+    :restore_retry_ms,
     :pane_id,
     :receipt_store,
     :agent,
@@ -93,6 +96,7 @@ defmodule AiPair.Pane.StateMachine do
     :recovery_candidate,
     :quarantine_token,
     recovering_capture: false,
+    restore_failures: %{},
     pending_sends: :queue.new(),
     pane_gone_count: 0
   ]
@@ -264,15 +268,74 @@ defmodule AiPair.Pane.StateMachine do
       # spec (pane_supervisor.ex), so it comes back quarantined without
       # anyone re-quarantining it — which is the only way containment can
       # survive a crash.
-      quarantine_token: Keyword.get(opts, :quarantine_token)
+      quarantine_token: Keyword.get(opts, :quarantine_token),
+      # NS-15.G.003 S2: a boot-restored pane pulls its restored queued sends with this
+      # capability (from the same child spec, so a restarted child claims again).
+      restore_capability: Keyword.get(opts, :restore_capability),
+      restore_claim_timeout_ms: Keyword.get(opts, :restore_claim_timeout_ms, 5_000),
+      restore_retry_ms: Keyword.get(opts, :restore_retry_ms, 1_000)
     }
 
-    {:ok, :unknown, data, [{{:timeout, :poll}, 0, nil}]}
+    claim =
+      if data.receipt_store && data.restore_capability,
+        do: [{:next_event, :internal, :claim_restored}],
+        else: []
+
+    {:ok, :unknown, data, claim ++ [{{:timeout, :poll}, 0, nil}]}
+  end
+
+  # ----- S2 restored-send claim -----
+
+  # The claim is idempotent per holder, so a timed-out call is simply retried; a late
+  # first reply to an expired call is discarded by the call alias. The restored queue is
+  # REPLACED from the reply, keyed by msg_id, so no entry is ever held twice.
+  @impl true
+  def handle_event(:internal, :claim_restored, _state, data) do
+    reply =
+      try do
+        ReceiptStore.claim_restored(
+          data.receipt_store,
+          data.pane_id,
+          data.restore_capability,
+          data.restore_claim_timeout_ms
+        )
+      catch
+        :exit, {:timeout, _} -> :retry
+        :exit, _ -> {:error, :receipt_store_unavailable}
+      end
+
+    case reply do
+      :retry ->
+        {:keep_state_and_data, [{:next_event, :internal, :claim_restored}]}
+
+      {:ok, entries} ->
+        {queue, failures} = restored_queue(data, entries)
+        data = %{data | pending_sends: queue, restore_failures: failures}
+        {:keep_state, data, restore_retry(data)}
+
+      {:error, reason} ->
+        Logger.warning("ai_pair: pane=#{data.pane_id} restore claim refused: #{inspect(reason)}")
+        :keep_state_and_data
+    end
+  end
+
+  # Fail closed (G3 review): an entry whose verified read failed leaves this pane's tracking
+  # only after restore_failed durably finalized it. Until then it stays in restore_failures and
+  # is retried; the store keeps it held by this pane and its receipt queued. An entry the store
+  # no longer recognizes for this token (fenced to a new holder, or already terminal) is the
+  # store's to account for and is dropped here.
+  def handle_event({:timeout, :restore_failed_retry}, _, _state, data) do
+    failures =
+      data.restore_failures
+      |> Enum.reject(fn {_id, entry} -> restore_failed_settled?(data, entry) end)
+      |> Map.new()
+
+    data = %{data | restore_failures: failures}
+    {:keep_state, data, restore_retry(data)}
   end
 
   # ----- entry actions -----
 
-  @impl true
   def handle_event(:enter, _old, :idle, data) do
     data2 = %{data | idle_since_ms: now_ms()}
     actions = [{:state_timeout, data.idle_debounce_ms, :drain_pending}]
@@ -553,6 +616,88 @@ defmodule AiPair.Pane.StateMachine do
           {:error, _} = error ->
             {:keep_state_and_data, [{:reply, from, error}]}
         end
+    end
+  end
+
+  # Each restored object passes the verified read before its entry is placed; a failed read
+  # is finalized ambiguous by the store (restore_failed) before the entry is omitted.
+  defp restored_queue(data, entries) do
+    ids = MapSet.new(entries, & &1.msg_id)
+
+    kept =
+      data.pending_sends
+      |> :queue.to_list()
+      |> Enum.reject(fn
+        {:receipted, _, _, id, _, _} -> MapSet.member?(ids, id)
+        _ -> false
+      end)
+
+    {restored, failures} =
+      entries
+      |> Enum.uniq_by(& &1.msg_id)
+      |> Enum.reduce({[], %{}}, fn e, {queued, failed} ->
+        case verified_payload(e) do
+          {:ok, bytes} ->
+            item =
+              {:receipted, Payload.new(bytes), :otel_ctx.get_current(), e.msg_id, now_ms(), e.token}
+
+            {[item | queued], failed}
+
+          :error ->
+            # Omitted only once restore_failed durably finalized it; otherwise tracked.
+            if restore_failed_settled?(data, e),
+              do: {queued, failed},
+              else: {queued, Map.put(failed, e.msg_id, e)}
+        end
+      end)
+
+    {:queue.from_list(Enum.reverse(restored) ++ kept), failures}
+  end
+
+  # :ok is a durable ambiguous append (and object removal); :stale_token or :not_restored
+  # mean the store no longer gives this pane that entry. Anything else is unsettled.
+  defp restore_failed_settled?(data, entry) do
+    result =
+      receipt_call(fn ->
+        ReceiptStore.restore_failed(data.receipt_store, entry.msg_id, entry.attempt, entry.token)
+      end)
+
+    case result do
+      :ok ->
+        true
+
+      {:error, reason} when reason in [:stale_token, :not_restored] ->
+        true
+
+      other ->
+        Logger.warning(
+          "ai_pair: pane=#{data.pane_id} restore_failed unrecorded for #{entry.msg_id}: " <>
+            inspect(other)
+        )
+
+        false
+    end
+  end
+
+  defp restore_retry(%{restore_failures: failures}) when map_size(failures) == 0, do: []
+
+  defp restore_retry(data),
+    do: [{{:timeout, :restore_failed_retry}, data.restore_retry_ms, nil}]
+
+  # The actual-read re-verify (G1/G2 review): the S1 checks against the store's own uid, then
+  # the bytes must hash to the attempt's payload_hash. Boot verification does not freeze bytes.
+  defp verified_payload(entry) do
+    with true <- is_integer(entry.owner_uid),
+         {:ok, bytes} <-
+           AiPair.Delivery.PayloadStore.read_verified(
+             AiPair.Delivery.SystemFs.new(),
+             entry.object,
+             entry.owner_uid
+           ),
+         true <- Payload.hash(Payload.new(bytes)) == entry.payload_hash do
+      {:ok, bytes}
+    else
+      _ -> :error
     end
   end
 

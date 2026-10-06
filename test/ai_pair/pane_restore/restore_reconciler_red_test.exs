@@ -266,6 +266,47 @@ defmodule AiPair.PaneRestore.RestoreReconcilerRedTest do
     assert Agent.get(agent, & &1.pastes) == []
   end
 
+  # GREEN-review row (G3 AMEND m_20261006T121051Z blocker 2).
+  test "R8 a readmit whose Coordinator fence cannot be released reports fence_update_failed",
+       c do
+    pane = pane_id()
+    own_pane(pane)
+    rstore = restored_store!(c.inbox, pane, ["r8"])
+    {agent, callbacks} = recorder()
+    _ = reconcile(pane, callbacks, receipt_store: rstore)
+    {:ok, old} = PaneSupervisor.whereis_pane(pane)
+    assert eventually(fn -> StateMachine.pending_count(old) == 1 end)
+
+    # Wedge the old child, so readmit holds the pane's fence through its bounded stop.
+    Agent.update(agent, &%{&1 | blocked: true})
+    assert eventually(fn -> Agent.get(agent, & &1.stuck) > 0 end)
+
+    readmit =
+      Task.async(fn ->
+        apply(Reconciler, :readmit, [
+          pane,
+          [receipt_store: rstore, callbacks: callbacks, stop_timeout_ms: 300]
+        ])
+      end)
+
+    assert eventually(fn -> match?([%{holder: {:fenced, ^old}}], registry(rstore)[pane]) end),
+           "the fence was taken"
+
+    # The Coordinator dies while the fence is held: its release cannot be recorded.
+    coordinator = Process.whereis(Coordinator)
+    ref = Process.monitor(coordinator)
+    Process.exit(coordinator, :kill)
+    assert_receive {:DOWN, ^ref, :process, ^coordinator, _}
+
+    assert {:error, {:fence_update_failed, {:error, :stop_timeout}, _reason}} =
+             Task.await(readmit, 2_000)
+
+    assert [%{holder: {:fenced, ^old}}] = registry(rstore)[pane]
+    assert last_status(c.inbox, id("r8")) == {"queued", 1}
+    Agent.update(agent, &%{&1 | blocked: false})
+    assert Agent.get(agent, & &1.pastes) == []
+  end
+
   test "R5 only the transaction holder's live worker for that pane and exact request may issue or fence",
        c do
     pane = pane_id()

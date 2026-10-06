@@ -5,7 +5,8 @@ defmodule AiPair.Delivery.PayloadStore do
   Owned and serialized by `AiPair.Delivery.ReceiptStore`; never shared. An object is named
   `<msg_id>.<attempt>.<sha256 hex>.payload` from validated receipt fields only, published by
   exclusive temp create, fsync and hard link (never overwritten), and removed only after its
-  attempt's terminal receipt is durable. S1 restores nothing.
+  attempt's terminal receipt is durable. S2 keeps (and counts) only the objects of boot-restored
+  queued attempts, whose bytes were verified before boot cleanup (`verified?/4`).
 
   Threat model (S1 RED design r3): the directory has the receipt log's trust boundary. The
   directory checks DETECT a replacement already present and stop further work; they do not
@@ -33,7 +34,7 @@ defmodule AiPair.Delivery.PayloadStore do
 
   @doc """
   Open the payload directory and clean it at boot. `keep` decides, per parsed object name
-  `{msg_id, attempt, hash}`, whether the object belongs to a queued attempt (S1: none do).
+  `{msg_id, attempt, hash}`, whether the object belongs to a restored queued attempt.
   An unsafe directory disables the store and is left untouched.
   """
   def boot(fs, inbox, log_path, opts, keep) do
@@ -95,6 +96,56 @@ defmodule AiPair.Delivery.PayloadStore do
       :error ->
         store
     end
+  end
+
+  @doc """
+  Restore predicate (c): the exact object of `view`'s attempt exists in a safe payload
+  directory, passes the S1 path-safety and read checks, and its bytes hash to payload_hash.
+  Read-only.
+  """
+  def verified?(fs, inbox, log_path, view) do
+    dir = Path.join([inbox, "delivery", "payloads"])
+
+    with {:ok, %File.Stat{uid: uid}} <- Fs.lstat(fs, log_path),
+         {:ok, stat} <- Fs.lstat(fs, dir),
+         :ok <- safe_dir(stat, uid),
+         {:ok, bytes} <- read_verified(fs, Path.join(dir, object_name(view)), uid) do
+      AiPair.Delivery.Payload.hash(AiPair.Delivery.Payload.new(bytes)) == view.payload_hash
+    else
+      _ -> false
+    end
+  end
+
+  @doc "The verified read of one object: {:ok, bytes} or {:error, reason}."
+  def read_verified(fs, path, uid) do
+    with {:ok, %File.Stat{} = before} <- Fs.lstat(fs, path),
+         :ok <- own_regular(before, uid),
+         true <- before.size <= @max_object_bytes,
+         {:ok, fd} <- Fs.open_read(fs, path) do
+      result =
+        with {:ok, opened} <- Fs.fstat(fs, fd),
+             true <- {opened.major_device, opened.inode} == {before.major_device, before.inode} do
+          Fs.read_handle(fs, fd)
+        else
+          _ -> {:error, :object_changed}
+        end
+
+      _ = Fs.close(fs, fd)
+      result
+    else
+      _ -> {:error, :object_unverified}
+    end
+  end
+
+  @doc "The exact object path of a restored registry entry (msg_id, attempt, payload_hash)."
+  def object_path(%__MODULE__{dir: dir}, entry) do
+    view = %{
+      message_id: entry.msg_id,
+      delivery_attempt: entry.attempt,
+      payload_hash: entry.payload_hash
+    }
+
+    Path.join(dir, object_name(view))
   end
 
   # ----- internals -----
@@ -233,16 +284,19 @@ defmodule AiPair.Delivery.PayloadStore do
         synced =
           if removable == [], do: :ok, else: Fs.dir_sync(store.fs, Path.join(store.dir, "."))
 
-        # A zero-count store is claimed only when every removal is durable.
-        if Enum.all?(unlinked, &(&1 == :ok)) and synced == :ok, do: store, else: disable(store)
+        # A store's counts are claimed only when every removal is durable. Kept (restored)
+        # objects count against the limits from boot.
+        if Enum.all?(unlinked, &(&1 == :ok)) and synced == :ok,
+          do: count_kept(store, names -- removable),
+          else: disable(store)
 
       _ ->
         disable(store)
     end
   end
 
-  # Leftover temps always go. An object goes unless it belongs to a queued attempt (S1: none
-  # do). Any other entry is not ours and is left alone.
+  # Leftover temps always go. An object goes unless it belongs to a restored queued attempt.
+  # Any other entry is not ours and is left alone.
   defp removable?(entry, keep) do
     cond do
       String.starts_with?(entry, ".tmp-") ->
@@ -255,6 +309,34 @@ defmodule AiPair.Delivery.PayloadStore do
       true ->
         false
     end
+  end
+
+  # Every kept object is counted from its own lstat. One that cannot be measured is an entry
+  # the counts would not describe, so the store disables itself (fail closed), as in S1.
+  defp count_kept(store, names) do
+    Enum.reduce_while(names, store, fn name, acc ->
+      case Regex.run(@name, name, capture: :all_but_first) do
+        [id, attempt, _hex] ->
+          case Fs.lstat(acc.fs, Path.join(acc.dir, name)) do
+            {:ok, %File.Stat{size: size}} ->
+              key = {id, String.to_integer(attempt)}
+
+              {:cont,
+               %{
+                 acc
+                 | objects: Map.put(acc.objects, key, {name, size}),
+                   count: acc.count + 1,
+                   bytes: acc.bytes + size
+               }}
+
+            _ ->
+              {:halt, disable(acc)}
+          end
+
+        _ ->
+          {:cont, acc}
+      end
+    end)
   end
 
   # An entry already absent is removed.

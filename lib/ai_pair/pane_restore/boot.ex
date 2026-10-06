@@ -71,7 +71,10 @@ defmodule AiPair.PaneRestore.Boot do
   @join_timeout 1_000
   @default_deadline_ms 10_000
   @reconcile_options [:store, :root, :tmux, :binding, :callbacks]
-  @options @reconcile_options ++ [:report_writer, :deadline_ms]
+  # NS-15.G.003 S2: optional, passed through to the Reconciler so an admitted pane with
+  # boot-restored queued sends is started with its restore capability.
+  @optional_reconcile_options [:receipt_store]
+  @options @reconcile_options ++ @optional_reconcile_options ++ [:report_writer, :deadline_ms]
 
   @typedoc "The writer boundary: a behaviour module or a two-arity function."
   @type report_writer :: module() | (Path.t(), map() -> :ok | {:error, term()})
@@ -172,6 +175,8 @@ defmodule AiPair.PaneRestore.Boot do
     * `:deadline_ms` - a positive integer, default `#{@default_deadline_ms}`;
       the whole reconciliation attempt is given this long, after which its
       worker is terminated, joined, and the timed-out report is published
+    * `:receipt_store` - optional; the receipt store reconciliation issues
+      restore capabilities from (NS-15.G.003 S2)
 
   Every option is validated in the CALLER, before a process exists: a caller
   defect raises here rather than becoming a start error that reads like a
@@ -204,7 +209,7 @@ defmodule AiPair.PaneRestore.Boot do
     end
 
     %{
-      reconcile: Keyword.take(opts, @reconcile_options),
+      reconcile: Keyword.take(opts, @reconcile_options ++ @optional_reconcile_options),
       root: validated_root!(Keyword.fetch!(opts, :root)),
       writer: validated_writer!(Keyword.get(opts, :report_writer, ReportWriter)),
       deadline_ms: validated_deadline!(Keyword.get(opts, :deadline_ms, @default_deadline_ms))

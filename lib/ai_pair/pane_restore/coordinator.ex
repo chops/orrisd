@@ -160,6 +160,20 @@ defmodule AiPair.PaneRestore.Coordinator do
     end
   end
 
+  @doc """
+  True only when `worker` carries the live transaction holder's open operation for `pane`,
+  targeting `target` with exactly `request` (S2 issue/fence authority). Returns nothing else.
+  """
+  @spec authorize_effect(GenServer.server(), pid(), pane_id(), pid(), term()) :: boolean()
+  def authorize_effect(server, worker, pane, target, request) do
+    GenServer.call(server, {:authorize_effect, worker, pane, target, request}, 1_000) == true
+  catch
+    :exit, _ -> false
+  end
+
+  defp request_digest(request),
+    do: :crypto.hash(:sha256, :erlang.term_to_binary(request, [:deterministic]))
+
   # Holders keep using their admitting incarnation even if its name is replaced.
   defp owner_for(pane), do: resolve_owner(Process.get({__MODULE__, pane}, __MODULE__))
 
@@ -326,6 +340,29 @@ defmodule AiPair.PaneRestore.Coordinator do
     end
   end
 
+  # ISSUER-PREDICATE r4: one bit, for a tuple the caller already holds. True only for the live
+  # transaction holder's open operation (no cause, disposition :completed) carried by
+  # `worker`, targeting `target` with exactly `request`. No outbound call.
+  def handle_call({:authorize_effect, worker, pane, target, request}, _from, state) do
+    authorized =
+      case Map.get(state.panes, pane) do
+        %{holder: %{owner: owner}, disposition: :completed, operations: operations} ->
+          digest = request_digest(request)
+
+          Process.alive?(owner) and
+            Enum.any?(operations, fn {_ref, op} ->
+              op.worker == worker and op.cause == nil and op.worker_alive and
+                Process.alive?(worker) and op.submitter == owner and op.target == target and
+                op.request_digest == digest
+            end)
+
+        _ ->
+          false
+      end
+
+    {:reply, authorized, state}
+  end
+
   def handle_call(:effect_workers, _from, state) do
     workers =
       for {pane, entry} <- state.panes,
@@ -409,7 +446,9 @@ defmodule AiPair.PaneRestore.Coordinator do
       worker_monitor: worker_monitor,
       worker_alive: true,
       awaiting: awaiting,
-      cause: nil
+      cause: nil,
+      submitter: caller,
+      request_digest: request_digest(request)
     }
 
     entry = %{entry | operations: Map.put(entry.operations, ref, op)}

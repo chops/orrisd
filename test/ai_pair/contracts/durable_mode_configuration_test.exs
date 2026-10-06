@@ -31,8 +31,10 @@ defmodule AiPair.Contracts.DurableModeConfigurationTest do
   @hash_path Path.join(@fixture_dir, "CONTRACT_HASH")
   # Amended 2026-09-19 when child 6 of the legacy list (child 9 of the durable
   # one) gained `max_children:`. The contract's "The connection cap" section
-  # carries the amendment; the bytes below carry its consequence.
-  @pinned_hash "bfb788322afbf72da65684d3d9d03fff830dac7bdd8f0649cddd3c91f06b4494"
+  # carries the amendment; the bytes below carry its consequence. Amended again for
+  # NS-15.G.003 S2: the receipt store moved before Boot (durable children 8-10) with
+  # its restore issuer, Boot gained receipt_store:, and the ninth edge was added.
+  @pinned_hash "92f9bd72932e8b751c67110885d9cff5dd5ea3ae76d07f33fef475ecedfd2b5c"
   @expected_fixture_count 3
 
   @application_source Path.expand("../../../lib/ai_pair/application.ex", __DIR__)
@@ -340,7 +342,8 @@ defmodule AiPair.Contracts.DurableModeConfigurationTest do
       durable = fixture("supervision.durable.json")
       positions = Map.new(durable["start_order"], &{&1["id"], &1["position"]})
 
-      assert length(durable["edges"]) == 8
+      # Nine since NS-15.G.003 S2 added ReceiptStore before Boot.
+      assert length(durable["edges"]) == 9
 
       for edge <- durable["edges"] do
         assert Enum.sort(Map.keys(edge)) == ~w(after before breaks why)
@@ -359,6 +362,13 @@ defmodule AiPair.Contracts.DurableModeConfigurationTest do
       assert Enum.any?(
                durable["edges"],
                &(&1["before"] == "AiPair.PaneRestore.Boot" and &1["after"] == "AiPair.IPC.Server")
+             )
+
+      # NS-15.G.003 S2: restore handover needs the receipt store before Boot.
+      assert Enum.any?(
+               durable["edges"],
+               &(&1["before"] == "AiPair.Delivery.ReceiptStore" and
+                   &1["after"] == "AiPair.PaneRestore.Boot")
              )
     end
 

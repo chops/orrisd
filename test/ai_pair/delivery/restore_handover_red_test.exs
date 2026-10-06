@@ -19,7 +19,7 @@ defmodule AiPair.Delivery.RestoreHandoverRedTest do
 
   alias AiPair.Delivery.{Payload, ReceiptStore, SystemFs}
   alias AiPair.Pane.StateMachine
-  alias AiPair.Test.MarkerClassifier
+  alias AiPair.Test.{FaultFs, MarkerClassifier}
 
   @pane "%restore_s2_b"
 
@@ -184,6 +184,77 @@ defmodule AiPair.Delivery.RestoreHandoverRedTest do
     stop(store)
   end
 
+  # GREEN-review rows (G2 AMEND m_20261006T114603Z): restore_failed is restore-registry only.
+  test "H5s a restored entry's restore_failed appends ambiguous, removes its object and drops the entry",
+       c do
+    store = restored_store!(c.inbox, ["h5s-a", "h5s-b"])
+    {:ok, cap} = issue(store, @pane, make_ref())
+    {:ok, entries} = claim(store, @pane, cap)
+    bad = Enum.find(entries, &(&1.msg_id == id("h5s-b")))
+
+    assert :ok = apply(ReceiptStore, :restore_failed, [store, bad.msg_id, 1, bad.token])
+    assert last_status(c.inbox, id("h5s-b")) == {"ambiguous", 1}
+    refute File.exists?(object_path(c.inbox, id("h5s-b"), "h5s-b bytes"))
+    assert Enum.map(registry(store)[@pane], & &1.msg_id) == [id("h5s-a")]
+    assert last_status(c.inbox, id("h5s-a")) == {"queued", 1}
+    stop(store)
+  end
+
+  # GREEN-review row (G3 AMEND m_20261006T121051Z blocker 1): fail closed when the ambiguous
+  # append behind restore_failed cannot be made durable.
+  test "H5f an unrecorded restore_failed keeps the entry held, queued and tracked, and is retried",
+       c do
+    fs = FaultFs.new()
+    store = restored_store!(c.inbox, ["h5f-a", "h5f-b"], fs)
+    {:ok, cap} = issue(store, @pane, make_ref())
+    {:ok, pastes} = Agent.start_link(fn -> 0 end)
+
+    bad = object_path(c.inbox, id("h5f-b"), "h5f-b bytes")
+    File.write!(bad, "tampered after boot")
+    File.chmod!(bad, 0o600)
+
+    # The next receipt append, restore_failed's ambiguous record, fails: nothing durable.
+    FaultFs.inject(fs, :write, FaultFs.count(fs, :write) + 1, {:error, :eio})
+    1 = :erlang.trace(store, true, [:receive])
+
+    sm = start_quarantined_pane!(store, cap, pastes, restore_retry_ms: 20)
+
+    assert eventually(fn -> restore_failed_calls(store, sm, id("h5f-b")) >= 2 end),
+           "an unrecorded restore_failed is retried"
+
+    :erlang.trace(store, false, [:all])
+    {_state, data} = :sys.get_state(sm)
+    assert Map.keys(data.restore_failures) == [id("h5f-b")]
+    assert Enum.map(:queue.to_list(data.pending_sends), &elem(&1, 3)) == [id("h5f-a")]
+
+    assert last_status(c.inbox, id("h5f-b")) == {"queued", 1},
+           "an unrecorded failure must not be treated as finalized"
+
+    assert %{holder: ^sm} = Enum.find(registry(store)[@pane], &(&1.msg_id == id("h5f-b")))
+    assert Process.alive?(sm)
+    assert Agent.get(pastes, & &1) == 0
+    stop(store)
+  end
+
+  test "H5n restore_failed on an ordinary queued attempt with its valid token changes nothing",
+       c do
+    store = start_store!(c.inbox)
+    text = "h5n bytes"
+    {:ok, {:admitted, %{operation_token: token}}} = admit(store, id("h5n"), text)
+    assert :ok = ReceiptStore.queue(store, id("h5n"), token, text)
+    before_log = receipts(c.inbox)
+    before_registry = registry(store)
+
+    assert {:error, :not_restored} =
+             apply(ReceiptStore, :restore_failed, [store, id("h5n"), 1, token])
+
+    assert receipts(c.inbox) == before_log
+    assert File.exists?(object_path(c.inbox, id("h5n"), text))
+    assert registry(store) == before_registry
+    assert last_status(c.inbox, id("h5n")) == {"queued", 1}
+    stop(store)
+  end
+
   test "H6 unclaimed entries stay listed while their receipts are queued", c do
     store = restored_store!(c.inbox, ["h6"])
     assert [%{msg_id: msg, holder: nil}] = registry(store)[@pane]
@@ -292,7 +363,7 @@ defmodule AiPair.Delivery.RestoreHandoverRedTest do
 
   # Queues one attempt per seed under a real store, restarts it, and asserts the shared restore
   # prerequisite: every attempt is still queued after the restart (ambiguous at the base).
-  defp restored_store!(inbox, seeds) do
+  defp restored_store!(inbox, seeds, revived_fs \\ SystemFs.new()) do
     first = start_store!(inbox)
 
     for seed <- seeds do
@@ -301,7 +372,7 @@ defmodule AiPair.Delivery.RestoreHandoverRedTest do
     end
 
     stop(first)
-    revived = start_store!(inbox)
+    revived = start_store!(inbox, revived_fs)
 
     for seed <- seeds do
       assert last_status(inbox, id(seed)) == {"queued", 1},
@@ -338,9 +409,8 @@ defmodule AiPair.Delivery.RestoreHandoverRedTest do
   defp fence(store, pane, ref), do: apply(ReceiptStore, :fence_restore, [store, pane, ref])
   defp registry(store), do: apply(ReceiptStore, :restore_registry, [store])
 
-  defp start_store!(inbox) do
-    assert {:ok, pid} =
-             GenServer.start(ReceiptStore, inbox: inbox, fs: SystemFs.new(), restore_issuer: self())
+  defp start_store!(inbox, fs \\ SystemFs.new()) do
+    assert {:ok, pid} = GenServer.start(ReceiptStore, inbox: inbox, fs: fs, restore_issuer: self())
 
     pid
   end
@@ -356,6 +426,17 @@ defmodule AiPair.Delivery.RestoreHandoverRedTest do
     Enum.count(messages, fn
       {:"$gen_call", {^from, _tag}, {:claim_restored, @pane, _cap}} -> true
       _other -> false
+    end)
+  end
+
+  # restore_failed calls the store received from `from` for `msg`, read from this process's
+  # trace messages (kept in the mailbox; counted, not consumed).
+  defp restore_failed_calls(store, from, msg) do
+    {:messages, messages} = Process.info(self(), :messages)
+
+    Enum.count(messages, fn
+      {:trace, ^store, :receive, {:"$gen_call", {^from, _}, {:restore_failed, ^msg, _, _}}} -> true
+      _ -> false
     end)
   end
 

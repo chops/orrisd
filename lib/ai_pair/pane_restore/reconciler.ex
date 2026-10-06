@@ -58,7 +58,7 @@ defmodule AiPair.PaneRestore.Reconciler do
   alias AiPair.PaneSupervisor
   alias AiPair.Tmux
 
-  @options [:store, :root, :tmux, :binding, :callbacks]
+  @options [:store, :root, :tmux, :binding, :callbacks, :receipt_store]
 
   @typedoc "The bound child effects: capture and paste functions the child uses instead of the default adapter."
   @type callbacks :: %{
@@ -166,7 +166,8 @@ defmodule AiPair.PaneRestore.Reconciler do
       root: validated_root!(Keyword.fetch!(opts, :root)),
       tmux: Keyword.fetch!(opts, :tmux),
       binding: Keyword.fetch!(opts, :binding),
-      callbacks: validated_callbacks!(Keyword.fetch!(opts, :callbacks))
+      callbacks: validated_callbacks!(Keyword.fetch!(opts, :callbacks)),
+      receipt_store: Keyword.get(opts, :receipt_store)
     }
   end
 
@@ -346,7 +347,7 @@ defmodule AiPair.PaneRestore.Reconciler do
         refused(pane, fresh.refusals, fresh.undischarged)
 
       true ->
-        quarantine(fresh, context.callbacks)
+        quarantine(fresh, context.callbacks, context.receipt_store)
     end
   end
 
@@ -386,27 +387,114 @@ defmodule AiPair.PaneRestore.Reconciler do
   # via name, so the child is the one every other caller would find. Only the
   # caller differs: the coordinator's owned worker makes the call, so the
   # effect is fenced and a late reply still discharges its own operation.
-  defp quarantine(decision, %{capture_fn: capture_fn, paste_fn: paste_fn}) do
+  defp quarantine(decision, callbacks, receipt_store) do
     pane = decision.pane_id
 
-    opts = [
-      pane_id: pane,
-      name: PaneSupervisor.via_pane(pane),
-      quarantine_token: :crypto.strong_rand_bytes(32) |> Base.url_encode64(padding: false),
-      capture_fn: capture_fn,
-      paste_fn: paste_fn
-    ]
-
-    spec =
-      {{AiPair.Pane.StateMachine, :start_link, [opts]}, :transient, 5_000, :worker,
-       [AiPair.Pane.StateMachine]}
-
-    case Coordinator.submit(pane, PaneSupervisor, {:start_child, spec}, :infinity) do
+    case Coordinator.submit(
+           pane,
+           PaneSupervisor,
+           {:start_child, child_spec(pane, callbacks, receipt_store)},
+           :infinity
+         ) do
       {:ok, {:ok, _pid}} -> observed(decision)
       {:ok, {:ok, _pid, _info}} -> observed(decision)
       {:ok, {:error, reason}} -> containment_refused(decision, reason)
       {:ok, :ignore} -> containment_refused(decision, :ignore)
       {:error, reason} -> containment_refused(decision, reason)
+    end
+  end
+
+  # NS-15.G.003 S2: an admitted pane with boot-restored queued sends gets a restore capability,
+  # issued through this pane's Coordinator transaction (ISSUER-PREDICATE r4), in its spec.
+  defp child_spec(pane, %{capture_fn: capture_fn, paste_fn: paste_fn}, receipt_store) do
+    restore =
+      with store when not is_nil(store) <- receipt_store,
+           {:ok, {:ok, cap}} <-
+             Coordinator.submit(
+               pane,
+               store,
+               {:issue_restore_capability, pane, make_ref()},
+               5_000
+             ) do
+        [receipt_store: store, restore_capability: cap]
+      else
+        _ -> []
+      end
+
+    opts =
+      [
+        pane_id: pane,
+        name: PaneSupervisor.via_pane(pane),
+        quarantine_token: :crypto.strong_rand_bytes(32) |> Base.url_encode64(padding: false),
+        capture_fn: capture_fn,
+        paste_fn: paste_fn
+      ] ++ restore
+
+    {{AiPair.Pane.StateMachine, :start_link, [opts]}, :transient, 5_000, :worker,
+     [AiPair.Pane.StateMachine]}
+  end
+
+  @doc """
+  Re-admit `pane` (NS-15.G.003 S2 fence order): fence its restored entries, stop the old
+  child and await its exit, then issue a new capability and start the replacement.
+  A refused or unavailable fence stops before any child stop; a stop that times out refuses.
+  """
+  def readmit(pane, opts) do
+    store = Keyword.fetch!(opts, :receipt_store)
+    callbacks = validated_callbacks!(Keyword.fetch!(opts, :callbacks))
+    stop_timeout = Keyword.get(opts, :stop_timeout_ms, 5_000)
+
+    result =
+      Coordinator.transaction(pane, fn ->
+        {:ok, readmit_fenced(pane, store, callbacks, stop_timeout)}
+      end)
+
+    # A fence that could not be released is reported distinctly, never collapsed into the
+    # body's outcome: the pane's Coordinator disposition is unresolved (as transaction_entry/2
+    # reports it for boot reconciliation).
+    case result do
+      {:ok, outcome} ->
+        outcome
+
+      {:fence_update_failed, {:ok, outcome}, reason} ->
+        {:error, {:fence_update_failed, outcome, reason}}
+
+      other ->
+        {:error, {:readmit_failed, other}}
+    end
+  end
+
+  defp readmit_fenced(pane, store, callbacks, stop_timeout) do
+    case Coordinator.submit(pane, store, {:fence_restore, pane, make_ref()}, 5_000) do
+      {:ok, {:ok, _fence}} ->
+        with :ok <- stop_old(pane, stop_timeout) do
+          spec = child_spec(pane, callbacks, store)
+
+          case Coordinator.submit(pane, PaneSupervisor, {:start_child, spec}, :infinity) do
+            {:ok, {:ok, pid}} -> {:ok, pid}
+            {:ok, {:ok, pid, _info}} -> {:ok, pid}
+            other -> {:error, {:start_failed, other}}
+          end
+        end
+
+      _refused_or_unavailable ->
+        {:error, :fence_unavailable}
+    end
+  end
+
+  defp stop_old(pane, stop_timeout) do
+    case PaneSupervisor.whereis_pane(pane) do
+      {:ok, old} ->
+        try do
+          :gen_statem.stop(old, :normal, stop_timeout)
+        catch
+          :exit, :noproc -> :ok
+          :exit, {:noproc, _} -> :ok
+          :exit, _ -> {:error, :stop_timeout}
+        end
+
+      _absent ->
+        :ok
     end
   end
 

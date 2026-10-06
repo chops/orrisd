@@ -52,7 +52,7 @@ defmodule AiPair.Application do
     legacy = legacy_children(inbox, receipt_store)
 
     if Application.get_env(:ai_pair, :durable_attachments) == true do
-      durable_children(legacy, inbox)
+      durable_children(legacy, inbox, receipt_store)
     else
       legacy
     end
@@ -90,7 +90,7 @@ defmodule AiPair.Application do
   # reaches no child, no supervisor, no socket and no marker write. Validating
   # it only inside `AiPair.IPC.Server.start_link/1`, where it is validated
   # again, would let a whole reconciliation run and quarantine panes first.
-  defp durable_children(legacy, inbox) do
+  defp durable_children(legacy, inbox, receipt_store) do
     generation = boot_generation!()
 
     tmux = Application.get_env(:ai_pair, :tmux_server, AiPair.Tmux)
@@ -116,17 +116,29 @@ defmodule AiPair.Application do
     # the first five children are shared and keep their positions, the three new
     # ones are inserted after `AiPair.Tmux` and before the connection
     # supervisor, and the IPC server gains the validated generation.
-    {shared, [connections, receipts, {AiPair.IPC.Server, ipc_opts}]} = Enum.split(legacy, 5)
+    #
+    # NS-15.G.003 S2 (finding 02 (a)): the receipt store starts BEFORE Boot, with the
+    # Coordinator as its restore issuer, because Boot's one reconciliation issues restore
+    # capabilities from it; Boot receives the store's global name.
+    {shared,
+     [connections, {AiPair.Delivery.ReceiptStore, receipt_opts}, {AiPair.IPC.Server, ipc_opts}]} =
+      Enum.split(legacy, 5)
 
     shared ++
       [
         {Coordinator, []},
         store_spec,
-        {Boot, store: store, root: inbox, tmux: tmux, binding: binding, callbacks: callbacks(tmux)}
+        {AiPair.Delivery.ReceiptStore, receipt_opts ++ [restore_issuer: Coordinator]},
+        {Boot,
+         store: store,
+         root: inbox,
+         tmux: tmux,
+         binding: binding,
+         callbacks: callbacks(tmux),
+         receipt_store: receipt_store}
       ] ++
       [
         connections,
-        receipts,
         {AiPair.IPC.Server, ipc_opts ++ [boot_generation: generation]}
       ]
   end

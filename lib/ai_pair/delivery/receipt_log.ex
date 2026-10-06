@@ -12,7 +12,9 @@ defmodule AiPair.Delivery.ReceiptLog do
   @statuses ~w(pending queued delivered not_delivered ambiguous)
   @v2_statuses @statuses ++ ~w(paste_started)
   @fields ~w(schema schema_version seq prev_line_sha256 daemon_epoch message_id pane_id payload_hash status delivery_attempt)
-  defstruct [:fs, :fd, :path, seq: 0, previous: @anchor, entries: %{}]
+  # runs: contiguous same-epoch seq runs, newest first, as {daemon_epoch, first_seq, last_seq}
+  # (S2 lineage range checks).
+  defstruct [:fs, :fd, :path, seq: 0, previous: @anchor, entries: %{}, runs: []]
 
   def open(fs, inbox) do
     dir = Path.join(inbox, "delivery")
@@ -233,9 +235,13 @@ defmodule AiPair.Delivery.ReceiptLog do
       log
       | seq: record["seq"],
         previous: digest(line),
-        entries: Map.put(log.entries, record["message_id"], record)
+        entries: Map.put(log.entries, record["message_id"], record),
+        runs: extend_run(log.runs, record["daemon_epoch"], record["seq"])
     }
   end
+
+  defp extend_run([{epoch, first, _last} | rest], epoch, seq), do: [{epoch, first, seq} | rest]
+  defp extend_run(runs, epoch, seq), do: [{epoch, seq, seq} | runs]
 
   defp close_rejected(log, reason) do
     case close(log) do
