@@ -50,10 +50,23 @@ service begins. A complete unterminated tail that fails that validation, lacks a
 schema key, or decodes to a non-object is corruption and is refused with the file
 unchanged. A complete invalid last record is corruption, not a removable tail.
 
-A line with another ~schema~ or ~schema_version~, newline-terminated or not, is
-refused with ~{:receipt_log_incompatible, %{seq: n, found: ..., expected: ...}}~
-naming the line, the found pair and the expected pair, and the file is left
-unchanged. The classification precedes chain, key-set and history validation, and
+This build reads ~schema_version~ 1 and 2 and writes only 1. Version 2 has the same
+keys and adds the status ~paste_started~, recorded by a later writer before a paste
+begins. Within one version the version 1 history holds, and ~paste_started~ may
+follow only ~pending~ or ~queued~ and be followed only by ~delivered~ or ~ambiguous~,
+never ~not_delivered~. Within one attempt the version may change only where boot
+finalizes a ~pending~, ~queued~ or ~paste_started~ record as ~ambiguous~; every other
+cross-version edge in an attempt is corruption, so no attempt acquires records the
+other writer generation would trust. A new attempt (~not_delivered~ then ~pending~
+with the next attempt number) may change version. ~paste_started~ in a version 1
+line is corruption.
+
+A line with another ~schema~ or an unsupported ~schema_version~, newline-terminated
+or not, is refused with
+~{:receipt_log_incompatible, %{seq: n, found: ..., expected: ...}}~ naming the line,
+the found pair and the supported set
+~%{schema: "ai-pair/delivery-receipt", schema_versions: [1, 2]}~, and the file is
+left unchanged. The classification precedes chain, key-set and history validation, and
 a present but unsupported version type is incompatible, not corrupt. Found values
 are echoed only when bounded: a schema name matching
 ~\A[a-z0-9][a-z0-9/._-]{0,63}\z~, else ~:unrecognized~; an integer version in
@@ -73,7 +86,8 @@ who can rewrite the entire log.
 The store mints its epoch once at initialization and monitors the actual delivery
 operation owner, not the requesting connection. Owner loss makes a pending or
 queued attempt durably ambiguous. Restart likewise appends ambiguity for every
-unresolved prior-epoch attempt before accepting new calls.
+unresolved prior-epoch attempt (pending, queued or ~paste_started~) before accepting
+new calls.
 
 Reconciliation has exactly five outcomes: delivered, queued, absent, ambiguous,
 conflict. ~not_delivered~ is a stored status mapping to absent; it is not a sixth

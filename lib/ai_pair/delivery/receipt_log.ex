@@ -5,8 +5,12 @@ defmodule AiPair.Delivery.ReceiptLog do
 
   @anchor "sha256:" <> Base.encode16(:crypto.hash(:sha256, ""), case: :lower)
   @schema "ai-pair/delivery-receipt"
-  @schema_version 1
+  # This build reads versions 1 and 2 and writes only version 1 (NS-15.G.003 S0a). Version 2
+  # adds `paste_started`, written by a later generation before any paste; reading it here
+  # keeps a rollback to this build able to open that generation's log.
+  @schema_versions [1, 2]
   @statuses ~w(pending queued delivered not_delivered ambiguous)
+  @v2_statuses @statuses ++ ~w(paste_started)
   @fields ~w(schema schema_version seq prev_line_sha256 daemon_epoch message_id pane_id payload_hash status delivery_attempt)
   defstruct [:fs, :fd, :path, seq: 0, previous: @anchor, entries: %{}]
 
@@ -147,7 +151,9 @@ defmodule AiPair.Delivery.ReceiptLog do
 
   # :ok for the pair this build reads, {:incompatible, found} for a map carrying both
   # keys with any other pair (type-confused versions included), :other otherwise.
-  defp classify_version(%{"schema" => @schema, "schema_version" => @schema_version}), do: :ok
+  defp classify_version(%{"schema" => @schema, "schema_version" => version})
+       when is_integer(version) and version in @schema_versions,
+       do: :ok
 
   defp classify_version(%{"schema" => schema, "schema_version" => version}),
     do: {:incompatible, %{schema: found_schema(schema), schema_version: found_version(version)}}
@@ -170,7 +176,7 @@ defmodule AiPair.Delivery.ReceiptLog do
   defp found_version(v) when is_map(v), do: {:unsupported_type, :object}
 
   defp incompatible(seq, found) do
-    expected = %{schema: @schema, schema_version: @schema_version}
+    expected = %{schema: @schema, schema_versions: @schema_versions}
     {:error, {:receipt_log_incompatible, %{seq: seq, found: found, expected: expected}}}
   end
 
@@ -178,13 +184,17 @@ defmodule AiPair.Delivery.ReceiptLog do
 
   defp valid_record?(r, log) do
     Enum.sort(Map.keys(r)) == Enum.sort(@fields) and
-      r["schema"] == "ai-pair/delivery-receipt" and r["schema_version"] === 1 and
+      r["schema"] == "ai-pair/delivery-receipt" and is_integer(r["schema_version"]) and
+      r["schema_version"] in @schema_versions and
       r["seq"] === log.seq + 1 and r["prev_line_sha256"] == log.previous and
       matches?(r["daemon_epoch"], ~r/\Aep_[0-9a-f]{24}\z/) and
       valid_id?(r["message_id"]) and valid_hash?(r["payload_hash"]) and
-      valid_pane?(r["pane_id"]) and r["status"] in @statuses and
+      valid_pane?(r["pane_id"]) and r["status"] in statuses(r["schema_version"]) and
       is_integer(r["delivery_attempt"]) and history_valid?(log.entries[r["message_id"]], r)
   end
+
+  defp statuses(2), do: @v2_statuses
+  defp statuses(_), do: @statuses
 
   defp history_valid?(nil, r), do: r["status"] == "pending" and r["delivery_attempt"] == 1
 
@@ -192,10 +202,25 @@ defmodule AiPair.Delivery.ReceiptLog do
     same_identity = old["pane_id"] == r["pane_id"] and old["payload_hash"] == r["payload_hash"]
 
     same_identity and
-      ((r["delivery_attempt"] == old["delivery_attempt"] and transition?(old["status"], r["status"])) or
+      ((r["delivery_attempt"] == old["delivery_attempt"] and replayable?(old, r)) or
          (old["status"] == "not_delivered" and r["status"] == "pending" and
             r["delivery_attempt"] == old["delivery_attempt"] + 1))
   end
+
+  # Replay edges within one attempt. Only boot finalization (a nonterminal record followed by
+  # `ambiguous`) may change version inside an attempt; any other cross-version edge would let
+  # one writer's attempt acquire the other writer's records, so it is corruption. Within one
+  # version the version 1 table holds, plus version 2 `paste_started`: it follows pending or
+  # queued and is followed only by `delivered` or `ambiguous`, never `not_delivered`.
+  defp replayable?(%{"schema_version" => v} = old, %{"schema_version" => v} = r),
+    do: same_version?(old["status"], r["status"])
+
+  defp replayable?(old, r),
+    do: r["status"] == "ambiguous" and old["status"] in ["pending", "queued", "paste_started"]
+
+  defp same_version?("paste_started", next), do: next in ["delivered", "ambiguous"]
+  defp same_version?(old, "paste_started"), do: old in ["pending", "queued"]
+  defp same_version?(old, next), do: transition?(old, next)
 
   defp repair(_fs, _path, _size, 0), do: :ok
 

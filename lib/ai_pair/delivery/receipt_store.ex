@@ -90,7 +90,7 @@ defmodule AiPair.Delivery.ReceiptStore do
         log.entries
         |> Map.values()
         |> Enum.sort_by(& &1["seq"])
-        |> Enum.filter(&(&1["status"] in ["pending", "queued"]))
+        |> Enum.filter(&(&1["status"] in ["pending", "queued", "paste_started"]))
         |> Enum.reduce_while({:ok, state}, fn record, {:ok, acc} ->
           case persist(acc, %{ReceiptLog.view(record) | status: "ambiguous"}) do
             {:ok, updated} ->
