@@ -14,9 +14,12 @@ defmodule AiPair.Delivery.NS32M002DurableVersionTest do
   changes exactly ONE key on ONE line and leaves every other byte of the file
   identical to the control:
 
-    * line 2 `schema_version` set to `2`, to `"1"`, to `1.0` and to `null`;
+    * line 2 `schema_version` set to `3`, to `"1"`, to `1.0` and to `null`;
     * line 2 `schema` changed to another name;
-    * line 1 `schema_version` set to `2` (a future version on the first line).
+    * line 1 `schema_version` set to `3` (a future version on the first line).
+
+  NS-15.G.003 S0a (receipt reader accepts schema versions 1 and 2) moved the unsupported
+  future example from `2` to `3`; the failure control's meaning is unchanged.
 
   The changed line is well-formed JSON with the full key set, and it is correctly
   chained: its `prev_line_sha256` is still the digest of the real line before it.
@@ -31,7 +34,7 @@ defmodule AiPair.Delivery.NS32M002DurableVersionTest do
   `{:error, {:receipt_log_incompatible, %{seq: n, found: found, expected: expected}}}`,
   where `n` is the changed line, `found` is the row's schema and version as the
   reader reports them, and `expected` is `%{schema: "ai-pair/delivery-receipt",
-  schema_version: 1}`. The file bytes must be identical afterwards. The
+  schema_versions: [1, 2]}`. The file bytes must be identical afterwards. The
   same-construction control, which is the same builder with nothing changed, opens
   at `seq == 3` through the reader and starts through the store.
 
@@ -125,8 +128,8 @@ defmodule AiPair.Delivery.NS32M002DurableVersionTest do
     end
 
     for {name, line_no, key, value, found} <- [
-          {"schema_version 2", 2, "schema_version", 2,
-           %{schema: "ai-pair/delivery-receipt", schema_version: 2}},
+          {"schema_version 3", 2, "schema_version", 3,
+           %{schema: "ai-pair/delivery-receipt", schema_version: 3}},
           {~s(schema_version "1"), 2, "schema_version", "1",
            %{schema: "ai-pair/delivery-receipt", schema_version: {:unsupported_type, :string}}},
           {"schema_version 1.0", 2, "schema_version", 1.0,
@@ -135,8 +138,8 @@ defmodule AiPair.Delivery.NS32M002DurableVersionTest do
            %{schema: "ai-pair/delivery-receipt", schema_version: {:unsupported_type, :null}}},
           {"schema name changed", 2, "schema", "ai-pair/delivery-receipt-v2",
            %{schema: "ai-pair/delivery-receipt-v2", schema_version: 1}},
-          {"future version on the first line", 1, "schema_version", 2,
-           %{schema: "ai-pair/delivery-receipt", schema_version: 2}}
+          {"future version on the first line", 1, "schema_version", 3,
+           %{schema: "ai-pair/delivery-receipt", schema_version: 3}}
         ] do
       @row {line_no, key, value, found}
 
@@ -167,7 +170,7 @@ defmodule AiPair.Delivery.NS32M002DurableVersionTest do
             %{
               seq: line_no,
               found: found,
-              expected: %{schema: "ai-pair/delivery-receipt", schema_version: 1}
+              expected: %{schema: "ai-pair/delivery-receipt", schema_versions: [1, 2]}
             }}}
 
         reader = ReceiptLog.open(SystemFs.new(), dir)
