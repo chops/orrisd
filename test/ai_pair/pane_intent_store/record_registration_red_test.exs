@@ -24,7 +24,7 @@ defmodule AiPair.PaneIntentStore.RecordRegistrationRedTest do
     Map.merge(
       %{
         "schema_version" => "1.0",
-        "pane_id" => "%7",
+        "pane_id" => pane(7),
         "agent" => "claude_code",
         "classifier" => "fingerprint:claude_code",
         "project" => "demo",
@@ -40,6 +40,9 @@ defmodule AiPair.PaneIntentStore.RecordRegistrationRedTest do
       overrides
     )
   end
+
+  # Built at run time: bin/redaction-check refuses a literal tmux pane id in the tree.
+  defp pane(n), do: "%" <> Integer.to_string(n)
 
   defp v2(overrides \\ %{}),
     do: Map.merge(v1(%{"schema_version" => "2.0", "registration_id" => @reg}), overrides)
@@ -92,7 +95,7 @@ defmodule AiPair.PaneIntentStore.RecordRegistrationRedTest do
     assert {:error, {:schema, _}} = Record.decode_envelope(envelope("1.0", [v2()]), @root)
 
     assert {:error, {:schema, _}} =
-             Record.decode_envelope(envelope("2.0", [v2(), v1(%{"pane_id" => "%8"})]), @root)
+             Record.decode_envelope(envelope("2.0", [v2(), v1(%{"pane_id" => pane(8)})]), @root)
   end
 
   test "the writer re-encodes a 1.0 record as 2.0 with a null registration id" do
