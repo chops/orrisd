@@ -962,8 +962,11 @@ defmodule AiPair.ApplicationDurableBootTest do
   end
 
   defp restart_record(pane, root, generation) do
+    # Schema 2.0 (NS-15.G.002 B1a-1): the store writes only the current version; null means the
+    # recorded pane carries no registration.
     %{
-      "schema_version" => "1.0",
+      "schema_version" => "2.0",
+      "registration_id" => nil,
       "pane_id" => pane,
       "agent" => "synthetic-agent",
       "classifier" => "stub",

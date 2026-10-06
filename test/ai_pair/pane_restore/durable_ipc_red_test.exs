@@ -445,7 +445,8 @@ defmodule AiPair.PaneRestore.DurableIPCRedTest do
          c do
       durable!(c, happy_script(c.root))
       store!(c.root)
-      {:ok, _pid} = PaneSupervisor.start_pane(@pane, [])
+      # Started with an agent, as any running child has one; only the registration is absent.
+      {:ok, _pid} = PaneSupervisor.start_pane(@pane, agent: @agent)
       assert registration(@pane) == {:ok, nil}
 
       assert %{"ok" => true, "persisted" => true} = attach!(c)
