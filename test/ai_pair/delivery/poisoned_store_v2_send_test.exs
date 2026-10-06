@@ -78,9 +78,10 @@ defmodule AiPair.Delivery.PoisonedStoreV2SendTest do
     sm = start_pane!(c, pane)
     assert :ok = await_state(sm, :idle)
 
-    # POISON: the first append's fsync fails, which poisons the store.
+    # POISON: the first append's fsync fails, which poisons the store. Counted from after
+    # boot: an S2 boot fsyncs its lineage attestation first.
     throwaway_a = id(c, "throwaway-a")
-    FaultFs.inject(c.fs, :sync, 1, {:error, :eio})
+    FaultFs.inject(c.fs, :sync, FaultFs.count(c.fs, :sync) + 1, {:error, :eio})
 
     assert {:error, {:receipt_sync_failed, :eio}} =
              ReceiptStore.admit(c.store, throwaway_a, pane, hash("throwaway"), self())

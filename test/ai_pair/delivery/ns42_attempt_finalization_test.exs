@@ -302,14 +302,19 @@ defmodule AiPair.Delivery.NS42AttemptFinalizationTest do
       crash!(store)
       before = File.read!(path)
 
-      # Initialization writes nothing before the recovery append, so it is write 1.
+      # The recovery append is the boot's first RECEIPT write (an S2 boot first writes and
+      # fsyncs its lineage attestation), so the fault matches receipt bytes, not a call number.
       fs = FaultFs.new()
-      FaultFs.inject(fs, :write, 1, {:error, :eio})
+      FaultFs.inject(fs, :write, &receipt_bytes?/1, {:error, :eio})
 
       assert {:error, reason} = start_store(inbox, :failed, fs: fs)
       assert inspect(reason) =~ "receipt_write_failed"
-      assert FaultFs.count(fs, :write) == 1, "the refused write is the recovery append"
-      assert FaultFs.count(fs, :sync) == 0
+
+      assert Enum.count(FaultFs.trace(fs), &receipt_write?/1) == 1,
+             "the refused write is the recovery append"
+
+      after_refusal = Enum.drop_while(FaultFs.trace(fs), &(not receipt_write?(&1)))
+      refute Enum.any?(after_refusal, &match?({:sync, _}, &1)), "a refused append is never fsynced"
       assert File.read!(path) == before
 
       revived = start_store!(inbox, :second)
@@ -425,6 +430,15 @@ defmodule AiPair.Delivery.NS42AttemptFinalizationTest do
   end
 
   # A crash, not a shutdown: a graceful stop could do work a lost daemon never would.
+  # FaultFs write args are [fd, data]; a receipt append carries the receipt schema.
+  defp receipt_bytes?([_fd, data]),
+    do: IO.iodata_to_binary(data) =~ "ai-pair/delivery-receipt"
+
+  defp receipt_bytes?(_args), do: false
+
+  defp receipt_write?({:write, args}), do: receipt_bytes?(args)
+  defp receipt_write?(_op), do: false
+
   defp crash!(store) do
     ref = Process.monitor(store)
     Process.exit(store, :kill)

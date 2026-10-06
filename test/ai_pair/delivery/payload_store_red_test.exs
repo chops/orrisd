@@ -320,6 +320,10 @@ defmodule AiPair.Delivery.PayloadStoreRedTest do
     assert :ok = queue(store, id, token, text)
     stop(store)
 
+    # NS-15.G.003 S2: only an epoch attested in lineage.jsonl restores; without the file the
+    # epoch is unattested, as every S1 epoch is (absent at S1, where nothing writes it).
+    _ = File.rm(Path.join([c.inbox, "delivery", "lineage.jsonl"]))
+
     restarted = start_store!(c.inbox, SystemFs.new())
     assert last_status(c.inbox, id) == {"ambiguous", 1}
     assert payload_entries(c.inbox) == []

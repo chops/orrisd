@@ -669,7 +669,8 @@ defmodule AiPair.Delivery.ReceiptStoreTest do
   describe "durability is proven at the filesystem boundary" do
     test "a short or failed write is never acknowledged", %{inbox: inbox} do
       {store, fs} = start_faulty_store!(inbox)
-      FaultFs.inject(fs, :write, 1, {:error, :enospc})
+      # The next write after boot (S2 boot attests lineage with its own write first).
+      FaultFs.inject(fs, :write, FaultFs.count(fs, :write) + 1, {:error, :enospc})
 
       assert {:error, {:receipt_write_failed, :enospc}} = admit(store, @msg_a)
 
@@ -679,14 +680,14 @@ defmodule AiPair.Delivery.ReceiptStoreTest do
 
     test "a torn write is never acknowledged", %{inbox: inbox} do
       {store, fs} = start_faulty_store!(inbox)
-      FaultFs.inject(fs, :write, 1, {:torn, 12})
+      FaultFs.inject(fs, :write, FaultFs.count(fs, :write) + 1, {:torn, 12})
 
       assert {:error, {:receipt_write_failed, _}} = admit(store, @msg_a)
     end
 
     test "the reply waits on the file fsync, not on the write", %{inbox: inbox} do
       {store, fs} = start_faulty_store!(inbox)
-      FaultFs.inject(fs, :sync, 1, {:error, :eio})
+      FaultFs.inject(fs, :sync, FaultFs.count(fs, :sync) + 1, {:error, :eio})
 
       assert {:error, {:receipt_sync_failed, :eio}} = admit(store, @msg_a),
              "the caller must not be told the receipt is durable before it is"
@@ -788,7 +789,7 @@ defmodule AiPair.Delivery.ReceiptStoreTest do
   describe "failure containment and replay validation" do
     test "an uncertain append stops subsequent mutations", %{inbox: inbox} do
       {store, fs} = start_faulty_store!(inbox)
-      FaultFs.inject(fs, :sync, 1, {:error, :eio})
+      FaultFs.inject(fs, :sync, FaultFs.count(fs, :sync) + 1, {:error, :eio})
       assert {:error, {:receipt_sync_failed, :eio}} = admit(store, @msg_a)
       writes = FaultFs.count(fs, :write)
       assert {:error, :receipt_store_unavailable} = admit(store, @msg_b)

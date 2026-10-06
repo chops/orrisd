@@ -134,6 +134,10 @@ defmodule AiPair.Delivery.PayloadStoreStateMachineRedTest do
     assert File.exists?(object_path(c, msg, 1, text))
     stop_all([sm, store])
 
+    # NS-15.G.003 S2: only an epoch attested in lineage.jsonl restores; without the file the
+    # epoch is unattested, as every S1 epoch is (absent at S1, where nothing writes it).
+    _ = File.rm(Path.join([c.inbox, "delivery", "lineage.jsonl"]))
+
     restarted = start_store!(c)
     idle(c)
     sm2 = start_pane!(c, pane, restarted)
