@@ -23,6 +23,8 @@ defmodule AiPair.Delivery.ReceiptStore do
   # the transition API below admits only @statuses, which excludes it (B2 owns its emission).
   @terminal ~w(delivered not_delivered ambiguous cancelled)
   @statuses ~w(pending queued delivered not_delivered ambiguous)
+  # The pair a v1/v2 admission records (B1b): explicit null, never inferred from the registry.
+  @unbound %{registration_id: nil, generation: nil}
   @max_wait_ms 5_000
 
   @type receipt :: %{
@@ -55,6 +57,20 @@ defmodule AiPair.Delivery.ReceiptStore do
 
   def admit(store, id, pane, hash, owner),
     do: GenServer.call(store, {:admit, id, pane, hash, owner})
+
+  @doc """
+  Admit a version 3 send bound to the pane identity its caller PROVED under the pane's fence
+  (B1b): a new attempt records that registration pair on every line. The binding is required;
+  a v1/v2 admission uses `admit/5` and records null. An existing attempt answers its duplicate
+  unchanged: its stored pair is never rewritten.
+  """
+  @spec admit(GenServer.server(), String.t(), String.t(), String.t(), pid(), %{
+          registration_id: String.t(),
+          generation: String.t()
+        }) :: {:ok, {:admitted, map()} | {:duplicate, receipt()}} | {:error, rejection()}
+  def admit(store, id, pane, hash, owner, %{registration_id: reg, generation: gen} = binding)
+      when is_binary(reg) and is_binary(gen),
+      do: GenServer.call(store, {:admit, id, pane, hash, owner, binding})
 
   @doc "Durably advance the attempt authorized by the opaque operation token."
   @spec transition(GenServer.server(), String.t(), reference(), String.t()) ::
@@ -356,7 +372,25 @@ defmodule AiPair.Delivery.ReceiptStore do
     with :ok <- writable(state),
          :ok <- identity(id, pane, hash),
          :ok <- live_owner(owner) do
-      admit_current(state, id, pane, hash, owner)
+      admit_current(state, id, pane, hash, owner, @unbound)
+    else
+      {:error, _} = error -> {:reply, error, state}
+    end
+  end
+
+  def handle_call({:admit, id, pane, hash, owner, binding}, _from, state) do
+    with :ok <- writable(state),
+         :ok <- identity(id, pane, hash),
+         :ok <- valid_binding(binding),
+         :ok <- live_owner(owner) do
+      admit_current(
+        state,
+        id,
+        pane,
+        hash,
+        owner,
+        Map.take(binding, [:registration_id, :generation])
+      )
     else
       {:error, _} = error -> {:reply, error, state}
     end
@@ -581,13 +615,14 @@ defmodule AiPair.Delivery.ReceiptStore do
 
   defp digest(bytes), do: :crypto.hash(:sha256, bytes)
 
-  defp admit_current(state, id, pane, hash, owner) do
+  # A duplicate answers the stored view, its pair untouched; only a new attempt takes `pair`.
+  defp admit_current(state, id, pane, hash, owner, pair) do
     case public(state, id) do
       {:error, {:unknown_message_id, _}} ->
-        admit_attempt(state, id, pane, hash, owner, 1)
+        admit_attempt(state, id, pane, hash, owner, 1, pair)
 
       {:ok, %{pane_id: ^pane, payload_hash: ^hash, status: "not_delivered"} = view} ->
-        admit_attempt(state, id, pane, hash, owner, view.delivery_attempt + 1)
+        admit_attempt(state, id, pane, hash, owner, view.delivery_attempt + 1, pair)
 
       {:ok, %{pane_id: ^pane, payload_hash: ^hash} = view} ->
         {:reply, {:ok, {:duplicate, view}}, state}
@@ -597,14 +632,18 @@ defmodule AiPair.Delivery.ReceiptStore do
     end
   end
 
-  defp admit_attempt(state, id, pane, hash, owner, attempt) do
-    view = %{
-      message_id: id,
-      pane_id: pane,
-      payload_hash: hash,
-      status: "pending",
-      delivery_attempt: attempt
-    }
+  defp admit_attempt(state, id, pane, hash, owner, attempt, pair) do
+    view =
+      Map.merge(
+        %{
+          message_id: id,
+          pane_id: pane,
+          payload_hash: hash,
+          status: "pending",
+          delivery_attempt: attempt
+        },
+        pair
+      )
 
     case persist(state, view) do
       {:ok, updated} ->
@@ -818,6 +857,13 @@ defmodule AiPair.Delivery.ReceiptStore do
       not ReceiptLog.valid_pane?(pane) -> {:error, {:invalid_pane_id, :grammar}}
       true -> :ok
     end
+  end
+
+  # A binding the log could not read back is refused before any line is written.
+  defp valid_binding(%{registration_id: id, generation: gen}) do
+    if ReceiptLog.valid_pair?(id, gen),
+      do: :ok,
+      else: {:error, {:invalid_registration_binding, :grammar}}
   end
 
   defp live_owner(pid) when is_pid(pid) do

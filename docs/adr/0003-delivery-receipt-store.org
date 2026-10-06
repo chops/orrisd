@@ -78,8 +78,14 @@ a version 3 attempt never continues as version 2, boot finalization included. Ve
 adds the terminal status ~cancelled~, legal only after ~queued~: nothing follows it in that
 attempt and no new attempt opens. This build reads ~cancelled~ but never writes it; a
 stored one reads as ~ambiguous~ in every reply and is never restored. A restored queued
-attempt carries its pair into the restore registry and the entry handed to the pane. This
-build writes every pair as null; filling it is B1b's. Rollback floor: a build before RS3 refuses any version 3 line as
+attempt carries its pair into the restore registry and the entry handed to the pane. Only
+a protocol version 3 send binds a pair (B1b): the pane identity it proved under the pane's
+Coordinator fence is copied into its new attempt at admission (~ReceiptStore.admit/6~, which
+requires the binding and refuses one the log could not read back). A version 1 or 2 send
+records an explicit null pair, never one inferred from the registry; restored, such an
+attempt is unbound and S3 must treat it as unreleasable. A duplicate never rewrites a
+stored pair, and a new attempt after ~not_delivered~ takes only its own opener's pair.
+Rollback floor: a build before RS3 refuses any version 3 line as
 incompatible and leaves the log unchanged, so a rollback after the first RS3 write fails
 closed.
 

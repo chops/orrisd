@@ -192,6 +192,26 @@ defmodule AiPair.Pane.StateMachine do
       )
 
   @doc """
+  A receipted version 3 send whose pane identity the caller proved under the pane's fence
+  (B1b): a new attempt is admitted bound to that registration pair. The binding is required.
+  """
+  def send_receipted(
+        server,
+        text,
+        timeout,
+        msg_id,
+        store,
+        %{registration_id: reg, generation: gen} = binding
+      )
+      when is_binary(reg) and is_binary(gen),
+      do:
+        :gen_statem.call(
+          server,
+          {:send_receipted, Payload.new(text), :otel_ctx.get_current(), msg_id, store, binding},
+          timeout
+        )
+
+  @doc """
   The cap on the pending-sends queue. Exposed so callers and tests can
   reference the same value the state machine enforces.
   """
@@ -528,13 +548,24 @@ defmodule AiPair.Pane.StateMachine do
 
   def handle_event({:call, from}, {:send_receipted, text, ctx, msg_id, store}, state, data) do
     if not is_nil(store) and data.receipt_store == store,
-      do: admit_send(from, text, ctx, msg_id, state, data),
+      do: admit_send(from, text, ctx, msg_id, nil, state, data),
+      else: {:keep_state_and_data, [{:reply, from, {:error, :receipt_store_mismatch}}]}
+  end
+
+  def handle_event(
+        {:call, from},
+        {:send_receipted, text, ctx, msg_id, store, binding},
+        state,
+        data
+      ) do
+    if not is_nil(store) and data.receipt_store == store,
+      do: admit_send(from, text, ctx, msg_id, binding, state, data),
       else: {:keep_state_and_data, [{:reply, from, {:error, :receipt_store_mismatch}}]}
   end
 
   def handle_event({:call, from}, {:send_text, text, ctx, msg_id}, state, data) do
     if not is_nil(data.receipt_store) and not is_nil(msg_id),
-      do: admit_send(from, text, ctx, msg_id, state, data),
+      do: admit_send(from, text, ctx, msg_id, nil, state, data),
       else:
         handle_event(
           {:call, from},
@@ -587,12 +618,11 @@ defmodule AiPair.Pane.StateMachine do
 
   # ===== Helpers =====
 
-  defp admit_send(from, text, ctx, msg_id, state, data) do
+  # `binding` is the proven identity of a version 3 send, or nil (v1/v2: the store records null).
+  defp admit_send(from, text, ctx, msg_id, binding, state, data) do
     hash = Payload.hash(text)
 
-    case receipt_call(fn ->
-           ReceiptStore.admit(data.receipt_store, msg_id, data.pane_id, hash, self())
-         end) do
+    case receipt_call(fn -> admit(data, msg_id, hash, binding) end) do
       {:ok, {:admitted, %{operation_token: token}}} ->
         send_admitted(from, text, ctx, msg_id, token, state, data)
 
@@ -603,6 +633,12 @@ defmodule AiPair.Pane.StateMachine do
         {:keep_state_and_data, [{:reply, from, error}]}
     end
   end
+
+  defp admit(data, msg_id, hash, nil),
+    do: ReceiptStore.admit(data.receipt_store, msg_id, data.pane_id, hash, self())
+
+  defp admit(data, msg_id, hash, binding),
+    do: ReceiptStore.admit(data.receipt_store, msg_id, data.pane_id, hash, self(), binding)
 
   defp send_admitted(from, text, ctx, msg_id, token, state, data) do
     cond do

@@ -45,7 +45,7 @@ defmodule AiPair.IPC.Delivery do
           reconcile(params, store)
 
         "send" ->
-          send_to_pane(params, store)
+          send_to_pane(params, store, nil)
 
         # NS-15.G.002 B1a-2 (Orris ipc-v3.org, B1-K): a command that exists only in version 3,
         # named in a version 2 request, is a typed refusal echoing cmd; it has no side effect.
@@ -85,7 +85,13 @@ defmodule AiPair.IPC.Delivery do
   def reconcile_core(params, store), do: reconcile(params, store)
 
   @doc false
-  def send_core(params, store), do: send_to_pane(params, store)
+  def send_core(params, store), do: send_to_pane(params, store, nil)
+
+  @doc false
+  # The version 3 send core: `binding` is the identity proved under the pane's fence (B1b).
+  def send_core(params, store, %{registration_id: reg, generation: gen} = binding)
+      when is_binary(reg) and is_binary(gen),
+      do: send_to_pane(params, store, binding)
 
   @doc false
   def echo(params, version) do
@@ -112,7 +118,7 @@ defmodule AiPair.IPC.Delivery do
     end
   end
 
-  defp send_to_pane(params, store) do
+  defp send_to_pane(params, store, binding) do
     with :ok <- identity(params),
          :ok <- text(params["text"]),
          {:ok, view} <-
@@ -124,7 +130,7 @@ defmodule AiPair.IPC.Delivery do
              wait_ms: 0
            ) do
       case view.outcome do
-        "absent" -> send_to_registered_pane(params, store)
+        "absent" -> send_to_registered_pane(params, store, binding)
         "conflict" -> %{ok: false, error: "conflict"}
         _ -> send_result({:duplicate, view})
       end
@@ -136,18 +142,31 @@ defmodule AiPair.IPC.Delivery do
     :exit, _ -> %{ok: false, error: "delivery_unavailable"}
   end
 
-  defp send_to_registered_pane(params, store) do
+  defp send_to_registered_pane(params, store, binding) do
     case AiPair.PaneSupervisor.whereis_pane(params["pane_id"]) do
       {:ok, pane} ->
         # This read did not admit an attempt; the pane still owns atomic admission.
         timeout = Application.get_env(:ai_pair, :send_call_timeout_ms, 5_000)
-        result = StateMachine.send_receipted(pane, params["text"], timeout, params["msg_id"], store)
-        send_result(result)
+        send_result(receipted(pane, params, timeout, store, binding))
 
       :error ->
         %{ok: false, error: "pane_not_found"}
     end
   end
+
+  defp receipted(pane, params, timeout, store, nil),
+    do: StateMachine.send_receipted(pane, params["text"], timeout, params["msg_id"], store)
+
+  defp receipted(pane, params, timeout, store, binding),
+    do:
+      StateMachine.send_receipted(
+        pane,
+        params["text"],
+        timeout,
+        params["msg_id"],
+        store,
+        binding
+      )
 
   defp send_result(:ok), do: %{ok: true, status: "sent"}
 

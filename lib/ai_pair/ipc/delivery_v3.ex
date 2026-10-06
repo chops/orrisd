@@ -125,12 +125,15 @@ defmodule AiPair.IPC.DeliveryV3 do
     end
   end
 
-  # The identity is proved before ANY effect; the v2 send core runs only after it.
+  # The identity is proved before ANY effect; the v2 send core runs only after it, and a new
+  # attempt is admitted bound to that identity's registration pair (B1b).
   defp fenced_send(params, pane, context) do
     with {:ok, _child} <- child(pane),
          {:ok, identity} <- identity(pane, context) do
+      binding = Map.take(identity, [:registration_id, :generation])
+
       params
-      |> Delivery.send_core(context.receipt_store)
+      |> Delivery.send_core(context.receipt_store, binding)
       |> with_identity(identity)
     else
       :no_child -> %{ok: false, error: "pane_not_found"}

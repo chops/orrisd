@@ -58,7 +58,8 @@ defmodule AiPair.Delivery.ReceiptLog do
       "payload_hash" => view.payload_hash,
       "status" => view.status,
       "delivery_attempt" => view.delivery_attempt,
-      # The attempt's admitted pair, carried by its view; RS3 admits with none (null/null).
+      # The attempt's admitted pair, carried by its view: the proven identity of a version 3
+      # send (B1b), null/null for any other admission.
       "registration_id" => Map.get(view, :registration_id),
       "generation" => Map.get(view, :generation)
     }
@@ -76,6 +77,11 @@ defmodule AiPair.Delivery.ReceiptLog do
   def valid_id?(value), do: matches?(value, ~r/\Asnd_[0-9a-f]{64}\z/)
   def valid_hash?(value), do: matches?(value, ~r/\Asha256:[0-9a-f]{64}\z/)
   def valid_pane?(value), do: matches?(value, ~r/\A%[a-zA-Z0-9_]{1,128}\z/)
+
+  @doc false
+  # A set registration pair: reg_ + 32 lowercase hex, and a decimal string.
+  def valid_pair?(registration_id, generation),
+    do: matches?(registration_id, ~r/\Areg_[0-9a-f]{32}\z/) and matches?(generation, ~r/\A[0-9]+\z/)
 
   def transition?("pending", next), do: next in ~w(queued delivered not_delivered ambiguous)
   # `cancelled` is legal only from `queued`, and is terminal (no clause below leaves it).
@@ -220,7 +226,7 @@ defmodule AiPair.Delivery.ReceiptLog do
   defp pair?(%{"schema_version" => 3, "registration_id" => nil, "generation" => nil}), do: true
 
   defp pair?(%{"schema_version" => 3, "registration_id" => id, "generation" => gen}),
-    do: matches?(id, ~r/\Areg_[0-9a-f]{32}\z/) and matches?(gen, ~r/\A[0-9]+\z/)
+    do: valid_pair?(id, gen)
 
   defp pair?(_earlier_version), do: true
 
