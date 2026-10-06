@@ -1386,6 +1386,37 @@ defmodule AiPair.PaneIntentStoreTest do
       assert {:ok, []} = PaneIntentStore.list(restarted)
     end
 
+    test "B1a-1 a 1.0 file is rewritten as 2.0 by the next put, and a restart reads the 1.0 pane with null",
+         %{root: root} do
+      old =
+        record(@pane_1, root) |> Map.delete("registration_id") |> Map.put("schema_version", "1.0")
+
+      seed_state!(
+        root,
+        Jason.encode!(%{
+          "schema_version" => "1.0",
+          "updated_at" => "2026-09-11T00:00:00Z",
+          "attachments" => %{@pane_1 => old}
+        })
+      )
+
+      {:ok, store} = PaneIntentStore.start_link(root: root)
+      assert {:ok, [read]} = PaneIntentStore.list(store)
+      assert read["schema_version"] == "2.0" and Map.fetch(read, "registration_id") == {:ok, nil}
+
+      assert {:error, _} = PaneIntentStore.put(store, old), "a caller may not write a 1.0 record"
+      assert :ok = PaneIntentStore.put(store, record(@pane_2, root))
+
+      stop_and_join!(store)
+      {:ok, restarted} = PaneIntentStore.start_link(root: root)
+      assert {:ok, [first, second]} = PaneIntentStore.list(restarted)
+      assert first["pane_id"] == @pane_1 and Map.fetch(first, "registration_id") == {:ok, nil}
+      assert second["registration_id"] == record(@pane_2, root)["registration_id"]
+
+      assert state_path(root) |> File.read!() |> Jason.decode!() |> Map.fetch!("schema_version") ==
+               "2.0"
+    end
+
     test "an absent final file is empty success", %{root: root} do
       refute File.exists?(state_path(root))
       {:ok, store} = PaneIntentStore.start_link(root: root)
@@ -1426,7 +1457,7 @@ defmodule AiPair.PaneIntentStoreTest do
     test "an unsupported envelope version refuses", %{root: root} do
       seed_state!(
         root,
-        ~s({"schema_version":"2.0","updated_at":"2026-09-11T00:00:00Z","attachments":{}})
+        ~s({"schema_version":"3.0","updated_at":"2026-09-11T00:00:00Z","attachments":{}})
       )
 
       assert {:error, %{stage: :schema}} = PaneIntentStore.start_link(root: root)
@@ -3908,7 +3939,7 @@ defmodule AiPair.PaneIntentStoreTest do
 
   defp envelope(attachments) do
     Jason.encode!(%{
-      "schema_version" => "1.0",
+      "schema_version" => "2.0",
       "updated_at" => "2026-09-11T00:00:00Z",
       "attachments" => attachments
     })
@@ -3917,7 +3948,8 @@ defmodule AiPair.PaneIntentStoreTest do
   defp record(pane_id, root, overrides \\ %{}) do
     Map.merge(
       %{
-        "schema_version" => "1.0",
+        "schema_version" => "2.0",
+        "registration_id" => "reg_" <> String.duplicate("ab", 16),
         "pane_id" => pane_id,
         "agent" => "claude_code",
         "classifier" => "fingerprint:claude_code",

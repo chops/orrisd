@@ -157,10 +157,15 @@ defmodule AiPair.PaneIntentStore do
   end
 
   def handle_call({:put, record}, _from, state) do
-    case Record.validate(record, state.root) do
-      :ok ->
-        others = Enum.reject(state.records, &(&1["pane_id"] == record["pane_id"]))
-        commit(state, Record.sort([record | others]))
+    # A caller writes only the current schema: an older record is read, never newly written.
+    with true <- is_map(record) and record["schema_version"] == Record.version(),
+         :ok <- Record.validate(record, state.root) do
+      others = Enum.reject(state.records, &(&1["pane_id"] == record["pane_id"]))
+      commit(state, Record.sort([record | others]))
+    else
+      false ->
+        {:reply, {:error, error(:validation, {"schema_version", {:not_written, Record.version()}})},
+         state}
 
       {:error, reason} ->
         {:reply, {:error, error(:validation, reason)}, state}

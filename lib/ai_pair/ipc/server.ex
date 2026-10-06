@@ -559,11 +559,16 @@ defmodule AiPair.IPC.Server do
     |> Map.new()
   end
 
-  defp attach_pane(pane_id, agent, store, fenced \\ false)
+  defp attach_pane(pane_id, agent, store, fenced \\ false, extra_opts \\ [])
 
-  defp attach_pane(pane_id, agent, store, fenced) when agent == nil or is_binary(agent) do
+  defp attach_pane(pane_id, agent, store, fenced, extra_opts)
+       when agent == nil or is_binary(agent) do
     resolved = resolve_classifier(agent)
-    start_opts = build_start_opts(agent, resolved) |> Keyword.put(:receipt_store, store)
+
+    start_opts =
+      build_start_opts(agent, resolved)
+      |> Keyword.put(:receipt_store, store)
+      |> Keyword.merge(extra_opts)
 
     case start_registered_pane(pane_id, start_opts, fenced) do
       {:ok, pid} ->
@@ -586,7 +591,7 @@ defmodule AiPair.IPC.Server do
     end
   end
 
-  defp attach_pane(pane_id, _agent, _store, _fenced) do
+  defp attach_pane(pane_id, _agent, _store, _fenced, _extra_opts) do
     %{ok: false, pane_id: pane_id, error: "agent must be a string"}
   end
 
@@ -969,12 +974,21 @@ defmodule AiPair.IPC.Server do
     :exit, _reason -> :error
   end
 
+  # The registration the live child holds (nil if it has none or is gone).
+  defp child_registration(pane) do
+    case AiPair.PaneSupervisor.registration(pane) do
+      {:ok, id} -> id
+      :error -> nil
+    end
+  end
+
   # The pane facts come from ONE census row and nowhere else. There is no
   # per-field fallback, because a record mixing measured and guessed fields is
   # indistinguishable downstream from one that was wholly measured.
-  defp durable_record(pane_id, owner, binding, observation, generation) do
+  defp durable_record(pane_id, owner, binding, observation, generation, registration_id) do
     %{
       "schema_version" => AiPair.PaneIntentStore.Record.version(),
+      "registration_id" => registration_id,
       "pane_id" => pane_id,
       "agent" => owner.agent,
       "classifier" => owner.classifier,
@@ -1264,10 +1278,15 @@ defmodule AiPair.IPC.Server do
          :ok <- unchanged_attach_source(observed, fresh),
          {:ok, fresh_marker} <- Marker.read(tmux, fresh.session_id),
          :ok <- unchanged_attach_marker(marker, fresh_marker) do
-      reply = attach_pane(pane, agent, context.receipt_store, true)
+      # NS-15.G.002 B1: a fresh attach mints the registration BEFORE the child starts, so the child
+      # holds it from init. A child already running keeps its own, and the record is written with
+      # the child's id, read back from the child: the only mint is this one, for a fresh start.
+      minted = "reg_" <> Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+      reply = attach_pane(pane, agent, context.receipt_store, true, registration_id: minted)
 
       if reply.ok do
-        record = durable_record(pane, owner, binding, fresh, fresh_marker.generation)
+        registration = child_registration(pane)
+        record = durable_record(pane, owner, binding, fresh, fresh_marker.generation, registration)
 
         case persist_enabled(store, record) do
           :ok ->

@@ -64,13 +64,18 @@ defmodule AiPair.PaneRestore.Admission do
     :observation_completeness
   ]
 
-  @schema_version "1.0"
-
-  @intent_keys ~w(
+  # Admission keeps its own copy of the intent schema rather than calling the store's, so a row is
+  # judged by what this module was reviewed against; a test pins the two copies equal per version.
+  @intent_keys_1_0 ~w(
     schema_version pane_id agent classifier project project_dir project_inbox
     tmux_session session_gen cwd command pane_pid updated_at
   )
-  @intent_text_keys @intent_keys -- ["pane_pid"]
+  @intent_schemas %{
+    "1.0" => @intent_keys_1_0,
+    "2.0" => ["registration_id" | @intent_keys_1_0]
+  }
+  @intent_text_keys @intent_keys_1_0 -- ["pane_pid"]
+  @registration_id ~r/\Areg_[0-9a-f]{32}\z/
 
   @live_keys [
     :pane_id,
@@ -164,6 +169,11 @@ defmodule AiPair.PaneRestore.Admission do
         }
 
   @type report :: %{issues: [issue()], decisions: [decision()]}
+
+  @doc "The intent-row key sets this module admits, by schema version, each sorted."
+  @spec intent_schemas() :: %{String.t() => [String.t()]}
+  def intent_schemas,
+    do: Map.new(@intent_schemas, fn {version, keys} -> {version, Enum.sort(keys)} end)
 
   @doc """
   Assesses recorded intent against a live census and the session-local marker.
@@ -266,12 +276,20 @@ defmodule AiPair.PaneRestore.Admission do
   defp valid_rows?(role, [row | rest]), do: valid_row?(role, row) and valid_rows?(role, rest)
   defp valid_rows?(_role, _improper), do: false
 
-  defp valid_row?(:intent, row) do
-    exact_keys?(row, @intent_keys) and
-      Map.fetch!(row, "schema_version") === @schema_version and
-      Enum.all?(@intent_text_keys, &valid_text?(Map.fetch!(row, &1))) and
-      pid?(Map.fetch!(row, "pane_pid"))
+  defp valid_row?(:intent, row) when is_map(row) do
+    case Map.fetch(@intent_schemas, Map.get(row, "schema_version")) do
+      {:ok, keys} ->
+        exact_keys?(row, keys) and
+          Enum.all?(@intent_text_keys, &valid_text?(Map.fetch!(row, &1))) and
+          pid?(Map.fetch!(row, "pane_pid")) and
+          registration?(Map.get(row, "registration_id"))
+
+      :error ->
+        false
+    end
   end
+
+  defp valid_row?(:intent, _row), do: false
 
   defp valid_row?(:live, observation) do
     exact_keys?(observation, @live_keys) and
@@ -485,6 +503,10 @@ defmodule AiPair.PaneRestore.Admission do
   defp absolute_path?(value), do: valid_text?(value) and Path.type(value) == :absolute
 
   defp pid?(value), do: is_integer(value) and value > 0
+
+  # A 1.0 row has no registration_id key, read here as nil: no registration.
+  defp registration?(nil), do: true
+  defp registration?(value), do: is_binary(value) and Regex.match?(@registration_id, value)
 
   defp index?(value), do: is_integer(value) and value >= 0
 end

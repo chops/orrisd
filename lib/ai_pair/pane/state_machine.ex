@@ -95,6 +95,7 @@ defmodule AiPair.Pane.StateMachine do
     :pane_gone_since_ms,
     :recovery_candidate,
     :quarantine_token,
+    :registration_id,
     recovering_capture: false,
     restore_failures: %{},
     pending_sends: :queue.new(),
@@ -269,12 +270,23 @@ defmodule AiPair.Pane.StateMachine do
       # anyone re-quarantining it — which is the only way containment can
       # survive a crash.
       quarantine_token: Keyword.get(opts, :quarantine_token),
+      # NS-15.G.002 B1: the registration this child serves, minted by a fresh durable attach or
+      # carried from the admitted intent row; nil when it has none. From the child spec, so a
+      # :transient restart is the same registration.
+      registration_id: Keyword.get(opts, :registration_id),
       # NS-15.G.003 S2: a boot-restored pane pulls its restored queued sends with this
       # capability (from the same child spec, so a restarted child claims again).
       restore_capability: Keyword.get(opts, :restore_capability),
       restore_claim_timeout_ms: Keyword.get(opts, :restore_claim_timeout_ms, 5_000),
       restore_retry_ms: Keyword.get(opts, :restore_retry_ms, 1_000)
     }
+
+    # Publish the registration as this child's registry value, so readers never need to call a
+    # possibly stuck child for it. A child not named through AiPair.Registry has no entry to update.
+    with id when is_binary(id) <- data.registration_id,
+         {:via, Registry, {AiPair.Registry, key}} <- Keyword.get(opts, :name) do
+      Registry.update_value(AiPair.Registry, key, fn _ -> id end)
+    end
 
     claim =
       if data.receipt_store && data.restore_capability,
@@ -459,7 +471,13 @@ defmodule AiPair.Pane.StateMachine do
   end
 
   def handle_event({:call, from}, :get_info, state, data) do
-    info = %{agent: data.agent, classifier_name: data.classifier_name, state: state}
+    info = %{
+      agent: data.agent,
+      classifier_name: data.classifier_name,
+      state: state,
+      registration_id: data.registration_id
+    }
+
     {:keep_state_and_data, [{:reply, from, info}]}
   end
 
@@ -472,7 +490,8 @@ defmodule AiPair.Pane.StateMachine do
       # The BOOLEAN only. Putting the token here would surface the
       # operator's secret to every status caller, every IPC reply built
       # from one, and every `inspect/1` of a snapshot.
-      quarantined: quarantined?(data)
+      quarantined: quarantined?(data),
+      registration_id: data.registration_id
     }
 
     {:keep_state_and_data, [{:reply, from, info}]}

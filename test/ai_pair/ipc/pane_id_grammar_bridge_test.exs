@@ -201,6 +201,7 @@ defmodule AiPair.IPC.PaneIdGrammarBridgeTest do
   defp record(pane) do
     values = %{
       "schema_version" => Record.version(),
+      "registration_id" => nil,
       "pane_id" => pane,
       "agent" => "claude_code",
       "classifier" => "stub",

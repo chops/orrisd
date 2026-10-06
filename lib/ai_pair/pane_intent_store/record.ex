@@ -4,12 +4,15 @@ defmodule AiPair.PaneIntentStore.Record do
 
   Two rules shape everything here.
 
-  First, the format is CLOSED. A record has exactly thirteen string keys and an
+  First, the format is CLOSED. A record has exactly the keys of its schema
+  version - thirteen at 1.0, fourteen at 2.0, which adds `registration_id` - and an
   envelope exactly three; an unknown key, a missing key, a wrong type, an
   unsupported version or a key that disagrees with its record's `pane_id` is a
   visible error, never a default and never a repair. The whole file is validated
   before any record is returned, so a corrupt tail cannot be served as a healthy
-  prefix.
+  prefix. An envelope is all 1.0 or all 2.0; this module writes only 2.0, and a
+  1.0 record it rewrites gets `registration_id` null (no registration), because a
+  registration id is minted only by a fresh attach, never by a rewrite.
 
   Second, nothing untrusted becomes an atom. Input keys and values are compared
   as binaries against fixed literals; there is no `String.to_atom/1`,
@@ -22,12 +25,16 @@ defmodule AiPair.PaneIntentStore.Record do
   them.
   """
 
-  @version "1.0"
+  @version "2.0"
 
-  @record_keys ~w(
+  @record_keys_1_0 ~w(
     schema_version pane_id agent classifier project project_dir project_inbox
     tmux_session session_gen cwd command pane_pid updated_at
   )
+  @record_keys ["registration_id" | @record_keys_1_0]
+  @schemas %{"1.0" => @record_keys_1_0, "2.0" => @record_keys}
+
+  @registration_id_format ~r/\Areg_[0-9a-f]{32}\z/
 
   @envelope_keys ~w(schema_version updated_at attachments)
 
@@ -40,13 +47,17 @@ defmodule AiPair.PaneIntentStore.Record do
   @pane_id_format ~r/\A%[0-9]+\z/
   @generation_format ~r/\A[0-9]+\z/
 
-  @doc "The exact thirteen record keys, in contract order."
+  @doc "The exact fourteen keys of a record this module writes (schema 2.0)."
   @spec record_keys() :: [String.t()]
   def record_keys, do: @record_keys
 
-  @doc "The supported schema version. There is no compatibility range."
+  @doc "The schema version this module writes. It reads exactly 1.0 and 2.0."
   @spec version() :: String.t()
   def version, do: @version
+
+  @doc "The record key sets this module reads, by schema version, each sorted."
+  @spec schemas() :: %{String.t() => [String.t()]}
+  def schemas, do: Map.new(@schemas, fn {version, keys} -> {version, Enum.sort(keys)} end)
 
   @doc """
   Validate one record supplied by a caller.
@@ -56,8 +67,9 @@ defmodule AiPair.PaneIntentStore.Record do
   """
   @spec validate(term(), Path.t()) :: :ok | {:error, term()}
   def validate(record, root) when is_map(record) do
-    with :ok <- exact_keys(record, @record_keys, :record),
-         :ok <- literal(record, "schema_version", @version),
+    with {:ok, keys} <- schema_keys(record),
+         :ok <- exact_keys(record, keys, :record),
+         :ok <- registration_id(record),
          :ok <- pane_id(record),
          :ok <- pane_pid(record),
          :ok <- session_gen(record),
@@ -95,7 +107,7 @@ defmodule AiPair.PaneIntentStore.Record do
   @doc "Render a validated snapshot as canonical envelope bytes."
   @spec encode_envelope([map()], DateTime.t()) :: binary()
   def encode_envelope(records, now) do
-    attachments = Map.new(records, fn record -> {record["pane_id"], record} end)
+    attachments = Map.new(records, fn record -> {record["pane_id"], upgrade(record)} end)
 
     Jason.encode!(%{
       "schema_version" => @version,
@@ -103,6 +115,12 @@ defmodule AiPair.PaneIntentStore.Record do
       "attachments" => attachments
     })
   end
+
+  # A 1.0 record carries no registration: rewritten as 2.0 it records null, never a minted id.
+  defp upgrade(%{"schema_version" => "1.0"} = record),
+    do: Map.merge(record, %{"schema_version" => @version, "registration_id" => nil})
+
+  defp upgrade(record), do: record
 
   @doc "Sort records by binary `pane_id`. Decimal numeric order is not promised."
   @spec sort([map()]) :: [map()]
@@ -112,11 +130,13 @@ defmodule AiPair.PaneIntentStore.Record do
 
   defp validate_envelope(envelope, root) when is_map(envelope) do
     with :ok <- exact_keys(envelope, @envelope_keys, :envelope),
-         :ok <- literal(envelope, "schema_version", @version),
+         {:ok, _keys} <- schema_keys(envelope),
          :ok <- timestamp(envelope, "updated_at"),
          attachments when is_map(attachments) <- envelope["attachments"],
-         :ok <- validate_attachments(attachments, root) do
-      {:ok, attachments |> Map.values() |> sort()}
+         :ok <- validate_attachments(attachments, root),
+         :ok <- one_version(attachments, envelope["schema_version"]) do
+      # Readers see one shape: a 1.0 record is returned as the 2.0 record this module would write.
+      {:ok, attachments |> Map.values() |> Enum.map(&upgrade/1) |> sort()}
     else
       {:error, reason} -> {:error, {:schema, reason}}
       _not_a_map -> {:error, {:schema, {:attachments, :not_an_object}}}
@@ -194,11 +214,40 @@ defmodule AiPair.PaneIntentStore.Record do
     end
   end
 
-  defp literal(map, key, expected) do
-    case Map.fetch(map, key) do
-      {:ok, ^expected} -> :ok
-      {:ok, other} -> {:error, {key, {:unsupported, other}}}
-      :error -> {:error, {key, :missing}}
+  defp schema_keys(map) do
+    case Map.fetch(map, "schema_version") do
+      {:ok, version} when is_map_key(@schemas, version) -> {:ok, Map.fetch!(@schemas, version)}
+      {:ok, other} -> {:error, {"schema_version", {:unsupported, other}}}
+      :error -> {:error, {"schema_version", :missing}}
+    end
+  end
+
+  # Every record in an envelope is of the envelope's own version: no mixed file.
+  defp one_version(attachments, version) do
+    case Enum.find(attachments, fn {_key, record} -> record["schema_version"] != version end) do
+      nil ->
+        :ok
+
+      {key, record} ->
+        {:error, {:attachments, key, {:version_mismatch, record["schema_version"], version}}}
+    end
+  end
+
+  defp registration_id(record) do
+    case Map.fetch(record, "registration_id") do
+      :error ->
+        :ok
+
+      {:ok, nil} ->
+        :ok
+
+      {:ok, value} when is_binary(value) ->
+        if Regex.match?(@registration_id_format, value),
+          do: :ok,
+          else: {:error, {"registration_id", :malformed}}
+
+      {:ok, _other} ->
+        {:error, {"registration_id", :malformed}}
     end
   end
 

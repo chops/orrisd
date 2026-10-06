@@ -56,17 +56,17 @@ defmodule AiPair.Delivery.NS32M002DurableVersionTest do
 
   Rows:
 
-    * envelope `schema_version` set to `"2.0"`, to `"1"` (a string) and to `1`
+    * envelope `schema_version` set to `"3.0"` (2.0 is the current write version since B1a), to `"1"` (a string) and to `1`
       (an integer). Each asserts its own exact error. The term comes from
       `lib/ai_pair/pane_intent_store/record.ex:197-203` (`literal/3` gives
       `{"schema_version", {:unsupported, value}}`) and is wrapped by
       `lib/ai_pair/pane_intent_store.ex:398-402` into
       `%{stage: :schema, reason: ..., outcome: :unchanged, cleanup_errors: []}`;
-    * a per-record `schema_version` set to `"2.0"` inside an otherwise valid
+    * a per-record `schema_version` set to `"3.0"` inside an otherwise valid
       envelope at `"1.0"`.
 
   Each row has a one-key-differs check against its control. Its same-construction
-  control, the same builder at `"1.0"`, starts and lists the record.
+  control, the same builder at `"1.0"`, starts and lists the record (read as 2.0, null registration).
 
   Pane ids are built at run time, as `"%" <> Integer.to_string(unique_integer)`,
   so no literal pane id appears in this source. Every pane row asserts that the
@@ -282,13 +282,13 @@ defmodule AiPair.Delivery.NS32M002DurableVersionTest do
       try do
         assert {:ok, [only]} = PaneIntentStore.list(store)
         assert only["pane_id"] == ctx.pane
-        assert only["schema_version"] == "1.0"
+        assert only["schema_version"] == "2.0" and Map.fetch(only, "registration_id") == {:ok, nil}
       after
         GenServer.stop(store)
       end
     end
 
-    for {name, value} <- [{"2.0", "2.0"}, {~s("1" string), "1"}, {"1 integer", 1}] do
+    for {name, value} <- [{"3.0", "3.0"}, {~s("1" string), "1"}, {"1 integer", 1}] do
       @value value
 
       test "envelope schema_version #{name}: exact :schema refusal, outcome unchanged, bytes unchanged",
@@ -316,10 +316,10 @@ defmodule AiPair.Delivery.NS32M002DurableVersionTest do
       end
     end
 
-    test "record schema_version 2.0 inside a 1.0 envelope: exact refusal, bytes unchanged", ctx do
+    test "record schema_version 3.0 inside a 1.0 envelope: exact refusal, bytes unchanged", ctx do
       assert Regex.match?(~r/\A%[0-9]+\z/, ctx.pane)
       control_rec = intent(ctx.pane, ctx.root, "1.0")
-      changed_rec = intent(ctx.pane, ctx.root, "2.0")
+      changed_rec = intent(ctx.pane, ctx.root, "3.0")
 
       assert differing_keys(Jason.encode!(control_rec), Jason.encode!(changed_rec)) == [
                "schema_version"
@@ -336,7 +336,7 @@ defmodule AiPair.Delivery.NS32M002DurableVersionTest do
                {:error,
                 %{
                   stage: :schema,
-                  reason: {:attachments, ctx.pane, {"schema_version", {:unsupported, "2.0"}}},
+                  reason: {:attachments, ctx.pane, {"schema_version", {:unsupported, "3.0"}}},
                   outcome: :unchanged,
                   cleanup_errors: []
                 }}

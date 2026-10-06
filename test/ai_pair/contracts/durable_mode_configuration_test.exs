@@ -413,11 +413,12 @@ defmodule AiPair.Contracts.DurableModeConfigurationTest do
     "configuration.keys.json" |> fixture() |> Map.fetch!("keys") |> Map.new(&{&1["key"], &1})
   end
 
-  # One valid thirteen-key intent row, built from the store's own key list so it
+  # One valid fourteen-key (schema 2.0) intent row, built from the store's own key list so it
   # cannot drift from what `Admission` accepts.
   defp record do
     values = %{
-      "schema_version" => "1.0",
+      "schema_version" => "2.0",
+      "registration_id" => nil,
       "pane_id" => "%1",
       "agent" => "claude_code",
       "classifier" => "stub",

@@ -153,10 +153,13 @@ shape, not an error (~lane:992-995~; ~FD:307-324,496-500~).
 
 *** The record a successful durable attach commits
 Not a wire member, but the reason the wire exists: the committed record is the
-exact thirteen-key ~AiPair.PaneIntentStore.Record~ — ~schema_version~,
-~pane_id~, ~agent~, ~classifier~, ~project~, ~project_dir~, ~project_inbox~,
-~tmux_session~, ~session_gen~, ~cwd~, ~command~, ~pane_pid~, ~updated_at~
-(~record.ex:27-30,43-45~; ~lane:852-868~). Three rules bind it to the wire:
+exact fourteen-key schema 2.0 ~AiPair.PaneIntentStore.Record~ — ~registration_id~,
+~schema_version~, ~pane_id~, ~agent~, ~classifier~, ~project~, ~project_dir~,
+~project_inbox~, ~tmux_session~, ~session_gen~, ~cwd~, ~command~, ~pane_pid~,
+~updated_at~ (~record.ex~; ~lane:852-868~). ~registration_id~ is the id this
+attach minted for a freshly started child, or the running child's own id when the
+child was already running (NS-15.G.002 B1); it is never on the wire at version 1.
+Three rules bind the record to the wire:
 
 - ~session_gen~ is the generation READ BACK from the session's marker, never the
   value this boot offered (~lane:1139~; G1 ~RED:3146~, G2 ~RED:3180~, G8

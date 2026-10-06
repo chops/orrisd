@@ -98,6 +98,19 @@ defmodule AiPair.PaneSupervisor do
   end
 
   @spec via_pane(pane_id()) :: {:via, module(), {module(), {:pane, pane_id()}}}
+  @doc """
+  The registration the pane's live child serves, read from the registry without calling the
+  child (a stuck child cannot block it): `{:ok, id_or_nil}`, or `:error` when no child is
+  registered. The child publishes it as its registry value at init (NS-15.G.002 B1).
+  """
+  @spec registration(pane_id()) :: {:ok, String.t() | nil} | :error
+  def registration(pane_id) when is_binary(pane_id) do
+    case Registry.lookup(AiPair.Registry, {:pane, pane_id}) do
+      [{_pid, value}] -> {:ok, value}
+      [] -> :error
+    end
+  end
+
   def via_pane(pane_id) when is_binary(pane_id) do
     {:via, Registry, {AiPair.Registry, {:pane, pane_id}}}
   end

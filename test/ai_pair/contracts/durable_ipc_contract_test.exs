@@ -78,7 +78,7 @@ defmodule AiPair.Contracts.DurableIPCContractTest do
 
   # The exact thirteen record keys the contract quotes, in contract order.
   @record_keys ~w(
-    schema_version pane_id agent classifier project project_dir project_inbox
+    registration_id schema_version pane_id agent classifier project project_dir project_inbox
     tmux_session session_gen cwd command pane_pid updated_at
   )
 
@@ -376,10 +376,10 @@ defmodule AiPair.Contracts.DurableIPCContractTest do
     end
   end
 
-  test "the record the contract quotes is the store's own thirteen-key schema" do
+  test "the record the contract quotes is the store's own fourteen-key schema 2.0" do
     assert @record_keys == Record.record_keys()
-    assert length(@record_keys) == 13
-    assert is_binary(Record.version())
+    assert length(@record_keys) == 14
+    assert Record.version() == "2.0"
   end
 
   defp reply_fixtures do

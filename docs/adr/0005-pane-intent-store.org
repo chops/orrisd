@@ -28,7 +28,13 @@ through a =:global= name keyed by that canonical path, so a dot-component alias
 of an owned root is refused before any filesystem call is made.
 
 The persisted format is closed. The envelope has exactly =schema_version=,
-=updated_at= and =attachments=; a record has exactly thirteen string keys. An
+=updated_at= and =attachments=; a record has exactly the keys of its schema
+version: thirteen at 1.0, fourteen at 2.0, which adds =registration_id= (=reg_=
+plus 32 lowercase hex, or null for no registration; NS-15.G.002 B1). An envelope
+is all 1.0 or all 2.0. The store writes only 2.0 and refuses a caller's 1.0
+record; a 1.0 file is read as 2.0 records with a null =registration_id=, because
+a registration is minted only by a fresh attach. Rollback floor: a build before
+schema 2.0 refuses a 2.0 file, so a downgrade after any write fails closed. An
 unknown key, a missing key, a wrong type, an unsupported version, a duplicate
 JSON object key or an attachments key that disagrees with its record's
 =pane_id= is a visible error. The whole file is validated before any record is

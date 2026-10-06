@@ -391,9 +391,14 @@ defmodule AiPair.PaneRestore.Reconciler do
         {refused(pane, fresh.refusals, fresh.undischarged), not_attempted}
 
       true ->
-        quarantine(fresh, context.callbacks, context.receipt_store)
+        quarantine(fresh, context.callbacks, context.receipt_store, recorded_registration(row))
     end
   end
+
+  # NS-15.G.002 B1: the admitted child carries the registration its intent row recorded; a 1.0
+  # row, or a 2.0 row recording null, carries none. Never minted here.
+  defp recorded_registration(%{"registration_id" => id}) when is_binary(id), do: id
+  defp recorded_registration(_row), do: nil
 
   defp changed(_role, same, same), do: []
   defp changed(role, _fresh, _snapshot), do: [{:source_changed, role}]
@@ -431,9 +436,9 @@ defmodule AiPair.PaneRestore.Reconciler do
   # via name, so the child is the one every other caller would find. Only the
   # caller differs: the coordinator's owned worker makes the call, so the
   # effect is fenced and a late reply still discharges its own operation.
-  defp quarantine(decision, callbacks, receipt_store) do
+  defp quarantine(decision, callbacks, receipt_store, registration_id) do
     pane = decision.pane_id
-    {spec, issue} = child_spec(pane, callbacks, receipt_store)
+    {spec, issue} = child_spec(pane, callbacks, receipt_store, registration_id)
     started = Coordinator.submit(pane, PaneSupervisor, {:start_child, spec}, :infinity)
 
     row =
@@ -454,7 +459,12 @@ defmodule AiPair.PaneRestore.Reconciler do
   # issued through this pane's Coordinator transaction (ISSUER-PREDICATE r4), in its spec.
   # Returns the spec and the issue outcome (G4 design r2 mapping); the capability itself
   # travels only in the spec.
-  defp child_spec(pane, %{capture_fn: capture_fn, paste_fn: paste_fn}, receipt_store) do
+  defp child_spec(
+         pane,
+         %{capture_fn: capture_fn, paste_fn: paste_fn},
+         receipt_store,
+         registration_id
+       ) do
     {restore, issue} =
       case receipt_store do
         nil ->
@@ -478,7 +488,8 @@ defmodule AiPair.PaneRestore.Reconciler do
         name: PaneSupervisor.via_pane(pane),
         quarantine_token: :crypto.strong_rand_bytes(32) |> Base.url_encode64(padding: false),
         capture_fn: capture_fn,
-        paste_fn: paste_fn
+        paste_fn: paste_fn,
+        registration_id: registration_id
       ] ++ restore
 
     spec =
@@ -609,8 +620,12 @@ defmodule AiPair.PaneRestore.Reconciler do
   defp readmit_fenced(pane, store, callbacks, stop_timeout) do
     case Coordinator.submit(pane, store, {:fence_restore, pane, make_ref()}, 5_000) do
       {:ok, {:ok, _fence}} ->
+        # The replacement serves the same registration as the child it replaces (read before the
+        # stop); a pane with no live child, or one holding none, gets none. Never minted here.
+        registration_id = live_registration(pane)
+
         with :ok <- stop_old(pane, stop_timeout) do
-          {spec, _issue} = child_spec(pane, callbacks, store)
+          {spec, _issue} = child_spec(pane, callbacks, store, registration_id)
 
           case Coordinator.submit(pane, PaneSupervisor, {:start_child, spec}, :infinity) do
             {:ok, {:ok, pid}} -> {:ok, pid}
@@ -621,6 +636,13 @@ defmodule AiPair.PaneRestore.Reconciler do
 
       _refused_or_unavailable ->
         {:error, :fence_unavailable}
+    end
+  end
+
+  defp live_registration(pane) do
+    case PaneSupervisor.registration(pane) do
+      {:ok, id} -> id
+      :error -> nil
     end
   end
 
