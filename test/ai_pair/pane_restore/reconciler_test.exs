@@ -1062,7 +1062,8 @@ defmodule AiPair.PaneRestore.ReconcilerTest do
   describe "the produced report is the boot report contract's shape" do
     test "POSITIVE CONTROL: every frozen fixture passes the lifted closed-shape check" do
       paths = @fixture_dir |> Path.join("*.json") |> Path.wildcard()
-      assert length(paths) == 3
+      # Six since NS-15.G.003 S2 G4 added the three `restored` fixtures.
+      assert length(paths) == 6
 
       for path <- paths,
           do: assert(:ok = BootReportShape.assert_closed_shape!(Jason.decode!(File.read!(path))))

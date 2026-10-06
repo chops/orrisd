@@ -12,8 +12,11 @@ The daemon starts ReceiptStore before its IPC listener. The listener refuses to
 start without a live receipt authority and passes that authority to attached
 panes. Versioned sends refuse a pane configured with a different authority.
 The root supervisor remains one_for_one. Store restart recovers unresolved
-records as ambiguous; old operation tokens cannot authorize a paste in the new
-epoch. This does not restore lost pane queues or imply cross-VM locking.
+records as ambiguous, except a queued attempt restored under ADR-0003's bounded
+rule; old operation tokens cannot authorize a paste in the new epoch. A restored
+attempt is handed only to the quarantined pane boot reconciliation admits, as
+queue state, and nothing is pasted from it: releasing it still requires the
+drain (S3) and pane identity (B1). This implies no cross-VM locking.
 
 Protocol version 1 remains unreceipted and preserves its frozen reply fixtures.
 Protocol version 2 must be explicit. Ping advertises delivery_reconcile only

@@ -15,10 +15,14 @@ defmodule AiPair.Contracts.BootReportContractTest do
 
   use ExUnit.Case, async: true
 
+  alias AiPair.Test.BootReportShape
+
   @fixture_dir Path.expand("../../fixtures/contracts/boot-report", __DIR__)
   @hash_path Path.join(@fixture_dir, "CONTRACT_HASH")
-  @pinned_hash "5af313491eb38f3b1ccfc0875bc7d89b20e638f663b9a6bcb763737fea3dd632"
-  @expected_fixture_count 3
+  # Amended for NS-15.G.003 S2 G4: three fixtures carry the `restored` member; the original
+  # three are byte-unchanged.
+  @pinned_hash "060aaae3d96f30fd85124b592195638eb56e660946ed87bc3767b0649b88bb24"
+  @expected_fixture_count 6
 
   @top_keys ~w(issues marker_observation marker_writes panes root)
   @pane_keys ~w(dispatchable pane_id refusals status undischarged)
@@ -66,7 +70,9 @@ defmodule AiPair.Contracts.BootReportContractTest do
     test "#{name} has the closed report shape" do
       report = fixture(unquote(name))
 
-      assert Map.keys(report) |> Enum.sort() == @top_keys
+      # Five members, plus `restored` exactly when Boot was given a receipt store.
+      assert Map.keys(report) |> List.delete("restored") |> Enum.sort() == @top_keys
+      if Map.has_key?(report, "restored"), do: BootReportShape.assert_restored!(report["restored"])
       assert is_binary(report["root"]) and String.starts_with?(report["root"], "/")
       assert report["marker_writes"] == 0
       assert is_list(report["panes"])
@@ -124,6 +130,49 @@ defmodule AiPair.Contracts.BootReportContractTest do
     assert [["reconciliation_timeout", deadline]] = report["issues"]
     assert is_integer(deadline) and deadline > 0
     assert report["marker_observation"] == "unobserved"
+  end
+
+  # --- NS-15.G.003 S2 G4: the restored snapshot -----------------------------
+
+  test "the original three fixtures carry no restored member" do
+    for name <- ~w(boot-report.clean.json boot-report.refusals_and_issues.json
+                   boot-report.deadline_expired.json) do
+      refute Map.has_key?(fixture(name), "restored"), "#{name} gained a restored member"
+    end
+  end
+
+  test "a restored snapshot reports fence, issue and start separately, per pane" do
+    report = fixture("boot-report.restored.json")
+    assert ["observed", rows] = report["restored"]
+    by_pane = Map.new(rows, &{&1["pane_id"], &1})
+
+    assert %{"recorded" => true, "fence" => "released", "issue" => "issued", "start" => "started"} =
+             by_pane["<pane_a>"]
+
+    assert %{"recorded" => false, "fence" => "not_attempted", "issue" => "not_attempted"} =
+             by_pane["<pane_b>"]
+
+    assert by_pane["<pane_c>"]["issue"] == ["refused", "not_issuer"]
+    assert by_pane["<pane_c>"]["start"] == "started"
+
+    # A capability issued is not a child started.
+    assert by_pane["<pane_d>"]["issue"] == "issued"
+    assert by_pane["<pane_d>"]["start"] == ["refused", "already_started"]
+    assert Enum.map(by_pane["<pane_a>"]["entries"], & &1["msg_id"]) == ["<msg_a1>", "<msg_a2>"]
+  end
+
+  test "an uncertain start and fence are reported unresolved, with the fence issue" do
+    report = fixture("boot-report.restored_unresolved.json")
+    assert ["observed", [row]] = report["restored"]
+    assert row["fence"] == "unresolved"
+    assert row["start"] == ["unresolved", "coordinator_unavailable"]
+    assert [["fence_update_failed", "<pane_id>", _]] = report["issues"]
+  end
+
+  test "a deadline-expired boot with a receipt store claims no snapshot" do
+    report = fixture("boot-report.deadline_expired_restored.json")
+    assert report["restored"] == "unobserved"
+    assert report["panes"] == []
   end
 
   defp assert_tagged(term, heads) do

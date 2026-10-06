@@ -321,13 +321,19 @@ defmodule AiPair.PaneRestore.Boot do
   end
 
   defp timed_out_report(config) do
-    %{
+    report = %{
       root: config.root,
       panes: [],
       issues: [{:reconciliation_timeout, config.deadline_ms}],
       marker_observation: :unobserved,
       marker_writes: 0
     }
+
+    # NS-15.G.003 S2 (G4): with a receipt store the handover state of a timed-out boot is
+    # unknown, so the restored snapshot is claimed as unobserved, never as empty.
+    if Keyword.has_key?(config.reconcile, :receipt_store),
+      do: Map.put(report, :restored, :unobserved),
+      else: report
   end
 
   defp join!(monitor, worker) do

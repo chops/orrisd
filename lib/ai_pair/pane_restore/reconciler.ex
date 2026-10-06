@@ -53,12 +53,16 @@ defmodule AiPair.PaneRestore.Reconciler do
   every source answered and nothing was recorded.
   """
 
+  alias AiPair.Delivery.ReceiptStore
   alias AiPair.PaneIntentStore
   alias AiPair.PaneRestore.{Admission, Coordinator, Marker}
   alias AiPair.PaneSupervisor
   alias AiPair.Tmux
 
   @options [:store, :root, :tmux, :binding, :callbacks, :receipt_store]
+
+  # The handover a pane gets when nothing was attempted for it (G4 design r2).
+  @no_handover %{fence: :not_attempted, issue: :not_attempted, start: :not_attempted}
 
   @typedoc "The bound child effects: capture and paste functions the child uses instead of the default adapter."
   @type callbacks :: %{
@@ -95,12 +99,32 @@ defmodule AiPair.PaneRestore.Reconciler do
           | :not_applicable
           | {:observed, %{Admission.text() => Admission.marker_source()}}
 
+  @typedoc "One effect's outcome in the restored snapshot (G4 design r2): closed atoms only."
+  @type effect_outcome :: atom() | {:refused | :unresolved, atom()}
+
+  @typedoc "Present only when reconcile was given `:receipt_store` (NS-15.G.003 S2)."
+  @type restored ::
+          {:observed,
+           [
+             %{
+               pane_id: binary(),
+               entries: [%{msg_id: binary(), attempt: pos_integer()}],
+               recorded: boolean(),
+               fence: effect_outcome(),
+               issue: effect_outcome(),
+               start: effect_outcome()
+             }
+           ]}
+          | :unavailable
+          | {:error, atom()}
+
   @type report :: %{
-          root: binary(),
-          panes: [pane_row()],
-          issues: [issue()],
-          marker_observation: marker_observation(),
-          marker_writes: 0
+          required(:root) => binary(),
+          required(:panes) => [pane_row()],
+          required(:issues) => [issue()],
+          required(:marker_observation) => marker_observation(),
+          required(:marker_writes) => 0,
+          optional(:restored) => restored()
         }
 
   @doc """
@@ -135,22 +159,35 @@ defmodule AiPair.PaneRestore.Reconciler do
 
     snapshot = %{intent: intent, live: live, markers: markers}
 
-    {panes, pane_issues} =
+    # NS-15.G.003 S2 (G4): one registry snapshot, after the sources and before the first
+    # capability issue, while every restored entry is still unheld.
+    registry = restored_snapshot(context.receipt_store)
+
+    {panes, pane_issues, handovers} =
       case intent do
         {:observed, rows} when is_list(rows) ->
-          rows |> Enum.map(&entry(&1, snapshot, context)) |> Enum.unzip()
+          rows
+          |> Enum.map(&entry(&1, snapshot, context))
+          |> Enum.reduce({[], [], %{}}, fn {pane_row, issues, {pane, handover}}, {ps, is, hs} ->
+            {[pane_row | ps], [issues | is], Map.put(hs, pane, handover)}
+          end)
+          |> then(fn {ps, is, hs} -> {Enum.reverse(ps), Enum.reverse(is), hs} end)
 
         _failed ->
-          {[], []}
+          {[], [], %{}}
       end
 
-    %{
+    report = %{
       root: context.root,
       panes: panes,
       issues: Enum.uniq(source_issues ++ marker_issues ++ List.flatten(pane_issues)),
       marker_observation: marker_observation,
       marker_writes: 0
     }
+
+    if is_nil(context.receipt_store),
+      do: report,
+      else: Map.put(report, :restored, restored(registry, recorded_panes(intent), handovers))
   end
 
   # --- options --------------------------------------------------------------
@@ -265,17 +302,17 @@ defmodule AiPair.PaneRestore.Reconciler do
             {:ok, revalidate(row, marker, snapshot, decision, context)}
           end)
 
-        {entry, execution_issues} = transaction_entry(result, decision)
-        {entry, issues ++ execution_issues}
+        {entry, execution_issues, handover} = transaction_entry(result, decision)
+        {entry, issues ++ execution_issues, {pane, handover}}
 
       %{verdict: :refused} = decision ->
-        {refused(pane, decision.refusals, decision.undischarged), issues}
+        {refused(pane, decision.refusals, decision.undischarged), issues, {pane, @no_handover}}
 
       nil ->
         # Admission names panes from intent alone, so a row it produced no
         # decision for is a row inside an intent source it found unusable; the
         # intent finding is the refusal, and nothing was discharged.
-        {refused(pane, intent_findings(assessment), :unknown), issues}
+        {refused(pane, intent_findings(assessment), :unknown), issues, {pane, @no_handover}}
     end
   end
 
@@ -301,17 +338,21 @@ defmodule AiPair.PaneRestore.Reconciler do
     end)
   end
 
-  defp transaction_entry({:ok, entry}, _decision), do: {entry, []}
+  defp transaction_entry({:ok, {entry, handover}}, _decision),
+    do: {entry, [], Map.put(handover, :fence, :released)}
 
   defp transaction_entry({:error, reason}, decision) do
-    {refused(decision.pane_id, [{:fence_refused, reason}], decision.undischarged), []}
+    {refused(decision.pane_id, [{:fence_refused, reason}], decision.undischarged), [],
+     %{@no_handover | fence: fence_refusal(reason)}}
   end
 
   # The body result is kept, including an established quarantine: the fence
   # could not be released, which is an execution issue about the ledger, not an
-  # Admission refusal and not evidence that the child was never started.
-  defp transaction_entry({:fence_update_failed, {:ok, entry}, reason}, _decision) do
-    {entry, [{:fence_update_failed, entry.pane_id, reason}]}
+  # Admission refusal and not evidence that the child was never started. The
+  # body's own issue and start outcomes are kept as observed; only the fence is
+  # unresolved.
+  defp transaction_entry({:fence_update_failed, {:ok, {entry, handover}}, reason}, _decision) do
+    {entry, [{:fence_update_failed, entry.pane_id, reason}], Map.put(handover, :fence, :unresolved)}
   end
 
   # --- inside the fence -----------------------------------------------------
@@ -335,16 +376,19 @@ defmodule AiPair.PaneRestore.Reconciler do
         changed(:live, matching_live(live, pane), matching_live(snapshot.live, pane)) ++
         changed(:marker, marker, snapshot_marker)
 
+    not_attempted = Map.delete(@no_handover, :fence)
+
     cond do
       changes != [] ->
         refusals = if fresh, do: fresh.refusals, else: intent_findings(assessment)
-        refused(pane, Enum.uniq(changes ++ refusals), decision.undischarged)
+        {refused(pane, Enum.uniq(changes ++ refusals), decision.undischarged), not_attempted}
 
       fresh == nil ->
-        refused(pane, [{:source_changed, :intent} | intent_findings(assessment)], :unknown)
+        {refused(pane, [{:source_changed, :intent} | intent_findings(assessment)], :unknown),
+         not_attempted}
 
       fresh.verdict == :refused ->
-        refused(pane, fresh.refusals, fresh.undischarged)
+        {refused(pane, fresh.refusals, fresh.undischarged), not_attempted}
 
       true ->
         quarantine(fresh, context.callbacks, context.receipt_store)
@@ -389,36 +433,43 @@ defmodule AiPair.PaneRestore.Reconciler do
   # effect is fenced and a late reply still discharges its own operation.
   defp quarantine(decision, callbacks, receipt_store) do
     pane = decision.pane_id
+    {spec, issue} = child_spec(pane, callbacks, receipt_store)
+    started = Coordinator.submit(pane, PaneSupervisor, {:start_child, spec}, :infinity)
 
-    case Coordinator.submit(
-           pane,
-           PaneSupervisor,
-           {:start_child, child_spec(pane, callbacks, receipt_store)},
-           :infinity
-         ) do
-      {:ok, {:ok, _pid}} -> observed(decision)
-      {:ok, {:ok, _pid, _info}} -> observed(decision)
-      {:ok, {:error, reason}} -> containment_refused(decision, reason)
-      {:ok, :ignore} -> containment_refused(decision, :ignore)
-      {:error, reason} -> containment_refused(decision, reason)
-    end
+    row =
+      case started do
+        {:ok, {:ok, _pid}} -> observed(decision)
+        {:ok, {:ok, _pid, _info}} -> observed(decision)
+        {:ok, {:error, reason}} -> containment_refused(decision, reason)
+        {:ok, :ignore} -> containment_refused(decision, :ignore)
+        {:error, reason} -> containment_refused(decision, reason)
+        # Unreachable through DynamicSupervisor (see start_outcome/1); not confirmed as a start.
+        {:ok, _unrecognized} -> containment_refused(decision, :unrecognized_reply)
+      end
+
+    {row, %{issue: issue, start: start_outcome(started)}}
   end
 
   # NS-15.G.003 S2: an admitted pane with boot-restored queued sends gets a restore capability,
   # issued through this pane's Coordinator transaction (ISSUER-PREDICATE r4), in its spec.
+  # Returns the spec and the issue outcome (G4 design r2 mapping); the capability itself
+  # travels only in the spec.
   defp child_spec(pane, %{capture_fn: capture_fn, paste_fn: paste_fn}, receipt_store) do
-    restore =
-      with store when not is_nil(store) <- receipt_store,
-           {:ok, {:ok, cap}} <-
-             Coordinator.submit(
-               pane,
-               store,
-               {:issue_restore_capability, pane, make_ref()},
-               5_000
-             ) do
-        [receipt_store: store, restore_capability: cap]
-      else
-        _ -> []
+    {restore, issue} =
+      case receipt_store do
+        nil ->
+          {[], :not_attempted}
+
+        store ->
+          request = {:issue_restore_capability, pane, make_ref()}
+
+          case Coordinator.submit(pane, store, request, 5_000) do
+            {:ok, {:ok, cap}} = issued when is_binary(cap) ->
+              {[receipt_store: store, restore_capability: cap], issue_outcome(issued)}
+
+            other ->
+              {[], issue_outcome(other)}
+          end
       end
 
     opts =
@@ -430,9 +481,100 @@ defmodule AiPair.PaneRestore.Reconciler do
         paste_fn: paste_fn
       ] ++ restore
 
-    {{AiPair.Pane.StateMachine, :start_link, [opts]}, :transient, 5_000, :worker,
-     [AiPair.Pane.StateMachine]}
+    spec =
+      {{AiPair.Pane.StateMachine, :start_link, [opts]}, :transient, 5_000, :worker,
+       [AiPair.Pane.StateMachine]}
+
+    {spec, issue}
   end
+
+  # --- the restored snapshot (G4 design r2) -----------------------------------
+
+  # Every value below is a closed-vocabulary atom or a {head, atom} tuple: no reason
+  # payload, pid, reference, token, capability, hash, path or bytes is ever kept.
+
+  defp issue_outcome({:ok, {:ok, cap}}) when is_binary(cap), do: :issued
+
+  defp issue_outcome({:ok, {:error, reason}})
+       when reason in [:not_issuer, :no_restored_entries, :capability_live, :fenced_holder_alive],
+       do: {:refused, reason}
+
+  # The store answers {:error, reason} only after deciding to issue nothing; any other
+  # acknowledged reply does not prove no capability exists, so it is unresolved, never refused.
+  defp issue_outcome({:ok, {:error, _reason}}), do: {:refused, :other}
+  defp issue_outcome({:ok, _unrecognized}), do: {:unresolved, :other}
+  defp issue_outcome({:error, error}), do: submit_error_outcome(error)
+
+  defp start_outcome({:ok, {:ok, _pid}}), do: :started
+  defp start_outcome({:ok, {:ok, _pid, _info}}), do: :started
+  defp start_outcome({:ok, {:error, {:already_started, _pid}}}), do: {:refused, :already_started}
+  defp start_outcome({:ok, {:error, :max_children}}), do: {:refused, :max_children}
+  defp start_outcome({:ok, :ignore}), do: {:refused, :ignore}
+  defp start_outcome({:ok, {:error, _reason}}), do: {:refused, :other}
+  # DynamicSupervisor.start_child/2 answers only {:ok, pid}, {:ok, pid, info}, :ignore or
+  # {:error, reason}, so this arm is unreachable through the real PaneSupervisor; if reached,
+  # an acknowledged reply proves no absence of a child, so it is unresolved.
+  defp start_outcome({:ok, _unrecognized}), do: {:unresolved, :other}
+  defp start_outcome({:error, error}), do: submit_error_outcome(error)
+
+  # Refused before any effect, or an effect whose result is unknown.
+  defp submit_error_outcome(error) when error in [:pane_busy, :unresolved_operation],
+    do: {:refused, error}
+
+  defp submit_error_outcome({head, _detail}) when head in [:target_not_found, :target_not_local],
+    do: {:refused, head}
+
+  defp submit_error_outcome(error) when error in [:timeout, :coordinator_unavailable],
+    do: {:unresolved, error}
+
+  defp submit_error_outcome({:unresolved_operation, _cause}),
+    do: {:unresolved, :unresolved_operation}
+
+  defp submit_error_outcome(_other), do: {:unresolved, :other}
+
+  defp fence_refusal(reason)
+       when reason in [:pane_busy, :unresolved_operation, :coordinator_unavailable],
+       do: {:refused, reason}
+
+  defp fence_refusal(_other), do: {:refused, :other}
+
+  defp restored_snapshot(nil), do: nil
+
+  defp restored_snapshot(store) do
+    case ReceiptStore.restore_registry(store) do
+      registry when is_map(registry) -> {:observed, registry}
+      _other -> {:error, :other}
+    end
+  catch
+    :exit, _reason -> :unavailable
+  end
+
+  defp recorded_panes({:observed, rows}) when is_list(rows),
+    do: rows |> Enum.map(&row_pane_id/1) |> MapSet.new()
+
+  defp recorded_panes(_failed), do: MapSet.new()
+
+  defp restored({:observed, registry}, recorded, handovers) do
+    rows =
+      registry
+      |> Enum.sort_by(fn {pane, _entries} -> pane end)
+      |> Enum.map(fn {pane, entries} ->
+        handover = Map.get(handovers, pane, @no_handover)
+
+        %{
+          pane_id: pane,
+          entries: Enum.map(entries, &%{msg_id: &1.msg_id, attempt: &1.attempt}),
+          recorded: MapSet.member?(recorded, pane),
+          fence: handover.fence,
+          issue: handover.issue,
+          start: handover.start
+        }
+      end)
+
+    {:observed, rows}
+  end
+
+  defp restored(other, _recorded, _handovers), do: other
 
   @doc """
   Re-admit `pane` (NS-15.G.003 S2 fence order): fence its restored entries, stop the old
@@ -468,7 +610,7 @@ defmodule AiPair.PaneRestore.Reconciler do
     case Coordinator.submit(pane, store, {:fence_restore, pane, make_ref()}, 5_000) do
       {:ok, {:ok, _fence}} ->
         with :ok <- stop_old(pane, stop_timeout) do
-          spec = child_spec(pane, callbacks, store)
+          {spec, _issue} = child_spec(pane, callbacks, store)
 
           case Coordinator.submit(pane, PaneSupervisor, {:start_child, spec}, :infinity) do
             {:ok, {:ok, pid}} -> {:ok, pid}

@@ -30,6 +30,9 @@ defmodule AiPair.Delivery.NS42AttemptFinalizationTest do
     * ADR-0004 "Authority and Ordering": "Store restart recovers unresolved records as
       ambiguous; old operation tokens cannot authorize a paste in the new epoch."
 
+  NS-15.G.003 S2 narrowed both sentences for verified queued attempts (ADR-0003, ADR-0004);
+  this file's rows concern pending and paste_started attempts and are unaffected.
+
   Already asserted elsewhere, and not repeated here: a queued in-flight waiter woken by
   owner loss (`paste_window_test.exs`), a queued send left by a crash
   (`queued_send_loss_test.exs`), and owner death after a terminal or superseded attempt

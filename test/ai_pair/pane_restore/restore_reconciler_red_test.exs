@@ -29,6 +29,7 @@ defmodule AiPair.PaneRestore.RestoreReconcilerRedTest do
   alias AiPair.Pane.StateMachine
   alias AiPair.PaneRestore.{Coordinator, Reconciler}
   alias AiPair.PaneSupervisor
+  alias AiPair.Test.BootReportShape
 
   @root "/synthetic/inbox"
   @generation "213598703592091008239502170616955211460"
@@ -82,6 +83,20 @@ defmodule AiPair.PaneRestore.RestoreReconcilerRedTest do
       send(parent, {:refusing_store_call, request})
       {:reply, {:error, :unavailable}, parent}
     end
+  end
+
+  # A receipt-store stand-in for the G4 catch-all rows: it lists one restored entry and
+  # answers the capability issue with a scripted reply the real store never gives.
+  defmodule ScriptedIssueStore do
+    use GenServer
+    @impl true
+    def init({pane, msg, issue_reply}), do: {:ok, {pane, msg, issue_reply}}
+    @impl true
+    def handle_call(:restore_registry, _from, {pane, msg, _} = s),
+      do: {:reply, %{pane => [%{msg_id: msg, attempt: 1, payload_hash: "h", holder: nil}]}, s}
+
+    def handle_call({:issue_restore_capability, _pane, _ref}, _from, {_, _, reply} = s),
+      do: {:reply, reply, s}
   end
 
   setup do
@@ -307,6 +322,178 @@ defmodule AiPair.PaneRestore.RestoreReconcilerRedTest do
     assert Agent.get(agent, & &1.pastes) == []
   end
 
+  # ===== G4 (design r2): the boot report's restored snapshot =====
+
+  test "G4-1 the snapshot lists an admitted pane's handover and an unrecorded pane's entries",
+       c do
+    pane = pane_id()
+    other = pane_id()
+    own_pane(pane)
+
+    rstore =
+      restored_store!(
+        c.inbox,
+        [{pane, "g41-a1"}, {pane, "g41-a2"}, {other, "g41-b1"}],
+        Coordinator,
+        :pairs
+      )
+
+    {agent, callbacks} = recorder()
+    report = reconcile(pane, callbacks, receipt_store: rstore)
+
+    assert {:observed, rows} = report.restored
+    assert Enum.map(rows, & &1.pane_id) == Enum.sort([pane, other])
+    by_pane = Map.new(rows, &{&1.pane_id, &1})
+
+    assert by_pane[pane] == %{
+             pane_id: pane,
+             entries: [%{msg_id: id("g41-a1"), attempt: 1}, %{msg_id: id("g41-a2"), attempt: 1}],
+             recorded: true,
+             fence: :released,
+             issue: :issued,
+             start: :started
+           }
+
+    assert by_pane[other] == %{
+             pane_id: other,
+             entries: [%{msg_id: id("g41-b1"), attempt: 1}],
+             recorded: false,
+             fence: :not_attempted,
+             issue: :not_attempted,
+             start: :not_attempted
+           }
+
+    report
+    |> BootReportShape.encode()
+    |> BootReportShape.json_round_trip()
+    |> BootReportShape.assert_closed_shape!()
+
+    # The live view agrees once the child has claimed; the snapshot itself claims no holder.
+    {:ok, sm} = PaneSupervisor.whereis_pane(pane)
+    assert eventually(fn -> Enum.all?(registry(rstore)[pane], &(&1.holder == sm)) end)
+    assert [%{holder: nil}] = registry(rstore)[other]
+    assert Agent.get(agent, & &1.pastes) == []
+  end
+
+  test "G4-2 a refused issue is reported, and the child still starts without a capability", c do
+    pane = pane_id()
+    own_pane(pane)
+    stranger = spawn(fn -> receive do: (:never -> :ok) end)
+    rstore = restored_store!(c.inbox, [{pane, "g42"}], stranger, :pairs)
+    {agent, callbacks} = recorder()
+
+    report = reconcile(pane, callbacks, receipt_store: rstore)
+
+    assert {:observed, [row]} = report.restored
+    assert {row.fence, row.issue, row.start} == {:released, {:refused, :not_issuer}, :started}
+    assert [%{status: :observed_quarantined}] = report.panes
+    assert [%{holder: nil}] = registry(rstore)[pane], "no capability, so nothing is claimed"
+    assert Agent.get(agent, & &1.pastes) == []
+  end
+
+  test "G4-3 an issued capability whose child start is refused is not reported as started", c do
+    pane = pane_id()
+    own_pane(pane)
+    rstore = restored_store!(c.inbox, [{pane, "g43"}], Coordinator, :pairs)
+    parent = self()
+
+    # A placeholder already holds the pane's via-name, so start_child answers already_started.
+    placeholder =
+      spawn(fn ->
+        {:ok, _} = Registry.register(AiPair.Registry, {:pane, pane}, nil)
+        send(parent, :registered)
+        receive do: (:stop -> :ok)
+      end)
+
+    assert_receive :registered
+    on_exit(fn -> send(placeholder, :stop) end)
+    {agent, callbacks} = recorder()
+
+    report = reconcile(pane, callbacks, receipt_store: rstore)
+
+    assert {:observed, [row]} = report.restored
+    assert {row.fence, row.issue, row.start} == {:released, :issued, {:refused, :already_started}}
+    assert [%{status: :refused}] = report.panes
+    assert [%{holder: nil}] = registry(rstore)[pane], "the issued capability is never claimed"
+    assert last_status(c.inbox, id("g43")) == {"queued", 1}
+    assert Agent.get(agent, & &1.pastes) == []
+  end
+
+  test "G4-4 a start lost with the Coordinator is unresolved, and so is the fence", c do
+    pane = pane_id()
+    own_pane(pane)
+    rstore = restored_store!(c.inbox, [{pane, "g44"}], Coordinator, :pairs)
+    {_agent, callbacks} = recorder()
+    sup = Process.whereis(PaneSupervisor)
+    coordinator = Process.whereis(Coordinator)
+
+    :ok = :sys.suspend(sup)
+    on_exit(fn -> if Process.alive?(sup), do: :sys.resume(sup) end)
+    opts = reconcile_opts(pane, callbacks, receipt_store: rstore)
+    reconciling = Task.async(fn -> Reconciler.reconcile(opts) end)
+
+    assert eventually(
+             fn ->
+               {:messages, queued} = Process.info(sup, :messages)
+               Enum.any?(queued, &match?({:"$gen_call", _, {:start_child, _}}, &1))
+             end,
+             3_000
+           ),
+           "the start request reached PaneSupervisor"
+
+    ref = Process.monitor(coordinator)
+    Process.exit(coordinator, :kill)
+    assert_receive {:DOWN, ^ref, :process, ^coordinator, _}
+    :ok = :sys.resume(sup)
+
+    report = Task.await(reconciling, 5_000)
+    assert {:observed, [row]} = report.restored
+
+    assert {row.fence, row.issue, row.start} ==
+             {:unresolved, :issued, {:unresolved, :coordinator_unavailable}}
+
+    assert Enum.any?(report.issues, &match?({:fence_update_failed, ^pane, _}, &1))
+
+    report
+    |> BootReportShape.encode()
+    |> BootReportShape.json_round_trip()
+    |> BootReportShape.assert_closed_shape!()
+  end
+
+  # G4 source AMEND m_20261006T125717Z: an acknowledged reply that is not a recognized refusal
+  # does not prove no capability exists, so it is unresolved; an unrecognized error reply is
+  # still a refusal (the store issued nothing).
+  for {label, reply, expected} <- [
+        {"G4-5 an unrecognized acknowledged issue reply is unresolved", :odd_reply,
+         {:unresolved, :other}},
+        {"G4-6 an unrecognized issue error reply is refused other", {:error, :novel_refusal},
+         {:refused, :other}}
+      ] do
+    test label, _c do
+      pane = pane_id()
+      own_pane(pane)
+
+      {:ok, store} =
+        GenServer.start(
+          ScriptedIssueStore,
+          {pane, id("g4-catch-all"), unquote(Macro.escape(reply))}
+        )
+
+      on_exit(fn -> if Process.alive?(store), do: Process.exit(store, :kill) end)
+      {agent, callbacks} = recorder()
+
+      report = reconcile(pane, callbacks, receipt_store: store)
+
+      assert {:observed, [row]} = report.restored
+      assert row.issue == unquote(Macro.escape(expected))
+
+      assert {row.fence, row.start} == {:released, :started},
+             "no capability, the child still starts"
+
+      assert Agent.get(agent, & &1.pastes) == []
+    end
+  end
+
   test "R5 only the transaction holder's live worker for that pane and exact request may issue or fence",
        c do
     pane = pane_id()
@@ -475,11 +662,15 @@ defmodule AiPair.PaneRestore.RestoreReconcilerRedTest do
 
   # Queues one attempt per seed for `pane` under a real receipt store, restarts it, and asserts
   # the shared restore prerequisite (still queued after restart; ambiguous at the base).
-  defp restored_store!(inbox, pane, seeds) do
+  defp restored_store!(inbox, pane, seeds),
+    do: restored_store!(inbox, Enum.map(seeds, &{pane, &1}), Coordinator, :pairs)
+
+  # `pairs` is [{pane, seed}]; `issuer` is the revived store's restore issuer (G4 rows).
+  defp restored_store!(inbox, pairs, issuer, :pairs) do
     {:ok, first} =
       GenServer.start(ReceiptStore, inbox: inbox, fs: SystemFs.new(), restore_issuer: Coordinator)
 
-    for seed <- seeds do
+    for {pane, seed} <- pairs do
       {:ok, {:admitted, %{operation_token: token}}} =
         ReceiptStore.admit(first, id(seed), pane, hash(seed <> " bytes"), self())
 
@@ -490,11 +681,11 @@ defmodule AiPair.PaneRestore.RestoreReconcilerRedTest do
     Process.sleep(20)
 
     {:ok, revived} =
-      GenServer.start(ReceiptStore, inbox: inbox, fs: SystemFs.new(), restore_issuer: Coordinator)
+      GenServer.start(ReceiptStore, inbox: inbox, fs: SystemFs.new(), restore_issuer: issuer)
 
     on_exit(fn -> if Process.alive?(revived), do: Process.exit(revived, :kill) end)
 
-    for seed <- seeds do
+    for {_pane, seed} <- pairs do
       assert last_status(inbox, id(seed)) == {"queued", 1},
              "shared restore prerequisite: a queued attempt of an attested epoch stays queued"
     end
@@ -502,7 +693,11 @@ defmodule AiPair.PaneRestore.RestoreReconcilerRedTest do
     revived
   end
 
-  defp reconcile(pane, callbacks, overrides) do
+  defp reconcile(pane, callbacks, overrides),
+    do: Reconciler.reconcile(reconcile_opts(pane, callbacks, overrides))
+
+  # The fakes start here, in the test process, so the reconcile itself may run elsewhere.
+  defp reconcile_opts(pane, callbacks, overrides) do
     rows = [record(pane)]
     census = [observation(pane)]
 
@@ -529,11 +724,9 @@ defmodule AiPair.PaneRestore.RestoreReconcilerRedTest do
       restart: :temporary
     })
 
-    Reconciler.reconcile(
-      Keyword.merge(
-        [store: store, root: @root, tmux: name, binding: @binding, callbacks: callbacks],
-        overrides
-      )
+    Keyword.merge(
+      [store: store, root: @root, tmux: name, binding: @binding, callbacks: callbacks],
+      overrides
     )
   end
 

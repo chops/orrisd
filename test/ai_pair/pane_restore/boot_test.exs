@@ -918,6 +918,42 @@ defmodule AiPair.PaneRestore.BootTest do
       assert FakeStore.calls(store) == [:list]
     end
 
+    # NS-15.G.003 S2 G4: with a receipt store the timed-out report claims no restored snapshot.
+    test "B12a-S2: a timed-out boot given a receipt store publishes restored as unobserved" do
+      root = private_root!()
+      pane = pane_id()
+      own_pane(pane)
+      rows = [record(pane, root)]
+      store = start_store(lists: [{:ok, rows}], hold: 1, notify: self())
+      tmux = start_tmux(observe: [{:ok, [observation(pane, "$3", root)]}])
+      {_agent, callbacks} = recorder()
+
+      receipts_inbox = Path.join(root, "receipts")
+
+      {:ok, receipts} =
+        GenServer.start(AiPair.Delivery.ReceiptStore,
+          inbox: receipts_inbox,
+          fs: AiPair.Delivery.SystemFs.new()
+        )
+
+      on_exit(fn -> if Process.alive?(receipts), do: Process.exit(receipts, :kill) end)
+
+      boot =
+        start_boot!(
+          boot_opts(store, tmux, callbacks, root, deadline_ms: 200, receipt_store: receipts)
+        )
+
+      assert_receive {:list_held, 1, ^store, _worker}, 3_000
+      status = Boot.status(boot)
+      assert {:timed_out, %{joined: true}} = status.reconciliation
+      assert status.report.restored == :unobserved
+
+      published = published!(root)
+      assert :ok = BootReportShape.assert_closed_shape!(published)
+      assert published["restored"] == "unobserved"
+      assert published["issues"] == [["reconciliation_timeout", 200]]
+    end
+
     test "B12b: a deadline during the FENCED re-read publishes the timed-out report, starts no child and leaves the pane fenced" do
       start_coordinator()
       root = private_root!()

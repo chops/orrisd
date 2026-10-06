@@ -67,9 +67,101 @@ defmodule AiPair.Test.BootReportShape do
   @spec json_round_trip(term()) :: term()
   def json_round_trip(encoded), do: encoded |> Jason.encode!() |> Jason.decode!()
 
+  @restored_row_keys ~w(entries fence issue pane_id recorded start)
+  @issue_refusals ~w(not_issuer no_restored_entries capability_live fenced_holder_alive other)
+  @submit_refusals ~w(pane_busy unresolved_operation target_not_found target_not_local)
+  @unresolved ~w(timeout coordinator_unavailable unresolved_operation other)
+  @start_refusals ~w(already_started max_children ignore other)
+
+  @doc """
+  Asserts the closed `restored` member (boot-report contract, NS-15.G.003 S2 G4): every value
+  is from a closed vocabulary, and nothing pid-, reference-, hash- or secret-like is encoded.
+  """
+  def assert_restored!(restored) do
+    case restored do
+      "unobserved" ->
+        :ok
+
+      "unavailable" ->
+        :ok
+
+      ["error", head] ->
+        assert head == "other"
+
+      ["observed", rows] when is_list(rows) ->
+        pane_ids = Enum.map(rows, & &1["pane_id"])
+        assert pane_ids == Enum.sort(pane_ids), "restored rows are sorted by pane_id"
+
+        for row <- rows do
+          assert Map.keys(row) |> Enum.sort() == @restored_row_keys
+          assert is_binary(row["pane_id"]) and is_boolean(row["recorded"])
+          assert row["entries"] != []
+
+          for entry <- row["entries"] do
+            assert Map.keys(entry) |> Enum.sort() == ~w(attempt msg_id)
+            assert is_binary(entry["msg_id"]) and is_integer(entry["attempt"])
+          end
+
+          assert row["fence"] in ["released", "unresolved", "not_attempted"] or
+                   match?(
+                     ["refused", h]
+                     when h in ~w(pane_busy unresolved_operation coordinator_unavailable other),
+                     row["fence"]
+                   )
+
+          assert_effect!(row["issue"], "issued", @issue_refusals ++ @submit_refusals)
+          assert_effect!(row["start"], "started", @start_refusals ++ @submit_refusals)
+
+          unless row["recorded"] do
+            assert {row["fence"], row["issue"], row["start"]} ==
+                     {"not_attempted", "not_attempted", "not_attempted"}
+          end
+        end
+
+      other ->
+        flunk("unknown restored member: #{inspect(other)}")
+    end
+
+    # Privacy: no pid, reference, payload hash, or 64-hex / 43-char base64 run (a token,
+    # capability or digest) anywhere in the encoded member. Message ids (snd_ plus 64 hex)
+    # are the one permitted identifier and are masked before the scan.
+    text = restored |> mask_msg_ids() |> Jason.encode!()
+    refute text =~ "#PID<"
+    refute text =~ "#Reference<"
+    refute text =~ "sha256:"
+    refute Regex.match?(~r/[0-9a-f]{64}/, text)
+    refute Regex.match?(~r/[A-Za-z0-9_-]{43}/, text)
+    :ok
+  end
+
+  defp mask_msg_ids(["observed", rows]) when is_list(rows) do
+    [
+      "observed",
+      Enum.map(rows, fn row ->
+        Map.update(row, "entries", [], fn entries ->
+          Enum.map(entries, &Map.put(&1, "msg_id", "<msg_id>"))
+        end)
+      end)
+    ]
+  end
+
+  defp mask_msg_ids(other), do: other
+
+  defp assert_effect!(value, success, refusals) do
+    case value do
+      ^success -> :ok
+      "not_attempted" -> :ok
+      ["refused", head] -> assert head in refusals
+      ["unresolved", head] -> assert head in @unresolved
+      other -> flunk("unknown effect outcome: #{inspect(other)}")
+    end
+  end
+
   @doc "Asserts the contract's closed top-level, pane, refusal, issue and marker shapes over a decoded report."
   def assert_closed_shape!(report) do
-    assert Map.keys(report) |> Enum.sort() == @top_keys
+    # Five members, plus `restored` when Boot was given a receipt store (NS-15.G.003 S2 G4).
+    assert Map.keys(report) |> List.delete("restored") |> Enum.sort() == @top_keys
+    if Map.has_key?(report, "restored"), do: assert_restored!(report["restored"])
     assert is_binary(report["root"]) and String.starts_with?(report["root"], "/")
     assert report["marker_writes"] == 0
     assert is_list(report["panes"])

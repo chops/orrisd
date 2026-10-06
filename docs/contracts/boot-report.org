@@ -63,7 +63,8 @@ lands, nothing on disk carries this format at all.
 :END:
 The document is one JSON object with exactly these five members
 (~reconciler.ex:59-65~ for a settled reconciliation; ~boot.ex:105-111~ for a
-timed-out one):
+timed-out one), plus a sixth, ~restored~, exactly when ~Boot~ was given
+~receipt_store:~ (NS-15.G.003 S2; see "Restored snapshot"):
 
 | Member               | Type            | Value rule                                                                                             | Source                                              |
 |----------------------+-----------------+--------------------------------------------------------------------------------------------------------+-----------------------------------------------------|
@@ -197,6 +198,65 @@ map.
 Markers are read per session enumerated from the census; there is no global
 marker query and no invented session (~scope:283-289~).
 
+** Restored snapshot
+:PROPERTIES:
+:CUSTOM_ID: restored-snapshot
+:END:
+Present only when ~Boot~ was given ~receipt_store:~, which is durable mode from NS-15.G.003 S2 on.
+It lists the receipt store's boot-restored queued sends and what this boot attempted for each pane.
+It never claims a live holder.
+
+- Capture: exactly one ~ReceiptStore.restore_registry/1~ call per reconciliation, after the intent and
+  census snapshot and before the first capability issue. In a fresh production ~Boot~ (the store
+  was just started, ahead of ~Boot~, and no pane child exists yet) every entry is then unheld; a
+  direct later call of ~Reconciler.reconcile/1~ may find entries already held. Either way the
+  snapshot reports no holder state. The per-pane outcomes come from the reconciliation's own
+  decisions, not from a second read.
+- Value:
+  - ~["observed", rows]~;
+  - ~"unavailable"~, when the registry call exited;
+  - ~["error", "other"]~;
+  - ~"unobserved"~, a timed-out boot, which claims no snapshot.
+- Rows: one per pane holding restored entries, sorted by ~pane_id~ (byte order). Each row has exactly
+  these members:
+  - ~pane_id~ (string);
+  - ~entries~: an array of ~{"msg_id", "attempt"}~ in receipt seq order;
+  - ~recorded~: a boolean, whether the pane has an intent row in this reconciliation;
+  - ~fence~, ~issue~ and ~start~, below.
+  An unrecorded pane has all three as ~"not_attempted"~.
+- ~fence~:
+  - ~"released"~;
+  - ~"unresolved"~: the body ran but the release was not acknowledged, alongside the
+    ~fence_update_failed~ issue;
+  - ~["refused", e]~, with ~e~ one of ~pane_busy~, ~unresolved_operation~, ~coordinator_unavailable~,
+    ~other~;
+  - ~"not_attempted"~.
+- ~issue~:
+  - ~"issued"~;
+  - ~["refused", r]~, with ~r~ one of ~not_issuer~, ~no_restored_entries~, ~capability_live~,
+    ~fenced_holder_alive~, ~other~, or a pre-effect submit refusal: ~pane_busy~,
+    ~unresolved_operation~, ~target_not_found~, ~target_not_local~;
+  - ~["unresolved", h]~, with ~h~ one of ~timeout~, ~coordinator_unavailable~,
+    ~unresolved_operation~, ~other~;
+  - ~"not_attempted"~.
+  An issued capability is not a started child. ~["refused","other"]~ is only an unrecognized
+  ~{:error, _}~ reply, which means no capability was issued. Any other unrecognized acknowledged
+  reply is ~["unresolved","other"]~, because it does not prove that no capability exists.
+- ~start~:
+  - ~"started"~;
+  - ~["refused", h]~, with ~h~ one of ~already_started~, ~max_children~, ~ignore~, ~other~, or a
+    pre-effect submit refusal;
+  - ~["unresolved", h]~, as for ~issue~; the child may start late, as a late effect. An
+    unrecognized acknowledged start reply would be ~["unresolved","other"]~ and a refused row with
+    ~["quarantine_unavailable","unrecognized_reply"]~. This is unreachable through the real
+    ~AiPair.PaneSupervisor~, whose ~DynamicSupervisor.start_child/2~ answers only ~{:ok, pid}~,
+    ~{:ok, pid, info}~, ~:ignore~ or ~{:error, reason}~;
+  - ~"not_attempted"~.
+- Privacy: diagnostics are closed-vocabulary strings only. No reason payload, pid, reference, token,
+  capability, payload hash, object path or byte is encoded. ~msg_id~ and ~attempt~ are the only
+  identifiers.
+- The live view is ~ReceiptStore.restore_registry/1~. The snapshot is the boot-time record only.
+
 ** What readers may rely on
 :PROPERTIES:
 :CUSTOM_ID: readers
@@ -217,7 +277,7 @@ marker query and no invented session (~scope:283-289~).
 :PROPERTIES:
 :CUSTOM_ID: not-promised
 :END:
-- Any member other than the five above. In particular the ~ff8650e~ writer
+- Any member other than the five above and, with a receipt store, ~restored~. In particular the ~ff8650e~ writer
   emits no ~version~, ~boot_generation~, ~started_at~, ~finished_at~,
   ~deadline_ms~ (other than inside the ~reconciliation_timeout~ issue),
   reconciliation outcome or write outcome. The reconciliation outcome
@@ -253,6 +313,9 @@ representative ~$2~ .. ~$6~, and diagnostic strings are ~<detail>~,
 | ~boot-report.clean.json~                   | one agreeing pane quarantined; ~issues: []~; the session's marker observed                                                                    | B3 ~RED:2113-2115~              |
 | ~boot-report.refusals_and_issues.json~     | one quarantined pane and five refusals: ~marker_absent~ (session ~$4~), ~live_absent~ with the marker source unavailable, ~scope_mismatch~ on ~project~, ~fence_refused~ ~pane_busy~, ~session_mismatch~ (session ~$6~ marker names ~$2~); a ~session_issue~ for ~$5~ whose ~show-options~ failed | B4, B6, B8a, B13, B14, B9      |
 | ~boot-report.deadline_expired.json~        | the timed-out report: empty panes, ~["reconciliation_timeout",10000]~, ~"unobserved"~                                                          | B12a ~RED:2653-2657~; ~boot.ex:105-111~ |
+| ~boot-report.restored.json~                | S2: four restored panes — admitted and started; unrecorded; issue refused ~not_issuer~ then started; issued but start refused ~already_started~ | S2 G4-1..G4-3 |
+| ~boot-report.restored_unresolved.json~     | S2: issue issued, start ~["unresolved","coordinator_unavailable"]~, fence ~"unresolved"~ with the ~fence_update_failed~ issue                   | S2 G4-4 |
+| ~boot-report.deadline_expired_restored.json~ | S2: the timed-out report with ~"restored":"unobserved"~                                                                                   | S2 boot timeout row |
 
 The producer arrives with S7/S8. Until then the fixture test pins the bytes and
 checks the closed shapes and vocabularies above off the frozen documents with

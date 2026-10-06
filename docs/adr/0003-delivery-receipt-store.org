@@ -92,9 +92,18 @@ who can rewrite the entire log.
 :END:
 The store mints its epoch once at initialization and monitors the actual delivery
 operation owner, not the requesting connection. Owner loss makes a pending, queued
-or ~paste_started~ attempt durably ambiguous. Restart likewise appends ambiguity for every
-unresolved prior-epoch attempt (pending, queued or ~paste_started~) before accepting
-new calls.
+or ~paste_started~ attempt durably ambiguous. Restart likewise appends ambiguity, before
+accepting new calls, for every unresolved prior-epoch pending or ~paste_started~ attempt and
+for every queued attempt it cannot restore. A queued attempt stays queued across a restart
+only when its epoch is attested in ~delivery/lineage.jsonl~ and its record lies in that
+epoch's range, its latest record is a version 2 queued record with no ~paste_started~
+recorded for it, and its exact payload object passes the verified read. A corrupt or
+inconsistent lineage file refuses the store unchanged (NS-15.G.003 S2).
+
+A boot-restored queued attempt is owned by the store's restore registry, not by a pane
+process: its holder's death returns it to unheld and never finalizes it. A holder fenced for
+re-admission or stop is not a death: its tokens are void and the entries pass to the next
+admitted holder. The owner-loss rule above still holds for every live attempt.
 
 Reconciliation has exactly five outcomes: delivered, queued, absent, ambiguous,
 conflict. ~not_delivered~ is a stored status mapping to absent; it is not a sixth
