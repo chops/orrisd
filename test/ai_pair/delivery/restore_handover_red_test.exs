@@ -173,7 +173,9 @@ defmodule AiPair.Delivery.RestoreHandoverRedTest do
     assert eventually(fn -> last_status(c.inbox, id("h5-b")) == {"ambiguous", 1} end),
            "the pane's failed verified read must finalize that attempt"
 
-    refute File.exists?(bad)
+    # The store appends the terminal status before it removes the object (one call, status first), and
+    # the row above polls the log file, so it can observe the status between the two steps.
+    assert eventually(fn -> not File.exists?(bad) end), "the failed object is removed"
     assert eventually(fn -> StateMachine.pending_count(sm) == 2 end)
     {_state, data} = :sys.get_state(sm)
     assert Enum.map(:queue.to_list(data.pending_sends), &elem(&1, 3)) == [id("h5-a"), id("h5-c")]
