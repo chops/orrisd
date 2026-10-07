@@ -45,12 +45,16 @@ defmodule AiPair.NS17G001SelectedChannelNonEmissionTest do
   R6 is STATIC SPAWN-SITE EVIDENCE ONLY, at the head it runs on. It is never evidence of
   process lineage, parentage or lifetime, and the Acceptance clause (lineage, lifetime,
   launch facts) is untouched. It asserts, from the AST of every `lib/**/*.ex` file, the
-  exact classified set of four process-launch calls, all `System.cmd` of tmux:
+  exact classified set of five process-launch calls, all of tmux: four `System.cmd` sites,
   `tmux.ex` (daemon tree, `AiPair.Tmux`), `cli/consult.ex` (client CLI, lists panes only),
   `mix/tasks/ai_pair.smoke.ex` (operator-run mix task) and `calibrator.ex` (operator-run
-  calibrator). The last two DO launch agent CLIs under their own tmux servers; R6 names
-  them and does not excuse them. A new launch site anywhere in lib fails R6 until it is
-  classified and added in a reviewed change.
+  calibrator), and one `Port.open` site, `delivery/receipt_store.ex` (daemon tree,
+  `AiPair.Delivery.ReceiptStore`; NS-15.G.003 S3a): the store spawns each step of a gated
+  delivery transaction (set-buffer, paste-buffer -d, send-keys Enter, delete-buffer, with the
+  tmux binary and arguments `AiPair.Tmux` resolves and builds) only under the live token it
+  holds. The calibrator and smoke task DO launch agent CLIs under their own tmux servers;
+  R6 names them and does not excuse them. A new launch site anywhere in lib fails R6 until it
+  is classified and added in a reviewed change.
 
   `async: false`: the OTel exporter, the Logger level and the telemetry handlers are
   global.
@@ -86,7 +90,8 @@ defmodule AiPair.NS17G001SelectedChannelNonEmissionTest do
     {AiPair.Tmux, "lib/ai_pair/tmux.ex", {System, :cmd}},
     {AiPair.CLI.Consult, "lib/ai_pair/cli/consult.ex", {System, :cmd}},
     {Mix.Tasks.AiPair.Smoke, "lib/mix/tasks/ai_pair.smoke.ex", {System, :cmd}},
-    {AiPair.Calibrator, "lib/ai_pair/calibrator.ex", {System, :cmd}}
+    {AiPair.Calibrator, "lib/ai_pair/calibrator.ex", {System, :cmd}},
+    {AiPair.Delivery.ReceiptStore, "lib/ai_pair/delivery/receipt_store.ex", {Port, :open}}
   ]
 
   setup :setup_otel_capture
@@ -431,7 +436,7 @@ defmodule AiPair.NS17G001SelectedChannelNonEmissionTest do
   end
 
   describe "R6: static spawn-site evidence only (never lineage proof)" do
-    test "R6: lib contains exactly the four classified process-launch sites" do
+    test "R6: lib contains exactly the five classified process-launch sites" do
       files = lib_files()
 
       for {_module, file, _call} <- @launch_sites do
@@ -449,7 +454,9 @@ defmodule AiPair.NS17G001SelectedChannelNonEmissionTest do
       refute Enum.any?(found, fn {_module, _file, {_mod, fun}} -> fun == :apply end)
     end
 
-    test "R6: of the four enclosing modules only AiPair.Tmux is a daemon child" do
+    # The receipt store's site is in the daemon tree too (under the durable branch); this row
+    # asserts only that the three operator/client modules are not daemon children.
+    test "R6: of the five enclosing modules the CLI, smoke and calibrator are not daemon children" do
       ids = AiPair.Supervisor |> Supervisor.which_children() |> Enum.map(&elem(&1, 0))
 
       # Anti-vacuity: the tree read is the running daemon tree.

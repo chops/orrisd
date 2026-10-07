@@ -63,8 +63,14 @@ defmodule AiPair.PaneRestore.BootWiringTest do
       {:display_message, fn -> Tmux.display_message("%boundary", "msg") end},
       {:show_options, fn -> Tmux.show_options("$boundary", "@opt") end},
       {:set_option, fn -> Tmux.set_option("$boundary", "@opt", "v") end},
-      {:set_option_if_absent, fn -> Tmux.set_option_if_absent("$boundary", "@opt", "v") end}
+      {:set_option_if_absent, fn -> Tmux.set_option_if_absent("$boundary", "@opt", "v") end},
+      # NS-15.G.003 S3a: the gated delivery transaction (its gate is never reached here)
+      {:gated_paste, fn -> Tmux.gated_paste("%boundary", "payload", boundary_gate()) end}
     ]
+  end
+
+  defp boundary_gate do
+    %{store: self(), msg_id: "snd_" <> String.duplicate("0", 64), attempt: 1, token: make_ref()}
   end
 
   describe "the default-route boundary" do
