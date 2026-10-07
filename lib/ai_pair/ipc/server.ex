@@ -383,13 +383,18 @@ defmodule AiPair.IPC.Server do
   defp dispatch_version(params, %{receipt_store: store} = context) when is_map(params) do
     case Map.get(params, "protocol_version", 1) do
       1 ->
-        do_dispatch(params |> Map.put(:receipt_store, store) |> Map.put(:durable_context, context))
+        v1 = params |> Map.put(:receipt_store, store) |> Map.put(:durable_context, context)
+
+        case v1_admission(params["cmd"]) do
+          nil -> do_dispatch(v1)
+          kind -> v1_admitted(context, kind, fn -> do_dispatch(v1) end)
+        end
 
       2 ->
         if params["cmd"] == "sessions" do
           params |> Sessions.dispatch() |> Sessions.encode_reply()
         else
-          Jason.encode!(Delivery.dispatch(params, store))
+          Jason.encode!(Delivery.dispatch(params, store, %{admission: context[:admission]}))
         end
 
       3 ->
@@ -401,6 +406,21 @@ defmodule AiPair.IPC.Server do
   end
 
   defp dispatch_version(other, _context), do: do_dispatch(other)
+
+  # NS-32.M.002 RB-3a (vendored ipc-v1.org "Next paired refusal: quiescing"): a version 1 send,
+  # attach_pane or detach_pane runs under an admission ticket; while a quiesce fence is held or
+  # drains it is refused with the version 1 error shape before any effect.
+  defp v1_admission("send"), do: :ipc_send
+  defp v1_admission("attach_pane"), do: :attach_pane
+  defp v1_admission("detach_pane"), do: :detach_pane
+  defp v1_admission(_cmd), do: nil
+
+  defp v1_admitted(context, kind, fun) do
+    case AiPair.Admission.run(context[:admission], kind, fun) do
+      {:ok, frame} -> frame
+      {:error, :quiescing} -> Jason.encode!(%{ok: false, error: "quiescing"})
+    end
+  end
 
   defp do_dispatch(%{"cmd" => "ping"}) do
     Tracer.with_span "ipc.ping", %{kind: :server} do
@@ -561,8 +581,6 @@ defmodule AiPair.IPC.Server do
     |> Enum.reject(fn {_, v} -> is_nil(v) end)
     |> Map.new()
   end
-
-  defp attach_pane(pane_id, agent, store, fenced \\ false, extra_opts \\ [])
 
   defp attach_pane(pane_id, agent, store, fenced, extra_opts)
        when agent == nil or is_binary(agent) do
@@ -853,7 +871,7 @@ defmodule AiPair.IPC.Server do
       not durable_enabled?() ->
         if explicit_durable,
           do: disabled_durable_attach(pane_id, agent),
-          else: attach_pane(pane_id, agent, context.receipt_store)
+          else: attach_pane(pane_id, agent, context.receipt_store, false, admission_opts(context))
 
       context.boot_generation == nil ->
         unavailable_attach(pane_id, agent, explicit_durable)
@@ -862,7 +880,7 @@ defmodule AiPair.IPC.Server do
         lifecycle_transaction(pane_id, fn ->
           if explicit_durable,
             do: durable_attach_enabled(pane_id, agent, context),
-            else: attach_pane(pane_id, agent, context.receipt_store, true)
+            else: attach_pane(pane_id, agent, context.receipt_store, true, admission_opts(context))
         end)
     end
   end
@@ -986,15 +1004,18 @@ defmodule AiPair.IPC.Server do
       durable: durable_enabled?() and is_binary(context.boot_generation),
       committed: &committed_record/1,
       current_pid: &current_pane_pid/1,
-      pane_opts: &released_pane_opts/1,
-      build_identity: context.build_identity
+      pane_opts: fn pane -> released_pane_opts(pane, context[:admission]) end,
+      build_identity: context.build_identity,
+      admission: context[:admission]
     }
   end
 
   # NS-15.G.003 S3a: the options a released pane child starts with: the configured tmux
   # adapter for capture and ordinary pastes (as boot reconciliation binds them), and the
   # same adapter as the tmux_server its restored drain uses for gated transactions.
-  defp released_pane_opts(_pane) do
+  defp admission_opts(context), do: AiPair.Admission.child_opts(context[:admission])
+
+  defp released_pane_opts(_pane, admission) do
     tmux = Application.get_env(:ai_pair, :tmux_server, AiPair.Tmux)
 
     {:ok,
@@ -1010,7 +1031,7 @@ defmodule AiPair.IPC.Server do
          end
        end,
        tmux_server: tmux
-     ]}
+     ] ++ AiPair.Admission.child_opts(admission)}
   end
 
   defp committed_record(pane) do
@@ -1222,6 +1243,7 @@ defmodule AiPair.IPC.Server do
     # cannot change what ping reports; a refused record is logged by `load/1` and omitted.
     %{
       receipt_store: Keyword.fetch!(opts, :receipt_store),
+      admission: Keyword.get(opts, :admission),
       boot_generation: generation,
       build_identity: AiPair.BuildIdentity.load(AiPair.BuildIdentity.release_root())
     }
@@ -1348,7 +1370,15 @@ defmodule AiPair.IPC.Server do
       # holds it from init. A child already running keeps its own, and the record is written with
       # the child's id, read back from the child: the only mint is this one, for a fresh start.
       minted = "reg_" <> Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
-      reply = attach_pane(pane, agent, context.receipt_store, true, registration_id: minted)
+
+      reply =
+        attach_pane(
+          pane,
+          agent,
+          context.receipt_store,
+          true,
+          [registration_id: minted] ++ admission_opts(context)
+        )
 
       if reply.ok do
         registration = child_registration(pane)

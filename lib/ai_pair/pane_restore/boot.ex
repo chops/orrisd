@@ -73,7 +73,7 @@ defmodule AiPair.PaneRestore.Boot do
   @reconcile_options [:store, :root, :tmux, :binding, :callbacks]
   # NS-15.G.003 S2: optional, passed through to the Reconciler so an admitted pane with
   # boot-restored queued sends is started with its restore capability.
-  @optional_reconcile_options [:receipt_store]
+  @optional_reconcile_options [:receipt_store, :admission]
   @options @reconcile_options ++ @optional_reconcile_options ++ [:report_writer, :deadline_ms]
 
   @typedoc "The writer boundary: a behaviour module or a two-arity function."

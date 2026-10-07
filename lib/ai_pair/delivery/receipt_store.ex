@@ -124,6 +124,29 @@ defmodule AiPair.Delivery.ReceiptStore do
   @doc "Fence pane's restored entries: revoke the capability and void every held token."
   def fence_restore(store, pane, ref), do: GenServer.call(store, {:fence_restore, pane, ref})
 
+  # ----- NS-32.M.002 RB-3a: the store side of the quiesce fence (RB-3a scope r3, C1) -----
+
+  @doc """
+  Close admission of NEW work: from now on admit, queue, begin_paste and begin_command are refused
+  `{:error, :quiescing}`. Completion and read calls (transition, end_command, reconcile, observe,
+  effect_status, restore_registry) are never refused. AiPair.Admission calls this only after its
+  drain, when no ticket is outstanding, so no legitimate caller needs the refused calls until
+  `reopen_admission/1`.
+  """
+  def close_admission(store), do: GenServer.call(store, {:admission, :closed})
+
+  @doc "Reopen admission of new work (resume, or an incomplete quiesce)."
+  def reopen_admission(store), do: GenServer.call(store, {:admission, :open})
+
+  @doc """
+  The store's part of the authoritative quiesce observation (read in the store process, so no
+  mutation interleaves): the receipt schema versions present in the log (judged by
+  `ReceiptLog.observed_versions/1`), the queued and pending receipt counts, the effect journal
+  version and the panes with an unresolved effect, the lineage version (attested at this store's
+  start, or the store would not be running) and the payload layouts present.
+  """
+  def observation(store), do: GenServer.call(store, :observation)
+
   # ----- S3a gated delivery (scope r12 "Paste-command gate", "Effect journal") -----
 
   @doc """
@@ -228,6 +251,7 @@ defmodule AiPair.Delivery.ReceiptStore do
       fences: %{},
       held: %{},
       gate_poisoned: false,
+      admission_closed: false,
       fence_bound_ms: Keyword.get(opts, :fence_bound_ms, @fence_bound_ms),
       log: log,
       epoch: epoch,
@@ -323,8 +347,14 @@ defmodule AiPair.Delivery.ReceiptStore do
   @impl true
   def handle_call(:daemon_epoch, _from, state), do: {:reply, state.epoch, state}
 
+  def handle_call({:admission, mode}, _from, state) when mode in [:closed, :open],
+    do: {:reply, :ok, %{state | admission_closed: mode == :closed}}
+
+  def handle_call(:observation, _from, state), do: {:reply, observation_of(state), state}
+
   def handle_call({:queue, id, token, bytes}, _from, state) do
     with :ok <- writable(state),
+         :ok <- admitting(state),
          :ok <- valid_id(id),
          {:ok, current} <- current(state, id),
          :ok <- authority(state, id, token, current.delivery_attempt),
@@ -430,6 +460,7 @@ defmodule AiPair.Delivery.ReceiptStore do
 
     refusal =
       cond do
+        state.admission_closed -> {:error, :quiescing}
         state.gate_poisoned -> {:error, :effect_journal_unavailable}
         pane in unresolved_panes(state) -> {:error, :effect_unresolved}
         Map.has_key?(state.fences, pane) -> {:error, :fence_pending}
@@ -584,6 +615,7 @@ defmodule AiPair.Delivery.ReceiptStore do
 
   def handle_call({:admit, id, pane, hash, owner}, _from, state) do
     with :ok <- writable(state),
+         :ok <- admitting(state),
          :ok <- identity(id, pane, hash),
          :ok <- live_owner(owner) do
       admit_current(state, id, pane, hash, owner, @unbound)
@@ -594,6 +626,7 @@ defmodule AiPair.Delivery.ReceiptStore do
 
   def handle_call({:admit, id, pane, hash, owner, binding}, _from, state) do
     with :ok <- writable(state),
+         :ok <- admitting(state),
          :ok <- identity(id, pane, hash),
          :ok <- valid_binding(binding),
          :ok <- live_owner(owner) do
@@ -628,6 +661,7 @@ defmodule AiPair.Delivery.ReceiptStore do
 
   def handle_call({:begin_paste, id, token}, _from, state) do
     with :ok <- writable(state),
+         :ok <- admitting(state),
          :ok <- valid_id(id),
          {:ok, current} <- current(state, id),
          :ok <- authority(state, id, token, current.delivery_attempt),
@@ -1236,6 +1270,39 @@ defmodule AiPair.Delivery.ReceiptStore do
 
   defp writable(%{poisoned: true}), do: {:error, :receipt_store_unavailable}
   defp writable(_), do: :ok
+  defp admitting(%{admission_closed: true}), do: {:error, :quiescing}
+  defp admitting(_), do: :ok
+
+  defp observation_of(state) do
+    statuses = Enum.map(state.log.entries, fn {_id, record} -> record["status"] end)
+
+    with {:ok, bytes} <- File.read(state.log.path),
+         {:ok, versions} <- ReceiptLog.observed_versions(bytes) do
+      {:ok,
+       %{
+         receipts: %{
+           "versions" => versions,
+           "queued" => Enum.count(statuses, &(&1 == "queued")),
+           "pending" => Enum.count(statuses, &(&1 in ["pending", "paste_started"]))
+         },
+         effects:
+           {:ok,
+            %{
+              "version" => EffectJournal.version(),
+              "unresolved_holds" => length(unresolved_panes(state))
+            }},
+         lineage: {:ok, %{"version" => Lineage.schema_version(), "attested" => true}},
+         payloads: payload_layouts(state)
+       }}
+    else
+      _ -> :error
+    end
+  end
+
+  # The payload dimension is the live payload store's own observation (PayloadStore.observe/1):
+  # missing, replaced or unsafe is :error, never a certified empty layout.
+  defp payload_layouts(state), do: PayloadStore.observe(Map.get(state, :payload))
+
   defp outcome("not_delivered"), do: "absent"
   defp outcome("pending"), do: "ambiguous"
   defp outcome(status), do: status

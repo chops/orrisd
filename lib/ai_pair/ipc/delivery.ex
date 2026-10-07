@@ -7,7 +7,7 @@ defmodule AiPair.IPC.Delivery do
 
   @max_text_bytes 524_288
   @default_wait_ms 250
-  @v3_only ["cancel", "subscribe", "status", "release"]
+  @v3_only ["cancel", "subscribe", "status", "release", "quiesce", "resume"]
 
   def available?(nil), do: false
 
@@ -17,19 +17,23 @@ defmodule AiPair.IPC.Delivery do
     :exit, _ -> false
   end
 
-  def dispatch(params, store) do
+  def dispatch(params, store), do: dispatch(params, store, %{})
+
+  # NS-32.M.002 RB-3a: `opts.admission` is the server's AiPair.Admission; while it holds a
+  # quiesce fence a version 2 send is refused "quiescing" before any receipt is read or admitted.
+  def dispatch(params, store, opts) do
     command = if params["cmd"] in ["send", "reconcile", "ping"], do: params["cmd"], else: "unknown"
     attrs = echo(params) |> Map.new(fn {key, value} -> {"ipc." <> Atom.to_string(key), value} end)
 
     Tracer.with_span "ipc." <> command, %{kind: :server, attributes: attrs} do
-      result = dispatch_command(params, store)
+      result = dispatch_command(params, store, opts)
       Tracer.set_attribute("ipc.ok", result.ok)
       if not result.ok, do: Tracer.set_status(:error, result.error)
       result
     end
   end
 
-  defp dispatch_command(params, store) do
+  defp dispatch_command(params, store, opts) do
     result =
       case params["cmd"] do
         "ping" ->
@@ -45,7 +49,12 @@ defmodule AiPair.IPC.Delivery do
           reconcile(params, store)
 
         "send" ->
-          send_to_pane(params, store, nil)
+          case AiPair.Admission.run(Map.get(opts, :admission), :ipc_send, fn ->
+                 send_to_pane(params, store, nil)
+               end) do
+            {:ok, result} -> result
+            {:error, :quiescing} -> %{ok: false, error: "quiescing"}
+          end
 
         # NS-15.G.002 B1a-2 (Orris ipc-v3.org, B1-K): a command that exists only in version 3,
         # named in a version 2 request, is a typed refusal echoing cmd; it has no side effect.

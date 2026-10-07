@@ -58,6 +58,8 @@ defmodule AiPair.IPC.DeliveryV3 do
         "send" -> send_text(params, context)
         "reconcile" -> reconcile(params, context)
         "release" -> release(params, context)
+        "quiesce" -> quiesce(params, context)
+        "resume" -> resume(params, context)
         _ -> %{ok: false, error: "unknown command"}
       end
 
@@ -72,14 +74,13 @@ defmodule AiPair.IPC.DeliveryV3 do
         %{ok: false, error: "receipt_store_unavailable"}
 
       context.durable ->
-        with_build_identity(
-          %{
-            ok: true,
-            pong: AiPair.version(),
-            capabilities: ["delivery_reconcile", "pane_identity", "release", "sessions_read"]
-          },
-          context
-        )
+        %{
+          ok: true,
+          pong: AiPair.version(),
+          capabilities: ["delivery_reconcile", "pane_identity", "release", "sessions_read"]
+        }
+        |> with_quiesce(context)
+        |> with_build_identity(context)
 
       true ->
         with_build_identity(
@@ -103,6 +104,59 @@ defmodule AiPair.IPC.DeliveryV3 do
 
   defp with_build_identity(reply, _context), do: reply
 
+  # NS-32.M.002 RB-3a: a durable daemon with an admission server advertises quiesce; while a fence
+  # is held its ping also carries quiesced and the fence id (never the digest or the secret).
+  defp with_quiesce(reply, %{admission: admission}) when not is_nil(admission) do
+    reply = Map.update!(reply, :capabilities, &Enum.sort(["quiesce" | &1]))
+
+    case AiPair.Admission.fence(admission) do
+      nil -> reply
+      fence_id -> Map.merge(reply, %{quiesced: true, fence_id: fence_id})
+    end
+  end
+
+  defp with_quiesce(reply, _context), do: reply
+
+  defp quiesce(params, %{admission: admission} = context) when not is_nil(admission) do
+    if context.durable do
+      case AiPair.Admission.quiesce(admission, params["resume_hash"]) do
+        {:ok, %{fence_id: fence_id, observation: observation}} ->
+          %{ok: true, quiesced: true, fence_id: fence_id, observation: observation}
+
+        {:error, {:quiesce_timeout, bound_ms}} ->
+          %{ok: false, error: "quiesce_timeout", bound_ms: bound_ms}
+
+        {:error, {:observation_incomplete, dimension}} ->
+          %{ok: false, error: "observation_incomplete", dimension: dimension}
+
+        {:error, reason} when reason in [:quiesce_busy, :invalid_request] ->
+          %{ok: false, error: Atom.to_string(reason)}
+      end
+    else
+      unavailable()
+    end
+  end
+
+  defp quiesce(_params, _context), do: %{ok: false, error: "unknown command"}
+
+  defp resume(params, %{admission: admission}) when not is_nil(admission) do
+    case AiPair.Admission.resume(admission, params["fence_id"], params["resume_secret"]) do
+      :ok -> %{ok: true, resumed: true}
+      {:error, :fence_mismatch} -> %{ok: false, error: "fence_mismatch"}
+    end
+  end
+
+  defp resume(_params, _context), do: %{ok: false, error: "unknown command"}
+
+  # A send or release not yet started is refused quiescing while a fence is held or a quiesce
+  # drains; otherwise it runs under an admission ticket (no admission server: runs directly).
+  defp admitted(context, kind, fun) do
+    case AiPair.Admission.run(Map.get(context, :admission), kind, fun) do
+      {:ok, result} -> result
+      {:error, :quiescing} -> %{ok: false, error: "quiescing"}
+    end
+  end
+
   # NS-15.G.003 S3a: release a boot-restored quarantined pane (vendored ipc-v3.org "Release").
   # Legacy mode, a missing or invalid pane id, and an unprovable identity refuse before any
   # fence; the transaction itself is AiPair.PaneRestore.Release.run/3.
@@ -124,7 +178,7 @@ defmodule AiPair.IPC.DeliveryV3 do
           with {:ok, _child} <- child(pane), do: identity(pane, context)
         end
 
-        AiPair.PaneRestore.Release.run(pane, context, prove)
+        admitted(context, :release, fn -> AiPair.PaneRestore.Release.run(pane, context, prove) end)
     end
   end
 
@@ -163,9 +217,11 @@ defmodule AiPair.IPC.DeliveryV3 do
       nil ->
         pane = params["pane_id"]
 
-        if context.durable,
-          do: fenced(pane, fn -> fenced_send(params, pane, context) end),
-          else: unavailable()
+        admitted(context, :ipc_send, fn ->
+          if context.durable,
+            do: fenced(pane, fn -> fenced_send(params, pane, context) end),
+            else: unavailable()
+        end)
 
       refusal ->
         refusal

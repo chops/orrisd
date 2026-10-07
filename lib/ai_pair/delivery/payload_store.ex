@@ -26,6 +26,7 @@ defmodule AiPair.Delivery.PayloadStore do
   @default_bytes 67_108_864
   @max_object_bytes 524_288
   @name ~r/\A(snd_[0-9a-f]{64})\.([1-9][0-9]*)\.([0-9a-f]{64})\.payload\z/
+  @temp ~r/\A\.tmp-[0-9a-f]{16}\z/
 
   defstruct [:fs, :dir, :pin, :uid, count: 0, bytes: 0, objects: %{}, limits: {256, 67_108_864}]
 
@@ -115,6 +116,31 @@ defmodule AiPair.Delivery.PayloadStore do
       _ -> false
     end
   end
+
+  @doc """
+  The quiesce observation of the payload layouts present (NS-32.M.002 RB-3a):
+  `{:ok, %{"layouts" => [1]}}` when an attempt-bound object is present,
+  `{:ok, %{"layouts" => []}}` when none is, or `:error`. A live owner never certifies loss: a disabled store (no pin), a directory that is
+  missing, replaced (another inode), or unsafe (type, owner or mode), a failed listing, or an
+  entry of no known layout is `:error`. Read-only.
+  """
+  def observe(%__MODULE__{pin: nil}), do: :error
+
+  def observe(%__MODULE__{} = store) do
+    with true <- dir_unchanged?(store),
+         {:ok, names} <- Fs.list(store.fs, store.dir),
+         true <- Enum.all?(names, &known_entry?/1) do
+      if Enum.any?(names, &Regex.match?(@name, &1)),
+        do: {:ok, %{"layouts" => [1]}},
+        else: {:ok, %{"layouts" => []}}
+    else
+      _ -> :error
+    end
+  end
+
+  def observe(_store), do: :error
+
+  defp known_entry?(name), do: Regex.match?(@name, name) or Regex.match?(@temp, name)
 
   @doc "The verified read of one object: {:ok, bytes} or {:error, reason}."
   def read_verified(fs, path, uid) do

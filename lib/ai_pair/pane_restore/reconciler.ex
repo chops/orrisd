@@ -59,7 +59,7 @@ defmodule AiPair.PaneRestore.Reconciler do
   alias AiPair.PaneSupervisor
   alias AiPair.Tmux
 
-  @options [:store, :root, :tmux, :binding, :callbacks, :receipt_store]
+  @options [:store, :root, :tmux, :binding, :callbacks, :receipt_store, :admission]
 
   # The handover a pane gets when nothing was attempted for it (G4 design r2).
   @no_handover %{fence: :not_attempted, issue: :not_attempted, start: :not_attempted}
@@ -204,7 +204,8 @@ defmodule AiPair.PaneRestore.Reconciler do
       tmux: Keyword.fetch!(opts, :tmux),
       binding: Keyword.fetch!(opts, :binding),
       callbacks: validated_callbacks!(Keyword.fetch!(opts, :callbacks)),
-      receipt_store: Keyword.get(opts, :receipt_store)
+      receipt_store: Keyword.get(opts, :receipt_store),
+      admission: Keyword.get(opts, :admission)
     }
   end
 
@@ -391,7 +392,13 @@ defmodule AiPair.PaneRestore.Reconciler do
         {refused(pane, fresh.refusals, fresh.undischarged), not_attempted}
 
       true ->
-        quarantine(fresh, context.callbacks, context.receipt_store, recorded_registration(row))
+        quarantine(
+          fresh,
+          context.callbacks,
+          context.receipt_store,
+          recorded_registration(row),
+          context.admission
+        )
     end
   end
 
@@ -436,9 +443,9 @@ defmodule AiPair.PaneRestore.Reconciler do
   # via name, so the child is the one every other caller would find. Only the
   # caller differs: the coordinator's owned worker makes the call, so the
   # effect is fenced and a late reply still discharges its own operation.
-  defp quarantine(decision, callbacks, receipt_store, registration_id) do
+  defp quarantine(decision, callbacks, receipt_store, registration_id, admission) do
     pane = decision.pane_id
-    {spec, issue} = child_spec(pane, callbacks, receipt_store, registration_id)
+    {spec, issue} = child_spec(pane, callbacks, receipt_store, registration_id, admission)
     started = Coordinator.submit(pane, PaneSupervisor, {:start_child, spec}, :infinity)
 
     row =
@@ -463,7 +470,8 @@ defmodule AiPair.PaneRestore.Reconciler do
          pane,
          %{capture_fn: capture_fn, paste_fn: paste_fn},
          receipt_store,
-         registration_id
+         registration_id,
+         admission
        ) do
     {restore, issue} =
       case receipt_store do
@@ -490,7 +498,7 @@ defmodule AiPair.PaneRestore.Reconciler do
         capture_fn: capture_fn,
         paste_fn: paste_fn,
         registration_id: registration_id
-      ] ++ restore
+      ] ++ restore ++ AiPair.Admission.child_opts(admission)
 
     spec =
       {{AiPair.Pane.StateMachine, :start_link, [opts]}, :transient, 5_000, :worker,
@@ -596,10 +604,11 @@ defmodule AiPair.PaneRestore.Reconciler do
     store = Keyword.fetch!(opts, :receipt_store)
     callbacks = validated_callbacks!(Keyword.fetch!(opts, :callbacks))
     stop_timeout = Keyword.get(opts, :stop_timeout_ms, 5_000)
+    admission = Keyword.get(opts, :admission)
 
     result =
       Coordinator.transaction(pane, fn ->
-        {:ok, readmit_fenced(pane, store, callbacks, stop_timeout)}
+        {:ok, readmit_fenced(pane, store, callbacks, stop_timeout, admission)}
       end)
 
     # A fence that could not be released is reported distinctly, never collapsed into the
@@ -617,7 +626,7 @@ defmodule AiPair.PaneRestore.Reconciler do
     end
   end
 
-  defp readmit_fenced(pane, store, callbacks, stop_timeout) do
+  defp readmit_fenced(pane, store, callbacks, stop_timeout, admission) do
     case Coordinator.submit(pane, store, {:fence_restore, pane, make_ref()}, 5_000) do
       {:ok, {:ok, _fence}} ->
         # The replacement serves the same registration as the child it replaces (read before the
@@ -625,7 +634,7 @@ defmodule AiPair.PaneRestore.Reconciler do
         registration_id = live_registration(pane)
 
         with :ok <- stop_old(pane, stop_timeout) do
-          {spec, _issue} = child_spec(pane, callbacks, store, registration_id)
+          {spec, _issue} = child_spec(pane, callbacks, store, registration_id, admission)
 
           case Coordinator.submit(pane, PaneSupervisor, {:start_child, spec}, :infinity) do
             {:ok, {:ok, pid}} -> {:ok, pid}

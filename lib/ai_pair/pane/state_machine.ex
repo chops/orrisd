@@ -93,6 +93,7 @@ defmodule AiPair.Pane.StateMachine do
     :classifier,
     :poll_interval_ms,
     :idle_debounce_ms,
+    :admission,
     :idle_since_ms,
     :last_stripped_hash,
     :pane_gone_threshold,
@@ -278,6 +279,7 @@ defmodule AiPair.Pane.StateMachine do
       classifier: Keyword.get(opts, :classifier, AiPair.Pane.Classifier.Stub),
       poll_interval_ms: Keyword.get(opts, :poll_interval_ms, @default_poll_interval_ms),
       idle_debounce_ms: Keyword.get(opts, :idle_debounce_ms, @default_idle_debounce_ms),
+      admission: Keyword.get(opts, :admission),
       pane_gone_threshold:
         Keyword.get(
           opts,
@@ -487,8 +489,16 @@ defmodule AiPair.Pane.StateMachine do
   end
 
   def handle_event(:state_timeout, :drain_pending, :idle, data) do
-    rest = drain_queue(data, data.pending_sends)
-    {:keep_state, %{data | pending_sends: rest}}
+    case drain_queue(data, data.pending_sends) do
+      # NS-32.M.002 RB-3a: a quiesce fence refused the next paste; the queue is kept unchanged
+      # and the drain is retried after the debounce window (never a delivery failure)
+      {:quiescing, rest} ->
+        {:keep_state, %{data | pending_sends: rest},
+         [{:state_timeout, data.idle_debounce_ms, :drain_pending}]}
+
+      rest ->
+        {:keep_state, %{data | pending_sends: rest}}
+    end
   end
 
   # ----- inspection / control -----
@@ -984,40 +994,60 @@ defmodule AiPair.Pane.StateMachine do
     %{data | pending_sends: :queue.from_list(remaining)}
   end
 
+  # Each queued paste takes an admission ticket first (NS-32.M.002 RB-3a): while a quiesce fence
+  # is held or drains, the drain stops and returns {:quiescing, queue} with this entry and every
+  # later one unchanged.
   defp drain_queue(data, queue) do
     case :queue.out(queue) do
       {:empty, _} ->
         queue
 
       {{:value, {:receipted, text, ctx, msg_id, enqueued_at, token}}, rest} ->
-        result =
-          with_ctx(ctx, fn ->
-            paste_receipted(data, text, msg_id, token, max(now_ms() - enqueued_at, 0))
-          end)
+        case AiPair.Admission.run(data.admission, :idle_paste, fn ->
+               with_ctx(ctx, fn ->
+                 paste_receipted(data, text, msg_id, token, max(now_ms() - enqueued_at, 0))
+               end)
+             end) do
+          {:error, :quiescing} ->
+            {:quiescing, queue}
 
-        if result != :ok,
-          do: Logger.warning("ai_pair: receipted queue drain failed; reconciliation required")
+          {:ok, result} ->
+            if result != :ok,
+              do: Logger.warning("ai_pair: receipted queue drain failed; reconciliation required")
 
-        drain_queue(data, rest)
+            drain_queue(data, rest)
+        end
 
       {{:value, {text, ctx, msg_id, enqueued_ms}}, rest} ->
         wait_ms = now_ms() - enqueued_ms
 
-        result =
-          with_ctx(ctx, fn -> do_paste(data, text, "drain_queue", wait_ms, msg_id) end)
+        admitted =
+          AiPair.Admission.run(data.admission, :idle_paste, fn ->
+            with_ctx(ctx, fn -> do_paste(data, text, "drain_queue", wait_ms, msg_id) end)
+          end)
 
-        case result do
-          :ok ->
-            drain_queue(data, rest)
+        case admitted do
+          {:error, :quiescing} ->
+            {:quiescing, queue}
 
-          {:error, reason} ->
-            Logger.warning(fn ->
-              "ai_pair: dropping queued send for pane=#{data.pane_id} after paste failure: " <>
-                inspect(reason) <> " (text bytes=#{byte_size(text)})"
-            end)
-
-            drain_queue(data, rest)
+          {:ok, result} ->
+            drain_legacy(data, rest, result, text)
         end
+    end
+  end
+
+  defp drain_legacy(data, rest, result, text) do
+    case result do
+      :ok ->
+        drain_queue(data, rest)
+
+      {:error, reason} ->
+        Logger.warning(fn ->
+          "ai_pair: dropping queued send for pane=#{data.pane_id} after paste failure: " <>
+            inspect(reason) <> " (text bytes=#{byte_size(text)})"
+        end)
+
+        drain_queue(data, rest)
     end
   end
 
