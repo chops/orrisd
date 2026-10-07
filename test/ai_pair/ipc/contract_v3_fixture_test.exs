@@ -2,13 +2,14 @@ defmodule AiPair.IPC.ContractV3FixtureTest do
   @moduledoc """
   IPC version 3 identity core (NS-15.G.002 B1a-2; vendored `docs/contracts/ipc-v3.org`).
 
-  PRODUCED: 12 of the 13 /core reply/ fixtures the consumer pairing block claims, plus the locally
-  produced release-capable ping (ping.ok.identity_core_release.json, an example; NS-15.G.003 S3a),
-  are each the reply the real dispatch path
+  PRODUCED: the 13 /core reply/ fixtures the consumer pairing block claims (orris a7ed7593, after
+  the NS-15.G.003 S3a reciprocal pairing; the release-capable ping is one of them) are each the
+  reply the real dispatch path
   (`AiPair.IPC.DeliveryV3.dispatch/2`, or `AiPair.IPC.Delivery.dispatch/2` for the version 2
   refusals) gives for a prepared state, compared after the contract's placeholders are substituted.
   EXERCISED: the 2 /client request/ files are sent unchanged (placeholders substituted) and answer
-  their paired reply. Examples are not claimed.
+  their paired reply. Examples are not claimed; no release-command request or reply file is
+  exercised or compared here.
 
   BEHAVIOUR: identity is reported only for a live child whose registry id equals its committed
   record's id; every refusal of a v3 send leaves the receipt log, the queue and the paste recorder
@@ -34,14 +35,11 @@ defmodule AiPair.IPC.ContractV3FixtureTest do
   @generation "213598703592091008239502170616955211460"
   @census_pid 4242
 
-  # The 13 core replies the consumer's pairing block claims (orris 2d3d1b9a, unchanged by
-  # S3a). Since NS-15.G.003 S3a this producer's durable ping advertises release, so it no
-  # longer emits ping.ok.identity_core.json: that one claim is stale until the consumer's
-  # reciprocal pairing step replaces it, and it is not produced below. The durable ping is
-  # produced here as the example ping.ok.identity_core_release.json, locally only, with no
-  # pairing claim; the other release examples stay unclaimed and unproduced.
+  # The 13 core replies the consumer's pairing block claims (orris a7ed7593). Since the S3a
+  # reciprocal pairing the paired ping is the release-capable one; ping.ok.identity_core.json
+  # is an example (an identity-core daemon without release) and is not produced here.
   @paired_claims ~w(
-    ping.ok.identity_core.json send.sent.json send.queued.json
+    ping.ok.identity_core_release.json send.sent.json send.queued.json
     status.ok.json status.quarantined.json status.error.pane_not_found.json
     reconcile.queued.json reconcile.delivered.json
     status.error.pane_identity_unavailable.json send.error.pane_identity_unavailable.json
@@ -75,7 +73,8 @@ defmodule AiPair.IPC.ContractV3FixtureTest do
     assert Enum.all?(@paired_claims, &File.regular?(Path.join(@root, &1)))
   end
 
-  # 12 paired core replies still produced, plus the locally produced release-capable ping
+  # the 11 paired core replies the identity core produces through DeliveryV3 (the two version 2
+  # refusals are produced by the rows below)
   for name <- ~w(
         ping.ok.identity_core_release.json send.sent.json send.queued.json
         status.ok.json status.quarantined.json status.error.pane_not_found.json
