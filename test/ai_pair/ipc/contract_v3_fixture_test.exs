@@ -216,6 +216,66 @@ defmodule AiPair.IPC.ContractV3FixtureTest do
              v3_dispatch(status_request(c), context(c))
   end
 
+  describe "B2 cancel RED: version 3 classification" do
+    test "a cancel-capable ping advertises the command", c do
+      # GREEN must update Orris's paired release ping fixture before this producer claim lands.
+      reply = v3_dispatch(%{"cmd" => "ping", "protocol_version" => 3}, context(c))
+      assert "cancel" in reply.capabilities
+    end
+
+    test "absent and conflict answers carry no pane identity", c do
+      absent = v3_dispatch(cancel_request(c), context(c))
+      assert normalized(absent, c) == fixture("cancel.absent.json")
+      refute Map.has_key?(absent, :pane_identity)
+
+      other = "snd_" <> String.duplicate("b", 64)
+      admit(c, other, "%elsewhere", @hash, "delivered")
+      conflict = v3_dispatch(%{cancel_request(c) | "msg_id" => other}, context(c))
+      assert normalized(conflict, c) == fixture("cancel.conflict.json")
+      refute Map.has_key?(conflict, :pane_identity)
+    end
+
+    test "delivered is too late and pending is ambiguous, without mutation", c do
+      start_pane(c, "IDLE_MARKER", registration_id: @reg)
+      commit(c, @reg)
+
+      for {status, expected} <- [
+            {"delivered", "cancel.too_late.json"},
+            {"pending", "cancel.ambiguous.json"}
+          ] do
+        id = if status == "delivered", do: @id, else: "snd_" <> String.duplicate("c", 64)
+        bound_admit(c, id, status)
+        before = receipts(c.inbox)
+        reply = v3_dispatch(%{cancel_request(c) | "msg_id" => id}, context(c))
+        normalized = normalized(reply, c) |> placeholder("msg_id", id, "<msg_id>")
+        assert normalized == fixture(expected)
+        assert receipts(c.inbox) == before
+      end
+    end
+
+    test "a queued live send is durably cancelled and never pasted", c do
+      capture = start_supervised!({Agent, fn -> "BUSY_MARKER" end})
+      start_pane(c, "BUSY_MARKER", [registration_id: @reg], capture)
+      commit(c, @reg)
+      assert %{ok: true, status: "queued"} = v3_dispatch(send_request(c), context(c))
+
+      reply = v3_dispatch(cancel_request(c), context(c))
+      assert normalized(reply, c) == fixture("cancel.cancelled.json")
+
+      assert normalized(v3_dispatch(reconcile_request(c), context(c)), c) ==
+               fixture("reconcile.cancelled.json")
+
+      {:ok, pid} = PaneSupervisor.whereis_pane(c.pane)
+      Agent.update(capture, fn _ -> "IDLE_MARKER" end)
+      await_state(pid, :idle, 100)
+      Process.sleep(15)
+      assert Agent.get(c.pastes, & &1) == 0
+
+      assert normalized(v3_dispatch(reconcile_request(c), context(c)), c) ==
+               fixture("reconcile.cancelled.json")
+    end
+  end
+
   # apply/3: AiPair.IPC.DeliveryV3 is GREEN's module, absent at the RED base.
   defp v3_dispatch(request, context),
     do: apply(AiPair.IPC.DeliveryV3, :dispatch, [request, context])
@@ -346,6 +406,18 @@ defmodule AiPair.IPC.ContractV3FixtureTest do
     }
   end
 
+  defp cancel_request(c),
+    do: %{"cmd" => "cancel", "protocol_version" => 3, "msg_id" => @id, "pane_id" => c.pane}
+
+  defp bound_admit(c, id, status) do
+    binding = %{registration_id: @reg, generation: @generation}
+
+    {:ok, {:admitted, %{operation_token: token}}} =
+      ReceiptStore.admit(c.store, id, c.pane, @hash, self(), binding)
+
+    if status != "pending", do: :ok = ReceiptStore.transition(c.store, id, token, status)
+  end
+
   defp admit(c, id, pane, hash, status) do
     {:ok, {:admitted, %{operation_token: token}}} =
       ReceiptStore.admit(c.store, id, pane, hash, self())
@@ -354,14 +426,16 @@ defmodule AiPair.IPC.ContractV3FixtureTest do
     true
   end
 
-  defp start_pane(c, marker, opts) do
+  defp start_pane(c, marker, opts, capture_agent \\ nil) do
     {:ok, pid} =
       PaneSupervisor.start_pane(
         c.pane,
         opts ++
           [
             receipt_store: c.store,
-            capture_fn: fn _ -> {:ok, marker} end,
+            capture_fn: fn _ ->
+              {:ok, if(capture_agent, do: Agent.get(capture_agent, & &1), else: marker)}
+            end,
             paste_fn: fn _, _ -> Agent.update(c.pastes, &(&1 + 1)) end,
             classifier: MarkerClassifier,
             poll_interval_ms: 5,
