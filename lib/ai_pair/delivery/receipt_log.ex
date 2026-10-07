@@ -13,6 +13,32 @@ defmodule AiPair.Delivery.ReceiptLog do
   # emission). A pre-RS3 build refuses a version 3 line as receipt_log_incompatible: that
   # refusal, unchanged and fail-closed, is the rollback floor.
   @schema_versions [1, 2, 3]
+
+  @doc "The receipt schema versions this build reads (AiPair.Compat.reads/0)."
+  @spec schema_versions() :: [pos_integer()]
+  def schema_versions, do: @schema_versions
+
+  @doc """
+  Pure validation of receipt-log bytes for AiPair.Compat.observe/1, by this module's own line
+  rules (chain, key set, versions, transitions): the schema versions of a fully valid,
+  newline-terminated log, or :error. No I/O; a torn tail is :error here, never repaired.
+  """
+  @spec observed_versions(binary()) :: {:ok, [pos_integer()]} | :error
+  def observed_versions(bytes) when is_binary(bytes) do
+    case decode(bytes, struct(__MODULE__)) do
+      {:ok, _log, 0} ->
+        {:ok,
+         bytes
+         |> String.split("\n", trim: true)
+         |> Enum.map(&Jason.decode!(&1)["schema_version"])
+         |> Enum.uniq()
+         |> Enum.sort()}
+
+      _ ->
+        :error
+    end
+  end
+
   @statuses ~w(pending queued delivered not_delivered ambiguous)
   @v2_statuses @statuses ++ ~w(paste_started)
   @v3_statuses @v2_statuses ++ ~w(cancelled)

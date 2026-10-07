@@ -38,6 +38,26 @@ defmodule AiPair.Delivery.EffectJournal do
   @doc false
   def max_residuals, do: @max_residuals
 
+  @doc "The effect journal record version this build writes and reads (AiPair.Compat.reads/0)."
+  @spec version() :: pos_integer()
+  def version, do: 1
+
+  @doc """
+  Pure validation of journal bytes for AiPair.Compat.observe/1, by this module's own rules
+  (chain, exact fields per kind, legal begin/residual/end transitions, retained prefix):
+  `{:ok, versions, hold?}` for a fully valid, newline-terminated journal, where hold? says an
+  uncleared begin exists, or :error. No I/O; a torn tail is :error here, never repaired.
+  """
+  @spec observed_state(binary()) :: {:ok, [pos_integer()], boolean()} | :error
+  def observed_state(bytes) when is_binary(bytes) do
+    with {:ok, lines, 0} <- split(bytes),
+         {:ok, acc} <- validate(lines) do
+      {:ok, if(lines == [], do: [], else: [version()]), map_size(acc.open) > 0}
+    else
+      _ -> :error
+    end
+  end
+
   @spec open(Fs.t(), Path.t()) :: {:ok, t()} | {:error, term()}
   def open(fs, inbox) do
     path = Path.join([inbox, "delivery", "effects.jsonl"])

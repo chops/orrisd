@@ -121,6 +121,135 @@ defmodule AiPair.CompatTest do
     assert {:refused, "payloads", [1], [], _} = compat(:compatible?, [obs, reads])
   end
 
+  # GREEN rows (RB-2a source review r2): every effect, receipt and lineage line is judged by its
+  # module's own rules, and an impossible observation is unknown.
+  test "an effect line of an unknown kind makes effects unknown", c do
+    write_effects!(c, [begin_record(1), %{"kind" => "pause", "marker_id" => marker(1)}])
+    assert compat(:observe, [c.inbox])["effects"] == :unknown
+  end
+
+  test "a forged end of an open begin (missing fields) makes effects unknown and is not a clear",
+       c do
+    write_effects!(c, [begin_record(1), %{"kind" => "end", "marker_id" => marker(1)}])
+    obs = compat(:observe, [c.inbox])
+
+    assert obs["effects"] == :unknown
+    assert compat(:compatible?, [obs, compat(:reads, [])]) == :unknown
+  end
+
+  test "an orphan end, a duplicate begin and a duplicate end each make effects unknown", c do
+    for records <- [
+          [end_record(1)],
+          [begin_record(1), begin_record(1)],
+          [begin_record(1), end_record(1), end_record(1)]
+        ] do
+      write_effects!(c, records)
+      assert compat(:observe, [c.inbox])["effects"] == :unknown, inspect(records)
+    end
+  end
+
+  test "a valid begin and end clear the hold; a valid begin alone holds", c do
+    write_effects!(c, [begin_record(1), end_record(1)])
+    assert compat(:observe, [c.inbox])["effects"] == {:ok, [1]}
+    assert compat(:observe, [c.inbox])["effects_hold"] == false
+
+    write_effects!(c, [begin_record(1)])
+    assert compat(:observe, [c.inbox])["effects_hold"] == true
+  end
+
+  test "a broken effect chain makes effects unknown", c do
+    [first, second] = effect_lines([begin_record(1), end_record(1)])
+    File.mkdir_p!(Path.join(c.inbox, "delivery"))
+    File.write!(Path.join([c.inbox, "delivery", "effects.jsonl"]), second <> first)
+    assert compat(:observe, [c.inbox])["effects"] == :unknown
+  end
+
+  test "a receipts line with the right version but missing fields is unknown", c do
+    write_state!(c)
+    path = Path.join([c.inbox, "delivery", "receipts.jsonl"])
+    File.write!(path, ~s({"schema":"ai-pair/delivery-receipt","schema_version":3}\n), [:append])
+    assert compat(:observe, [c.inbox])["receipts"] == :unknown
+  end
+
+  test "a lineage line with a broken chain is unknown", c do
+    write_state!(c)
+    path = Path.join([c.inbox, "delivery", "lineage.jsonl"])
+    [line | _] = path |> File.read!() |> String.split("\n", trim: true)
+    File.write!(path, line <> "\n" <> line <> "\n")
+    assert compat(:observe, [c.inbox])["lineage"] == :unknown
+  end
+
+  test "compatible?/2: a hold with absent, unknown or empty effects is impossible and unknown" do
+    reads = compat(:reads, [])
+
+    for effects <- [:absent, :unknown, {:ok, []}] do
+      obs = observation(%{"effects" => effects, "effects_hold" => true})
+      assert compat(:compatible?, [obs, reads]) == :unknown, inspect(effects)
+    end
+  end
+
+  test "a pane-intent file is judged as a whole envelope: version alone, duplicate keys, a bad record or a foreign root are unknown",
+       c do
+    path = Path.join(c.inbox, "pane-attachments.json")
+    valid = envelope([intent_record("%1", c.inbox)])
+
+    for {label, bytes} <- [
+          {"version only", ~s({"schema_version":"1.0"})},
+          {"duplicate keys",
+           ~s({"schema_version":"2.0","schema_version":"2.0","updated_at":"2026-10-07T00:00:00Z","attachments":{}})},
+          {"a bad record", envelope([Map.delete(intent_record("%1", c.inbox), "pane_pid")])},
+          {"a foreign root", envelope([intent_record("%1", "/elsewhere/inbox")])}
+        ] do
+      File.write!(path, bytes)
+      assert compat(:observe, [c.inbox])["pane_intent"] == :unknown, label
+    end
+
+    File.write!(path, valid)
+    assert compat(:observe, [c.inbox])["pane_intent"] == {:ok, ["2.0"]}
+  end
+
+  # GREEN rows (RB-2a source review r1): structured fail-closed inputs and an OS read denial.
+  test "compatible?/2: a malformed or incomplete declaration is unknown" do
+    reads = compat(:reads, [])
+    obs = observation(%{})
+
+    for bad <- [
+          Map.delete(reads, "payloads"),
+          Map.put(reads, "receipts", 3),
+          Map.put(reads, "effects_hold_aware", "true"),
+          Map.put(reads, "extra", [1]),
+          [],
+          "reads"
+        ] do
+      assert compat(:compatible?, [obs, bad]) == :unknown, inspect(bad)
+    end
+  end
+
+  test "compatible?/2: an observation missing a dimension or the hold is unknown" do
+    reads = compat(:reads, [])
+
+    assert compat(:compatible?, [Map.delete(observation(%{}), "lineage"), reads]) == :unknown
+    assert compat(:compatible?, [Map.delete(observation(%{}), "effects_hold"), reads]) == :unknown
+    assert compat(:compatible?, [observation(%{"receipts" => {:ok, 3}}), reads]) == :unknown
+  end
+
+  test "an OS read-denied receipts file is unknown and keeps its bytes and mode", c do
+    write_state!(c)
+    path = Path.join([c.inbox, "delivery", "receipts.jsonl"])
+    bytes = File.read!(path)
+    File.chmod!(path, 0o000)
+    on_exit(fn -> File.chmod(path, 0o600) end)
+
+    # A privileged runner reads through mode 000; then the denial cannot be exercised here.
+    if match?({:error, :eacces}, File.read(path)) do
+      assert compat(:observe, [c.inbox])["receipts"] == :unknown
+      assert File.stat!(path).mode |> Bitwise.band(0o777) == 0
+    end
+
+    File.chmod!(path, 0o600)
+    assert File.read!(path) == bytes
+  end
+
   # apply/3: AiPair.Compat is GREEN's module, absent at the RED base.
   defp compat(fun, args), do: apply(AiPair.Compat, fun, args)
 
@@ -143,13 +272,78 @@ defmodule AiPair.CompatTest do
     :ok = stop_supervised(ReceiptStore)
 
     {:ok, journal} = EffectJournal.open(SystemFs.new(), c.inbox)
-    {:ok, _marker, journal} = EffectJournal.begin(journal, c.pane, @id, 1, "ai-pair-compat")
+    {:ok, _marker, journal} = EffectJournal.begin(journal, c.pane, @id, 1, "ai_pair_7")
     :ok = EffectJournal.close(journal)
 
     File.write!(
       Path.join(c.inbox, "pane-attachments.json"),
       Record.encode_envelope([], DateTime.utc_now())
     )
+  end
+
+  defp marker(n), do: "mk_" <> String.pad_leading(Integer.to_string(n), 32, "0")
+
+  defp begin_record(n) do
+    %{
+      "kind" => "begin",
+      "marker_id" => marker(n),
+      "pane_id" => "%compat_fx",
+      "msg_id" => "snd_" <> String.duplicate("d", 64),
+      "attempt" => 1,
+      "buffer" => "ai_pair_" <> Integer.to_string(n)
+    }
+  end
+
+  defp end_record(n), do: %{"kind" => "end", "marker_id" => marker(n), "code" => 0, "cleanup" => 0}
+
+  # Correctly chained journal lines, as EffectJournal writes them.
+  defp effect_lines(records) do
+    anchor = "sha256:" <> Base.encode16(:crypto.hash(:sha256, ""), case: :lower)
+
+    {lines, _} =
+      Enum.map_reduce(records, anchor, fn record, prev ->
+        line =
+          record
+          |> Map.merge(%{"schema" => "ai-pair/paste-effect", "v" => 1, "prev_line_sha256" => prev})
+          |> Jason.encode!()
+          |> Kernel.<>("\n")
+
+        {line, "sha256:" <> Base.encode16(:crypto.hash(:sha256, line), case: :lower)}
+      end)
+
+    lines
+  end
+
+  defp write_effects!(c, records) do
+    File.mkdir_p!(Path.join(c.inbox, "delivery"))
+    File.write!(Path.join([c.inbox, "delivery", "effects.jsonl"]), Enum.join(effect_lines(records)))
+  end
+
+  defp envelope(records) do
+    Jason.encode!(%{
+      "schema_version" => "2.0",
+      "updated_at" => "2026-10-07T00:00:00Z",
+      "attachments" => Map.new(records, &{&1["pane_id"], &1})
+    })
+  end
+
+  defp intent_record(pane_id, root) do
+    %{
+      "schema_version" => "2.0",
+      "registration_id" => "reg_" <> String.duplicate("ab", 16),
+      "pane_id" => pane_id,
+      "agent" => "claude_code",
+      "classifier" => "fingerprint:claude_code",
+      "project" => "demo",
+      "project_dir" => "/workspace/demo",
+      "project_inbox" => root,
+      "tmux_session" => "ai-pair/demo",
+      "session_gen" => "2",
+      "cwd" => "/workspace/demo",
+      "command" => "claude",
+      "pane_pid" => 4242,
+      "updated_at" => "2026-09-11T00:00:00Z"
+    }
   end
 
   defp snapshot(root) do

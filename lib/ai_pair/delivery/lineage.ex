@@ -19,6 +19,24 @@ defmodule AiPair.Delivery.Lineage do
 
   def writer, do: @writer
 
+  @doc "The lineage schema version this build writes and reads (AiPair.Compat.reads/0)."
+  @spec schema_version() :: pos_integer()
+  def schema_version, do: 1
+
+  @doc """
+  Pure validation of lineage bytes for AiPair.Compat.observe/1, by this module's own line rules
+  (chain, key set, order): the versions of a fully valid, newline-terminated file, or :error.
+  No I/O; the receipt-log consistency check needs the open log and is the fenced observer's.
+  """
+  @spec observed_versions(binary()) :: {:ok, [pos_integer()]} | :error
+  def observed_versions(bytes) when is_binary(bytes) do
+    case decode(bytes, %__MODULE__{}) do
+      {:ok, %__MODULE__{tail_bytes: 0, records: []}} -> {:ok, []}
+      {:ok, %__MODULE__{tail_bytes: 0}} -> {:ok, [schema_version()]}
+      _ -> :error
+    end
+  end
+
   @doc "Read and validate lineage against an opened receipt log; nothing is written."
   def load(fs, inbox, log) do
     path = Path.join([inbox, "delivery", "lineage.jsonl"])
