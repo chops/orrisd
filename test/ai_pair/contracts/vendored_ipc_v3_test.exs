@@ -16,8 +16,8 @@ defmodule AiPair.Contracts.VendoredIPCV3Test do
   @begin_sentinel "# BEGIN VENDORED orris docs/contracts/ipc-v3.org"
   @end_sentinel "# END VENDORED orris docs/contracts/ipc-v3.org"
 
-  @orris_revision "816f411fd547115fd748a0e8584a8c3a972b5e7a"
-  @orris_sha256 "b90af20d328823d64d2fbe7e39ac185101fbecef25cbaebb562e885b8afeb01c"
+  @orris_revision "f01631a7050f22616aa4bb9bc59e1c0dacce3e27"
+  @orris_sha256 "78134564e93b3c028f8df15078c0536877021ef6d1b0313fae3505e5cd2a1a65"
   @fixture_hash "56cbc3257efa181fa4c9715528c4d02eb15dcadc4c101d373035c8032f65c592"
   @fixture_count 59
 

@@ -2,9 +2,9 @@ defmodule AiPair.IPC.ContractV3FixtureTest do
   @moduledoc """
   IPC version 3 identity core (NS-15.G.002 B1a-2; vendored `docs/contracts/ipc-v3.org`).
 
-  PRODUCED: the 13 /core reply/ fixtures the consumer pairing block claims (orris a7ed7593, after
-  the NS-15.G.003 S3a reciprocal pairing; the release-capable ping is one of them) are each the
-  reply the real dispatch path
+  PRODUCED: the 14 /core reply/ fixtures the consumer pairing block claims (orris f01631a7, after
+  the NS-15.G.003 S3a and NS-32.M.001 RB-1 reciprocal pairings; the release-capable ping, and that
+  ping with a build identity record, are among them) are each the reply the real dispatch path
   (`AiPair.IPC.DeliveryV3.dispatch/2`, or `AiPair.IPC.Delivery.dispatch/2` for the version 2
   refusals) gives for a prepared state, compared after the contract's placeholders are substituted.
   EXERCISED: the 2 /client request/ files are sent unchanged (placeholders substituted) and answer
@@ -35,11 +35,13 @@ defmodule AiPair.IPC.ContractV3FixtureTest do
   @generation "213598703592091008239502170616955211460"
   @census_pid 4242
 
-  # The 13 core replies the consumer's pairing block claims (orris a7ed7593). Since the S3a
-  # reciprocal pairing the paired ping is the release-capable one; ping.ok.identity_core.json
-  # is an example (an identity-core daemon without release) and is not produced here.
+  # The 14 core replies the consumer's pairing block claims (orris f01631a7). Since the S3a
+  # reciprocal pairing the paired ping is the release-capable one; since RB-1, that ping with a
+  # read build identity record is claimed too. ping.ok.identity_core.json is an example (an
+  # identity-core daemon without release) and is not produced here.
   @paired_claims ~w(
-    ping.ok.identity_core_release.json send.sent.json send.queued.json
+    ping.ok.identity_core_release.json ping.ok.identity_core_release_build.json
+    send.sent.json send.queued.json
     status.ok.json status.quarantined.json status.error.pane_not_found.json
     reconcile.queued.json reconcile.delivered.json
     status.error.pane_identity_unavailable.json send.error.pane_identity_unavailable.json
@@ -68,15 +70,17 @@ defmodule AiPair.IPC.ContractV3FixtureTest do
      census: census}
   end
 
-  test "the paired-claim inventory is exactly the 13 core replies the consumer pairing block names" do
-    assert length(@paired_claims) == 13
+  test "the paired-claim inventory is exactly the 14 core replies the consumer pairing block names" do
+    assert length(@paired_claims) == 14
     assert Enum.all?(@paired_claims, &File.regular?(Path.join(@root, &1)))
   end
 
-  # the 11 paired core replies the identity core produces through DeliveryV3 (the two version 2
-  # refusals are produced by the rows below)
+  # the 12 paired core replies the identity core produces through DeliveryV3 (the two version 2
+  # refusals are produced by the rows below); the build ping is produced with the fixture's
+  # record as the server's read build identity (context_for/2)
   for name <- ~w(
-        ping.ok.identity_core_release.json send.sent.json send.queued.json
+        ping.ok.identity_core_release.json ping.ok.identity_core_release_build.json
+        send.sent.json send.queued.json
         status.ok.json status.quarantined.json status.error.pane_not_found.json
         reconcile.queued.json reconcile.delivered.json
         status.error.pane_identity_unavailable.json send.error.pane_identity_unavailable.json
@@ -85,7 +89,7 @@ defmodule AiPair.IPC.ContractV3FixtureTest do
     test "the identity core produces #{name}", c do
       name = unquote(name)
       request = prepare(name, c)
-      assert normalized(v3_dispatch(request, context(c)), c) == fixture(name)
+      assert normalized(v3_dispatch(request, context_for(name, c)), c) == fixture(name)
     end
   end
 
@@ -222,7 +226,7 @@ defmodule AiPair.IPC.ContractV3FixtureTest do
 
   # --- preparation ---------------------------------------------------------------------------
 
-  defp prepare("ping.ok.identity_core_release.json", _c),
+  defp prepare("ping.ok.identity_core_release" <> _, _c),
     do: %{"cmd" => "ping", "protocol_version" => 3}
 
   defp prepare("status." <> rest, c) do
@@ -304,6 +308,12 @@ defmodule AiPair.IPC.ContractV3FixtureTest do
     commit(c, @reg)
     %{context(c) | durable: false}
   end
+
+  # The build ping is the reply of a server that read this record at start (AiPair.BuildIdentity).
+  defp context_for("ping.ok.identity_core_release_build.json" = name, c),
+    do: Map.put(context(c), :build_identity, fixture(name)["build_identity"])
+
+  defp context_for(_name, c), do: context(c)
 
   defp context(c) do
     %{

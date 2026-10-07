@@ -10,8 +10,9 @@ defmodule AiPair.IPC.BuildIdentityV3Test do
   40-hex source revision". The ping reports a read record as `build_identity`, with the token. It
   reports nothing, and no token, when no record was read.
 
-  The two example pings (clean and dirty) are produced here through the real dispatch path. They
-  are not claimed until the reciprocal pairing.
+  Both build pings (clean and dirty) are produced here through the real dispatch path. Since the
+  RB-1 reciprocal pairing (orris f01631a7) the clean one is also a claimed core reply, produced in
+  contract_v3_fixture_test.exs; the dirty one stays an example.
   """
 
   use ExUnit.Case, async: false
