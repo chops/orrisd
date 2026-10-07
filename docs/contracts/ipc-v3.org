@@ -14,11 +14,11 @@ and is vendored verbatim below, as version 2 is (=ipc-v2.org=).
 :END:
 - source_repository: =orris=
 - source_path: =docs/contracts/ipc-v3.org=
-- source_revision: =a7ed7593a27d1f1ff9acc70424d06380bb2a1e63=
-- source_sha256: =3b39ef76595ae0a6d5017bd373ec813a6e65d00d1d26fabb34b146375ab68940=
+- source_revision: =816f411fd547115fd748a0e8584a8c3a972b5e7a=
+- source_sha256: =b90af20d328823d64d2fbe7e39ac185101fbecef25cbaebb562e885b8afeb01c=
 - paired_fixture_dir: =test/fixtures/contracts/ipc/v3/=
-- paired_fixture_contract_hash: =b6367efecc75bc1a5f414c4196647a06e274ef5262df1771633b83e452ad81d3=
-- paired_fixture_count: 57
+- paired_fixture_contract_hash: =56cbc3257efa181fa4c9715528c4d02eb15dcadc4c101d373035c8032f65c592=
+- paired_fixture_count: 59
 
 =source_sha256= is the digest of the vendored bytes exactly as delimited by the
 two sentinel comment lines below. It is pinned again in
@@ -33,7 +33,7 @@ The identity core (=AiPair.IPC.DeliveryV3=) and the =release= command
 states since its reciprocal pairing (orris a7ed7593). This section is the producer's
 own status.
 
-Of the 57 fixtures, all 13 /core reply/ files the consumer's pairing block claims,
+Of the 59 fixtures, all 13 /core reply/ files the consumer's pairing block claims,
 including the release-capable =ping.ok.identity_core_release.json=, are produced by
 the real dispatch path in =test/ai_pair/ipc/contract_v3_fixture_test.exs=, and the 2
 /client request/ files are exercised there unchanged against the version 2 dispatch.
@@ -41,7 +41,10 @@ the real dispatch path in =test/ai_pair/ipc/contract_v3_fixture_test.exs=, and t
 =release=) and is not produced. No release-command request or reply file
 (=v3_request.release.json=, =v2_request.release.json=, =release.released.json=,
 =release.error.*.json=, =v2_reply.release.unsupported_command.json=) is exercised or
-compared by that test, and none is claimed. A pane identity is reported only when
+compared by that test, and none is claimed. The two build-identity pings
+(=ping.ok.identity_core_release_build.json=, =ping.ok.identity_core_release_build_dirty.json=,
+NS-32.M.001 RB-1K) are examples; this producer does not emit the =build_identity=
+token or object yet. A pane identity is reported only when
 the pane's live child holds the registration id of its committed intent record,
 in durable mode; every pane-bound command runs inside that pane's Coordinator
 fence, the send identity check precedes any effect, and status measures the
@@ -163,6 +166,27 @@ here are unchanged by the pairing.
   2 meaning. A client MUST NOT send a command whose token is absent and fails closed
   instead (~ping.missing_tokens.json~). Unknown well-formed extra tokens are
   admissible.
+- ~build_identity~ is an informational token: it names no command. A daemon
+  advertises it in its version 3 ~ping~ only when it read a valid identity record of
+  its own build, and then the ~ping~ also carries a ~build_identity~ object; without
+  a valid record both the token and the object are omitted (there is no typed
+  "unavailable" value). The object has exactly these keys:
+  - ~name~ and ~version~: strings;
+  - ~source_revision~: 40 lowercase hex, or ~null~ when the build was not made from a
+    clean revision;
+  - ~clean~: boolean;
+  - ~source_nar_hash~: a string beginning ~sha256-~;
+  - ~build_id~: 64 lowercase hex, the sha256 of the build's canonical INPUT identity
+    (name, version, source NAR hash, lock-file hash, pinned dependency hash, target
+    system, release name, IPC protocols, in that order), never a digest of the built
+    artifact; a client compares it byte for byte and does not interpret it;
+  - ~ipc_protocols~: a list of integers;
+  - ~rollback_eligible~: true exactly when ~clean~ is true and ~source_revision~ is 40
+    lowercase hex.
+  A client MUST NOT treat a missing ~build_identity~ as an identity. The example
+  values in ~ping.ok.identity_core_release_build.json~ (eligible) and
+  ~ping.ok.identity_core_release_build_dirty.json~ (not eligible) are synthetic; a real
+  daemon reports its own build. Version 1 and 2 ~ping~ are unchanged.
 - A version 2 request naming a command that exists only in version 3 (~subscribe~,
   ~cancel~, ~status~ or ~release~) is refused by the daemon with ~unsupported_command~ in a
   version 2 reply that echoes ~cmd~ and any ~msg_id~ / ~pane_id~ the request carried.
@@ -439,7 +463,7 @@ until they are, no implementation may claim conformance.
 | Fixture                                          | Class          | Shows                                                                     |
 |--------------------------------------------------+----------------+---------------------------------------------------------------------------|
 | ~ping.ok.identity_core.json~                     | example        | version 3 ping of an identity-core daemon without ~release~               |
-| ~ping.ok.json~                                   | example        | version 3 ping with all tokens                                            |
+| ~ping.ok.json~                                   | example        | version 3 ping with all command tokens                                    |
 | ~ping.missing_tokens.json~                       | example        | a daemon without the version 3 tokens; the client fails closed            |
 | ~send.sent.json~, ~send.queued.json~             | core reply     | version 2 send replies plus ~pane_identity~                               |
 | ~send.error.pane_identity_unavailable.json~      | core reply     | send refused: no complete pane identity                                   |
@@ -458,6 +482,8 @@ until they are, no implementation may claim conformance.
 | ~v2_reply.subscribe.unsupported_command.json~    | core reply     | its typed version 2 refusal                                               |
 | ~v2_reply.cancel.unsupported_command.json~       | core reply     | its typed version 2 refusal                                               |
 | ~ping.ok.identity_core_release.json~             | core reply     | the paired producer's ping: identity core plus ~release~                  |
+| ~ping.ok.identity_core_release_build.json~       | example        | that ping plus ~build_identity~ of a clean, rollback-eligible build       |
+| ~ping.ok.identity_core_release_build_dirty.json~ | example        | that ping plus ~build_identity~ of a dirty build, not rollback-eligible   |
 | ~v3_request.release.json~                        | example        | version 3 request for ~release~                                           |
 | ~release.released.json~                          | example        | release succeeded: ~pane_identity~ and counts of matched and held sends   |
 | ~release.error.*.json~                           | example        | the six release refusals                                                  |
