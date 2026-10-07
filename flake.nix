@@ -21,6 +21,13 @@
 
       version = "0.1.0";
 
+      # One binding for the mix dependency hash: fetchMixDeps and (RB-1 C3) the build identity
+      # read the same string, so they cannot drift.
+      mixDepsHash = "sha256-LdIpt1YHFQjnacyASDNhnA6wjC4K7LddJVYN2tu+Zxk=";
+
+      # The Elixir the RB-1 C3 check helpers run under (the CLI package's pin).
+      elixirFor = pkgs: pkgs.beam.packages.erlang_29.elixir_1_20;
+
       mkAiPair = pkgs:
         let
           beamPackages = pkgs.beam.packages.erlang_29.overrideScope (final: prev: {
@@ -50,7 +57,7 @@
           mixFodDeps = beamPackages.fetchMixDeps {
             pname = "mix-deps-ai-pair";
             inherit version src;
-            hash = "sha256-LdIpt1YHFQjnacyASDNhnA6wjC4K7LddJVYN2tu+Zxk=";
+            hash = mixDepsHash;
           };
 
           # Service modules resolve the bridge through the daemon package.
@@ -143,6 +150,71 @@
           hm-ap-self-package = import ./nix/hm-ap-self-package-check.nix {
             inherit self nixpkgs system;
           };
+
+          # NS-32.M.001 RB-1 C3: the stamped build identity (nix/checks/rb1_build_identity_check.exs).
+          # N1: the package's record equals an independent recompute from this flake's inputs, and
+          # the manifest's identity object equals it.
+          rb1-n1-stamped-identity = pkgs.runCommand "rb1-n1-stamped-identity" {
+            nativeBuildInputs = [ elixirFor pkgs ];
+          } ''
+            export HOME=$TMPDIR
+            elixir ${./nix/checks/rb1_build_identity_check.exs} n1 \
+              ${self.packages.${system}.default} '${version}' '${self.rev or ""}' '${self.narHash}' \
+              '${builtins.hashFile "sha256" ./flake.lock}' '${mixDepsHash}' '${system}'
+            touch "$out"
+          '';
+
+          # N2: two distinct release derivations (an inert RB1_BUILD_INSTANCE makes both really
+          # build; same store, no isolated-store claim) stamp byte-identical identity and manifest.
+          rb1-n2-two-builds =
+            let
+              instance = tag: (mkAiPair pkgs).overrideAttrs (_: { RB1_BUILD_INSTANCE = tag; });
+              a = instance "a";
+              b = instance "b";
+            in
+            pkgs.runCommand "rb1-n2-two-builds" {
+              nativeBuildInputs = [ pkgs.diffutils ];
+            } ''
+              echo "N2 a=${a} b=${b}"
+              cmp ${a}/share/ai-pair/build-identity.json ${b}/share/ai-pair/build-identity.json
+              cmp ${a}/share/ai-pair/manifest.json ${b}/share/ai-pair/manifest.json
+              touch "$out"
+            '';
+
+          # N3: the identity function's dirty shape (synthetic: CI checks out a clean tree).
+          # An absent function is a BUILD-time failure: it is tested before any call, so
+          # evaluation (`nix flake check --no-build`) stays valid.
+          rb1-n3-dirty-shape =
+            let
+              f = self.lib.buildIdentity or null;
+              shapeOk =
+                let
+                  dirty = f { rev = null; narHash = self.narHash; inherit system; };
+                  clean = f { rev = "0123456789abcdef0123456789abcdef01234567"; narHash = self.narHash; inherit system; };
+                in
+                dirty.source_revision == null
+                && dirty.clean == false
+                && dirty.rollback_eligible == false
+                && clean.rollback_eligible == true
+                && dirty.build_id == clean.build_id;
+              script =
+                if f == null then ''echo "N3: lib.buildIdentity is absent" >&2; exit 1''
+                else if shapeOk then ''touch "$out"''
+                else ''echo "N3: the dirty shape is wrong" >&2; exit 1'';
+            in
+            pkgs.runCommand "rb1-n3-dirty-shape" { } script;
+
+          # N4: the built release, evaluated without activation, resolves :code.root_dir() to the
+          # package and its default reader returns the stamped record there.
+          rb1-n4-release-root = pkgs.runCommand "rb1-n4-release-root" {
+            nativeBuildInputs = [ elixirFor pkgs ];
+          } ''
+            export HOME=$TMPDIR
+            pkg=${self.packages.${system}.default}
+            "$pkg/bin/ai_pair" eval 'Code.eval_file("${./nix/checks/rb1_n4_eval.exs}")' > "$TMPDIR/n4.out"
+            elixir ${./nix/checks/rb1_build_identity_check.exs} n4 "$pkg" "$TMPDIR/n4.out"
+            touch "$out"
+          '';
         });
 
       devShells = forEachSystem (system:
