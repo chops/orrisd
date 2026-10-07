@@ -986,7 +986,8 @@ defmodule AiPair.IPC.Server do
       durable: durable_enabled?() and is_binary(context.boot_generation),
       committed: &committed_record/1,
       current_pid: &current_pane_pid/1,
-      pane_opts: &released_pane_opts/1
+      pane_opts: &released_pane_opts/1,
+      build_identity: context.build_identity
     }
   end
 
@@ -1217,9 +1218,12 @@ defmodule AiPair.IPC.Server do
       raise ArgumentError, "boot_generation must be a nonempty ASCII decimal string"
     end
 
+    # NS-32.M.001 RB-1: the build identity is read ONCE here, at start, so a file changed later
+    # cannot change what ping reports; a refused record is logged by `load/1` and omitted.
     %{
       receipt_store: Keyword.fetch!(opts, :receipt_store),
-      boot_generation: generation
+      boot_generation: generation,
+      build_identity: AiPair.BuildIdentity.load(AiPair.BuildIdentity.release_root())
     }
   end
 

@@ -43,8 +43,11 @@ the real dispatch path in =test/ai_pair/ipc/contract_v3_fixture_test.exs=, and t
 =release.error.*.json=, =v2_reply.release.unsupported_command.json=) is exercised or
 compared by that test, and none is claimed. The two build-identity pings
 (=ping.ok.identity_core_release_build.json=, =ping.ok.identity_core_release_build_dirty.json=,
-NS-32.M.001 RB-1K) are examples; this producer does not emit the =build_identity=
-token or object yet. A pane identity is reported only when
+NS-32.M.001 RB-1K) are examples, not claimed. This producer reports the
+=build_identity= token and object when its IPC server read a valid
+=share/ai-pair/build-identity.json= at start (=AiPair.BuildIdentity=), and both
+examples are produced by the real dispatch path in
+=test/ai_pair/ipc/build_identity_v3_test.exs=. A pane identity is reported only when
 the pane's live child holds the registration id of its committed intent record,
 in durable mode; every pane-bound command runs inside that pane's Coordinator
 fence, the send identity check precedes any effect, and status measures the

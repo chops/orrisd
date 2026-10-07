@@ -38,10 +38,11 @@ defmodule AiPair.IPC.DeliveryV3 do
 
   @typedoc """
   What the server supplies: the receipt store, whether this daemon is durable (durable mode with a
-  boot generation), the committed intent record of a pane, and the current pid of a pane from one
-  census.
+  boot generation), the committed intent record of a pane, the current pid of a pane from one
+  census, and optionally the build identity record read at server start (`AiPair.BuildIdentity`).
   """
   @type context :: %{
+          optional(:build_identity) => map() | nil,
           receipt_store: GenServer.server() | nil,
           durable: boolean(),
           committed: (String.t() -> {:ok, map()} | :none | :error),
@@ -71,16 +72,36 @@ defmodule AiPair.IPC.DeliveryV3 do
         %{ok: false, error: "receipt_store_unavailable"}
 
       context.durable ->
-        %{
-          ok: true,
-          pong: AiPair.version(),
-          capabilities: ["delivery_reconcile", "pane_identity", "release", "sessions_read"]
-        }
+        with_build_identity(
+          %{
+            ok: true,
+            pong: AiPair.version(),
+            capabilities: ["delivery_reconcile", "pane_identity", "release", "sessions_read"]
+          },
+          context
+        )
 
       true ->
-        %{ok: true, pong: AiPair.version(), capabilities: ["delivery_reconcile", "sessions_read"]}
+        with_build_identity(
+          %{
+            ok: true,
+            pong: AiPair.version(),
+            capabilities: ["delivery_reconcile", "sessions_read"]
+          },
+          context
+        )
     end
   end
+
+  # NS-32.M.001 RB-1: a record read at server start is reported with its token; without one,
+  # neither the token nor the object is sent (vendored ipc-v3.org, "build_identity").
+  defp with_build_identity(reply, %{build_identity: identity}) when is_map(identity) do
+    reply
+    |> Map.put(:build_identity, identity)
+    |> Map.update!(:capabilities, &Enum.sort(["build_identity" | &1]))
+  end
+
+  defp with_build_identity(reply, _context), do: reply
 
   # NS-15.G.003 S3a: release a boot-restored quarantined pane (vendored ipc-v3.org "Release").
   # Legacy mode, a missing or invalid pane id, and an unprovable identity refuse before any
