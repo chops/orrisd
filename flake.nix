@@ -257,7 +257,29 @@
             elixir ${./nix/checks/rb1_build_identity_check.exs} n4 "$pkg" "$TMPDIR/n4.out"
             touch "$out"
           '';
-        });
+        } // (
+          # NS-32.M.002 RB-2b: the manifest's "reads" stamp (nix/checks/rb2b_reads_check.exs). Each
+          # evaluates the built release without activation (nix/checks/rb2b_eval.exs), then:
+          # N1, the stamp equals the release's own AiPair.Compat.reads/0 as canonical JSON;
+          # N2, the stamp is exactly a declaration and a fresh inbox is :supported against it;
+          # N3, negative control: a drifted synthetic stamp is refused by N1's comparison, by name.
+          let
+            rb2b = n: name: pkgs.runCommand name {
+              nativeBuildInputs = [ (elixirFor pkgs) ];
+            } ''
+              export HOME=$TMPDIR
+              pkg=${self.packages.${system}.default}
+              "$pkg/bin/ai_pair" eval 'Code.eval_file("${./nix/checks/rb2b_eval.exs}")' > "$TMPDIR/rb2b.out"
+              elixir ${./nix/checks/rb2b_reads_check.exs} ${n} "$pkg" "$TMPDIR/rb2b.out"
+              touch "$out"
+            '';
+          in
+          {
+            rb2b-n1-reads-stamp = rb2b "n1" "rb2b-n1-reads-stamp";
+            rb2b-n2-declaration-shape = rb2b "n2" "rb2b-n2-declaration-shape";
+            rb2b-n3-drift-refused = rb2b "n3" "rb2b-n3-drift-refused";
+          }
+        ));
 
       devShells = forEachSystem (system:
         let
