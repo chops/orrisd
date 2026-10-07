@@ -590,19 +590,10 @@ defmodule AiPair.PaneRestore.S3aReleaseRedTest do
   # shared by every test file, with the default intensity (more than 3 restarts within 5 s,
   # counted in whole seconds, exits it :shutdown). Kills in other files (quarantine_test's
   # transient-restart rows) can fall in the same window (local runs r6 and r8 run 3), so a
-  # deliberate kill first waits until the window holds fewer than max_restarts restarts.
-  defp await_restart_budget do
-    eventually(
-      fn ->
-        %{restarts: restarts, max_restarts: max, max_seconds: period} =
-          :sys.get_state(PaneSupervisor)
-
-        now = :erlang.monotonic_time(1)
-        Enum.count(restarts, &(now <= &1 + period)) < max
-      end,
-      8_000
-    )
-  end
+  # deliberate kill first waits until the window holds fewer than max_restarts restarts
+  # (the shared AiPair.Test.PaneSupervisorBudget, which raises rather than kill into an exhausted
+  # budget).
+  defp await_restart_budget, do: AiPair.Test.PaneSupervisorBudget.await!()
 
   defp fail_first_issue do
     {:ok, flag} = Agent.start(fn -> :first end)

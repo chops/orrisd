@@ -1013,6 +1013,24 @@ defmodule AiPair.PaneIntentStoreTest do
   # ============================================================ S1-F1-11
 
   describe "S1-F1-11 owned fixtures are reclaimed" do
+    # The teardown tolerance is exactly "already gone": noproc, normal and shutdown stop quietly;
+    # any other exit reason still fails the teardown.
+    test "teardown tolerates only an already-gone fixture" do
+      stop = {GenServer, :stop, [self(), :normal, :infinity]}
+
+      for reason <- [
+            {:noproc, stop},
+            {:normal, stop},
+            {:shutdown, stop},
+            {{:shutdown, {:sys, :terminate, [self(), :normal, :infinity]}}, stop}
+          ] do
+        assert stop_if_running(fn -> exit(reason) end) == :ok, inspect(reason)
+      end
+
+      assert catch_exit(stop_if_running(fn -> exit({:boom, stop}) end)) == {:boom, stop}
+      assert catch_exit(stop_if_running(fn -> exit({:timeout, stop}) end)) == {:timeout, stop}
+    end
+
     test "a tracer whose owner raises is torn down, observed from a surviving observer" do
       {owner, agent} = spawn_barriered_owner!()
 
@@ -3450,11 +3468,17 @@ defmodule AiPair.PaneIntentStoreTest do
   # exact bytes, so the tolerance belongs here rather than in the double. It is
   # deliberately narrow - only "the agent is already gone" is swallowed, so a
   # genuine teardown hang or crash still fails loudly.
+  #
+  # A process already exiting with :shutdown is also "already gone": GenServer.stop then exits
+  # {{:shutdown, {:sys, :terminate, _}}, {GenServer, :stop, _}} (hosted Orrisd 37587819648
+  # attempt 1, S1-F1-11 teardown). Only that reason is added; :boom and a timeout still raise.
   defp stop_if_running(fun) do
     fun.()
   catch
     :exit, {:noproc, _} -> :ok
     :exit, {:normal, _} -> :ok
+    :exit, {:shutdown, _} -> :ok
+    :exit, {{:shutdown, _}, _} -> :ok
   end
 
   # Race-free teardown for an owned process fixture, and the general form of the

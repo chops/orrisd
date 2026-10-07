@@ -660,7 +660,6 @@ defmodule AiPair.PaneRestore.QuarantineTest do
              end),
              "no replacement child distinct from the killed pid registered for #{pane_id}"
 
-      record_restart_spent!()
       {:ok, restarted} = AiPair.PaneSupervisor.whereis_pane(pane_id)
       assert restarted != first
       assert StateMachine.status(restarted).quarantined == true
@@ -702,7 +701,6 @@ defmodule AiPair.PaneRestore.QuarantineTest do
              end),
              "no replacement child distinct from the killed pid registered for #{pane_id}"
 
-      record_restart_spent!()
       {:ok, restarted} = AiPair.PaneSupervisor.whereis_pane(pane_id)
       assert restarted != first
       refute Map.get(StateMachine.status(restarted), :quarantined, false)
@@ -742,112 +740,13 @@ defmodule AiPair.PaneRestore.QuarantineTest do
 
   # ===== RESTART BUDGET (test-only pacing of the supervised-restart rows) =====
   #
-  # WHY. Both rows in "the owned supervisor's transient restart" kill a child
-  # of the REAL, VM-global AiPair.PaneSupervisor, and every kill spends one
-  # restart of that supervisor's intensity budget. AiPair.PaneSupervisor.init/1
-  # (lib/ai_pair/pane_supervisor.ex:27-28) sets neither :max_restarts nor
-  # :max_seconds, so the pinned Elixir 1.20.4 defaults apply
-  # (dynamic_supervisor.ex:577-578: 3 restarts per 5 seconds). The window is
-  # kept in WHOLE SECONDS: add_restart/1 stamps :erlang.monotonic_time(1),
-  # keeps each earlier stamp while `now <= then + period`, and shuts the
-  # supervisor down once more than max_restarts stamps survive
-  # (dynamic_supervisor.ex:1038-1053). When these rows repeat in ONE VM
-  # (--repeat-until-failure), the 4th kill inside the window exceeds the
-  # intensity, the supervisor exits, AiPair.Supervisor restarts it EMPTY, and
-  # no replacement pane ever registers for the row's barrier to find.
-  #
-  # WHAT. Before each kill, wait until the kills already made through this
-  # helper leave a free restart slot; after the row observes the distinct live
-  # replacement, record the restart. The
-  # budget is read from AiPair.PaneSupervisor.init([]) -- the public callback,
-  # called with the same [] argument as the application child spec
-  # {AiPair.PaneSupervisor, []} -- so the pacing follows the product policy if
-  # that policy ever changes, the product configuration is not altered, and no
-  # private supervisor state is read.
-  #
-  # CONSERVATIVE BY CONSTRUCTION. The supervisor stamps its restart
-  # (add_restart/1, :erlang.monotonic_time(1)) when it handles the child's EXIT
-  # and BEFORE it starts the replacement child. This helper records its stamp
-  # only AFTER the row has observed a distinct, live replacement registered, so
-  # its stamp is taken on the same clock no earlier than the supervisor's. Each
-  # recorded stamp therefore stays live here at least as long as the
-  # supervisor's does; @restart_stamp_margin_s adds one more whole second of
-  # slack. Hence every stamp still live in the supervisor at its next
-  # add_restart is also counted live here, and waiting until fewer than
-  # max_restarts stamps are live here guarantees the next restart is within
-  # intensity.
-  #
-  # REPEAT-IN-ONE-VM. Stamps are VM-global (:persistent_term), so they survive
-  # from one repetition to the next exactly as the supervisor's own list does;
-  # a fresh VM starts with neither. Stamps are pruned on every write, so the
-  # stored list never exceeds max_restarts entries.
-  #
-  # SCOPE (explicit full-suite limitation). Only restarts caused by this
-  # module's two rows are counted. A restart of a PaneSupervisor child caused
-  # by another test module in the same VM is invisible here, so this helper
-  # makes these rows sound under repetition of this module alone; it does not
-  # claim soundness for an arbitrary interleaving of the whole suite.
-  #
-  # COST. A single run waits 0 ms (two kills, budget three). A blocked kill
-  # waits at most (max_seconds + @restart_stamp_margin_s + 1) whole seconds
-  # after the oldest live stamp, plus one poll interval: 7 s at the defaults.
-  @restart_budget_key {__MODULE__, :pane_supervisor_restart_stamps}
-  @restart_stamp_margin_s 1
-  @restart_budget_poll_ms 50
-
-  defp pane_supervisor_budget! do
-    {:ok, %{intensity: max_restarts, period: max_seconds}} = AiPair.PaneSupervisor.init([])
-
-    if max_restarts < 1 do
-      raise "AiPair.PaneSupervisor allows #{max_restarts} restarts; no restart row can pass"
-    end
-
-    {max_restarts, max_seconds}
-  end
-
-  # Mirrors add_restart/3's filter (`now <= then + period`), widened by the
-  # margin above.
-  defp live_restart_stamps(max_seconds) do
-    now = :erlang.monotonic_time(1)
-
-    for then <- :persistent_term.get(@restart_budget_key, []),
-        now <= then + max_seconds + @restart_stamp_margin_s,
-        do: then
-  end
-
-  defp await_restart_budget! do
-    {max_restarts, max_seconds} = pane_supervisor_budget!()
-
-    # Bounded: the live set only shrinks while this waits (the rows run
-    # serially, async: false), so the slot must open within the longest
-    # possible stamp lifetime. Exceeding this is a defect in the helper, and it
-    # fails loudly rather than killing into an exhausted budget.
-    give_up_at =
-      System.monotonic_time(:millisecond) + (max_seconds + @restart_stamp_margin_s + 2) * 1_000
-
-    do_await_restart_budget!(max_restarts, max_seconds, give_up_at)
-  end
-
-  defp do_await_restart_budget!(max_restarts, max_seconds, give_up_at) do
-    cond do
-      length(live_restart_stamps(max_seconds)) < max_restarts ->
-        :ok
-
-      System.monotonic_time(:millisecond) > give_up_at ->
-        raise "no AiPair.PaneSupervisor restart slot opened; the restart budget helper is unsound"
-
-      true ->
-        Process.sleep(@restart_budget_poll_ms)
-        do_await_restart_budget!(max_restarts, max_seconds, give_up_at)
-    end
-  end
-
-  defp record_restart_spent! do
-    {_max_restarts, max_seconds} = pane_supervisor_budget!()
-    stamps = [:erlang.monotonic_time(1) | live_restart_stamps(max_seconds)]
-    :persistent_term.put(@restart_budget_key, stamps)
-    :ok
-  end
+  # Both rows in "the owned supervisor's transient restart" kill a child of the REAL,
+  # VM-global AiPair.PaneSupervisor, spending one restart of its intensity. The pacing is
+  # AiPair.Test.PaneSupervisorBudget (test/support), which reads the supervisor's OWN restart
+  # list, so kills made by other modules in the same VM (s3a_release_red_test R6/R8) are counted
+  # too. The former per-module :persistent_term stamps could not see them; the hosted run of
+  # 2026-10-07 (Orrisd 37587819648 attempt 2) failed this row exactly that way.
+  defp await_restart_budget!, do: AiPair.Test.PaneSupervisorBudget.await!()
 
   defp eventually(fun, deadline_ms \\ 1_000) do
     stop_at = System.monotonic_time(:millisecond) + deadline_ms
