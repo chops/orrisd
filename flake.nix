@@ -155,7 +155,7 @@
           # N1: the package's record equals an independent recompute from this flake's inputs, and
           # the manifest's identity object equals it.
           rb1-n1-stamped-identity = pkgs.runCommand "rb1-n1-stamped-identity" {
-            nativeBuildInputs = [ elixirFor pkgs ];
+            nativeBuildInputs = [ (elixirFor pkgs) ];
           } ''
             export HOME=$TMPDIR
             elixir ${./nix/checks/rb1_build_identity_check.exs} n1 \
@@ -207,7 +207,7 @@
           # N4: the built release, evaluated without activation, resolves :code.root_dir() to the
           # package and its default reader returns the stamped record there.
           rb1-n4-release-root = pkgs.runCommand "rb1-n4-release-root" {
-            nativeBuildInputs = [ elixirFor pkgs ];
+            nativeBuildInputs = [ (elixirFor pkgs) ];
           } ''
             export HOME=$TMPDIR
             pkg=${self.packages.${system}.default}
