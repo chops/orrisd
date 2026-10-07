@@ -985,8 +985,31 @@ defmodule AiPair.IPC.Server do
       receipt_store: context.receipt_store,
       durable: durable_enabled?() and is_binary(context.boot_generation),
       committed: &committed_record/1,
-      current_pid: &current_pane_pid/1
+      current_pid: &current_pane_pid/1,
+      pane_opts: &released_pane_opts/1
     }
+  end
+
+  # NS-15.G.003 S3a: the options a released pane child starts with: the configured tmux
+  # adapter for capture and ordinary pastes (as boot reconciliation binds them), and the
+  # same adapter as the tmux_server its restored drain uses for gated transactions.
+  defp released_pane_opts(_pane) do
+    tmux = Application.get_env(:ai_pair, :tmux_server, AiPair.Tmux)
+
+    {:ok,
+     [
+       capture_fn: fn pane -> AiPair.Tmux.capture_pane(pane, [], tmux) end,
+       paste_fn: fn pane, text ->
+         buffer = "ai_pair_#{System.unique_integer([:positive])}"
+
+         with :ok <- AiPair.Tmux.set_buffer(buffer, text, tmux),
+              :ok <- AiPair.Tmux.paste_buffer(pane, buffer, [delete: true], tmux),
+              :ok <- AiPair.Tmux.send_keys(pane, ["Enter"], tmux) do
+           :ok
+         end
+       end,
+       tmux_server: tmux
+     ]}
   end
 
   defp committed_record(pane) do

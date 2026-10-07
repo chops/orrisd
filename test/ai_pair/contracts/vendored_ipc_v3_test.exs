@@ -16,10 +16,10 @@ defmodule AiPair.Contracts.VendoredIPCV3Test do
   @begin_sentinel "# BEGIN VENDORED orris docs/contracts/ipc-v3.org"
   @end_sentinel "# END VENDORED orris docs/contracts/ipc-v3.org"
 
-  @orris_revision "6bb62f3e47c48ebcb29cb5c8f8d590cc18fd2ba0"
-  @orris_sha256 "9362517dda20c4f50600ba49db9dc5b837113e254dcff21904c312b29b590669"
-  @fixture_hash "9f84d375bf6084ad8d703fe46de6605114167a3eed515dfaf22e9beac09a76fd"
-  @fixture_count 46
+  @orris_revision "2d3d1b9a6d301b116be70968f9dfb781e274f121"
+  @orris_sha256 "56a00c3a3e087188db4882a00d90f2b2b5738687769822ad281dd4801114aa18"
+  @fixture_hash "b6367efecc75bc1a5f414c4196647a06e274ef5262df1771633b83e452ad81d3"
+  @fixture_count 57
 
   test "the vendored region is exactly the pinned consumer bytes, pinned twice" do
     assert digest(vendored_region()) == @orris_sha256

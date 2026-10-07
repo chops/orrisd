@@ -142,6 +142,10 @@ defmodule AiPair.Test.FaultFs do
   def unlink(agent, path), do: perform(agent, :unlink, [path], fn -> SystemFs.unlink(nil, path) end)
 
   @impl true
+  def rename(agent, existing, new),
+    do: perform(agent, :rename, [existing, new], fn -> SystemFs.rename(nil, existing, new) end)
+
+  @impl true
   def list(agent, dir), do: perform(agent, :list, [dir], fn -> SystemFs.list(nil, dir) end)
 
   defp perform(agent, op, args, run, special \\ fn _ -> :no_special_case end) do

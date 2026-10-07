@@ -7,7 +7,7 @@ defmodule AiPair.IPC.Delivery do
 
   @max_text_bytes 524_288
   @default_wait_ms 250
-  @v3_only ["cancel", "subscribe", "status"]
+  @v3_only ["cancel", "subscribe", "status", "release"]
 
   def available?(nil), do: false
 

@@ -77,6 +77,9 @@ defmodule AiPair.Delivery.Fs do
   @doc "Remove a directory entry; a symlink entry is removed, never followed."
   @callback unlink(term(), Path.t()) :: :ok | {:error, posix()}
 
+  @doc "Atomically replace `new` with `existing` (rename(2)); both in the same directory."
+  @callback rename(term(), Path.t(), Path.t()) :: :ok | {:error, posix()}
+
   @doc "The entry names of a directory."
   @callback list(term(), Path.t()) :: {:ok, [String.t()]} | {:error, posix()}
 
@@ -127,6 +130,9 @@ defmodule AiPair.Delivery.Fs do
 
   @spec link(t(), Path.t(), Path.t()) :: :ok | {:error, posix()}
   def link({mod, state}, existing, new), do: mod.link(state, existing, new)
+
+  @spec rename(t(), Path.t(), Path.t()) :: :ok | {:error, posix()}
+  def rename({mod, state}, existing, new), do: mod.rename(state, existing, new)
 
   @spec unlink(t(), Path.t()) :: :ok | {:error, posix()}
   def unlink({mod, state}, path), do: mod.unlink(state, path)

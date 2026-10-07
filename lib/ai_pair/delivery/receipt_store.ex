@@ -16,7 +16,7 @@ defmodule AiPair.Delivery.ReceiptStore do
 
   use GenServer
   require Logger
-  alias AiPair.Delivery.{Lineage, Payload, PayloadStore, ReceiptLog, SystemFs}
+  alias AiPair.Delivery.{EffectJournal, Lineage, Payload, PayloadStore, ReceiptLog, SystemFs}
   alias AiPair.PaneRestore.Coordinator
 
   # `cancelled` (receipt schema 3, RS3) is terminal when read, but this build never writes it:
@@ -26,6 +26,9 @@ defmodule AiPair.Delivery.ReceiptStore do
   # The pair a v1/v2 admission records (B1b): explicit null, never inferred from the registry.
   @unbound %{registration_id: nil, generation: nil}
   @max_wait_ms 5_000
+  # S3a: how long a fence waits for a STARTED gated transaction before answering
+  # command_in_flight (scope r12, deferred fence reply); overridable by :fence_bound_ms.
+  @fence_bound_ms 5_000
 
   @type receipt :: %{
           message_id: String.t(),
@@ -121,6 +124,41 @@ defmodule AiPair.Delivery.ReceiptStore do
   @doc "Fence pane's restored entries: revoke the capability and void every held token."
   def fence_restore(store, pane, ref), do: GenServer.call(store, {:fence_restore, pane, ref})
 
+  # ----- S3a gated delivery (scope r12 "Paste-command gate", "Effect journal") -----
+
+  @doc """
+  Begin one gated delivery transaction for `gate` (%{pane, msg_id, attempt, token, buffer}):
+  refused while the gate is poisoned, the pane is held, fence-pending or already has a STARTED
+  transaction, the residual bound is reached or the token is not live; otherwise the begin is
+  durable (fsynced) before `{:ok, marker}`, and the caller (the Tmux server) is monitored.
+  """
+  def begin_command(store, gate), do: GenServer.call(store, {:begin_command, gate})
+
+  @doc """
+  Run one tmux step of a STARTED transaction (`exe` with `args`) and answer `{:ok, exit_status}`
+  when the client has exited. The STORE opens the step's Port, inside this call and only while
+  it holds the marker as started by the calling Tmux server and the gate is not poisoned: no
+  step is spawned except by the live gate that holds the token. The reply is deferred (the
+  store keeps answering); a store that dies closes the Port it owns and the caller's call
+  exits. A restarted store never holds the marker (the started map is in memory).
+  """
+  def run_step(store, marker, exe, args),
+    do: GenServer.call(store, {:run_step, marker, exe, args}, :infinity)
+
+  @doc "Record the residual of a STARTED transaction whose buffer cleanup failed."
+  def residual_command(store, marker), do: GenServer.call(store, {:residual_command, marker})
+
+  @doc "End a STARTED transaction with its first nonzero exit (or 0) and its cleanup exit."
+  def end_command(store, marker, code, cleanup),
+    do: GenServer.call(store, {:end_command, marker, code, cleanup})
+
+  @doc "Held panes, residual buffers, held (unmatched) entries and whether the gate is poisoned."
+  def effect_status(store), do: GenServer.call(store, :effect_status)
+
+  @doc "Hold a restored entry whose pair does not match the released identity; never pasted."
+  def hold_unmatched(store, id, attempt, token),
+    do: GenServer.call(store, {:hold_unmatched, id, attempt, token})
+
   @doc "A restored entry whose verified read failed: append ambiguous, remove its object."
   def restore_failed(store, id, attempt, token),
     do: GenServer.call(store, {:restore_failed, id, attempt, token})
@@ -135,42 +173,80 @@ defmodule AiPair.Delivery.ReceiptStore do
     epoch = "ep_" <> Base.encode16(:crypto.strong_rand_bytes(12), case: :lower)
     inbox = Keyword.fetch!(opts, :inbox)
 
-    case ReceiptLog.open(Keyword.get(opts, :fs, SystemFs.new()), inbox) do
-      {:ok, log} ->
-        state = %{
-          log: log,
-          epoch: epoch,
-          tokens: %{},
-          owners: %{},
-          observers: %{},
-          waiters: %{},
-          in_flight: MapSet.new(),
-          pre_paste: %{},
-          poisoned: false,
-          restored: [],
-          # S2 handover: the issuer (a test pid, or the Coordinator), the registry by pane, the
-          # live capability digests by pane, holder monitors, and tokens voided by re-mint.
-          issuer: Keyword.get(opts, :restore_issuer),
-          restore: %{},
-          caps: %{},
-          holders: %{},
-          voided: MapSet.new()
-        }
+    fs = Keyword.get(opts, :fs, SystemFs.new())
 
-        with {:ok, lineage} <- Lineage.load(log.fs, inbox, log),
-             {:ok, lineage} <- Lineage.attest(lineage, epoch, log.seq + 1) do
-          state
+    case ReceiptLog.open(fs, inbox) do
+      {:ok, log} -> init_state(log, epoch, inbox, opts)
+      {:error, reason} -> {:stop, reason}
+    end
+  end
+
+  defp open_journal(fs, inbox, log) do
+    case EffectJournal.open(fs, inbox) do
+      {:ok, journal} ->
+        {:ok, journal}
+
+      {:error, _} = error ->
+        _ = ReceiptLog.close(log)
+        error
+    end
+  end
+
+  # The effect journal opens after this epoch's lineage attestation, so a lineage fault still
+  # stops the store :lineage_unavailable before any journal write (L6, L9).
+  defp init_state(log, epoch, inbox, opts) do
+    with {:ok, lineage} <- Lineage.load(log.fs, inbox, log),
+         {:ok, lineage} <- Lineage.attest(lineage, epoch, log.seq + 1) do
+      # open_journal/3 closes the log itself when the journal cannot be opened
+      case open_journal(log.fs, inbox, log) do
+        {:ok, journal} ->
+          log
+          |> boot_state(journal, epoch, opts)
           |> classify(Lineage.ranges(lineage), inbox)
           |> boot_payloads(opts)
-        else
-          {:error, reason} ->
-            close_on_failure(state)
-            {:stop, reason}
-        end
 
+        {:error, reason} ->
+          {:stop, reason}
+      end
+    else
       {:error, reason} ->
+        close_log_on_failure(log)
         {:stop, reason}
     end
+  end
+
+  defp boot_state(log, journal, epoch, opts) do
+    %{
+      # S3a: the effect journal, the STARTED transaction per pane (marker and the Tmux
+      # server's monitor), panes held in memory after a journal write failure, pending
+      # fences, unmatched entries held by pane, and whether the gate is poisoned.
+      journal: journal,
+      started: %{},
+      # the Port of each running gated step and its deferred run_step caller
+      steps: %{},
+      held_in_memory: MapSet.new(),
+      fences: %{},
+      held: %{},
+      gate_poisoned: false,
+      fence_bound_ms: Keyword.get(opts, :fence_bound_ms, @fence_bound_ms),
+      log: log,
+      epoch: epoch,
+      tokens: %{},
+      owners: %{},
+      observers: %{},
+      waiters: %{},
+      in_flight: MapSet.new(),
+      pre_paste: %{},
+      poisoned: false,
+      restored: [],
+      # S2 handover: the issuer (a test pid, or the Coordinator), the registry by pane, the
+      # live capability digests by pane, holder monitors, and tokens voided by re-mint.
+      issuer: Keyword.get(opts, :restore_issuer),
+      restore: %{},
+      caps: %{},
+      holders: %{},
+      voided: MapSet.new()
+    }
   end
 
   defp classify(state, ranges, inbox) do
@@ -321,21 +397,159 @@ defmodule AiPair.Delivery.ReceiptStore do
     end
   end
 
-  def handle_call({:fence_restore, pane, _ref} = request, {caller, _}, state) do
-    if issuer?(state, caller, pane, request) do
-      state = remint(%{state | caps: Map.delete(state.caps, pane)}, pane)
+  # S3a (scope r12): a fence takes effect only when no gated transaction of the pane is
+  # STARTED. With one STARTED the reply is deferred (no blocking in this call, so the
+  # transaction's end_command can run): fence-pending refuses every begin for the pane, and
+  # exactly one terminal reply follows, {:ok, ref} at the end or command_in_flight at the
+  # bound. A held (effect-unresolved) pane is never fenced.
+  def handle_call({:fence_restore, pane, _ref} = request, {caller, _} = from, state) do
+    cond do
+      not issuer?(state, caller, pane, request) ->
+        {:reply, {:error, :not_issuer}, state}
 
-      restore =
-        Map.update(state.restore, pane, [], fn entries ->
-          Enum.map(entries, fn
-            %{holder: pid} = entry when is_pid(pid) -> %{entry | holder: {:fenced, pid}}
-            entry -> entry
-          end)
-        end)
+      Map.has_key?(state.fences, pane) ->
+        {:reply, {:error, :fence_pending}, state}
 
-      {:reply, {:ok, make_ref()}, %{state | restore: restore}}
+      pane in unresolved_panes(state) ->
+        {:reply, {:error, :effect_unresolved}, state}
+
+      Map.has_key?(state.started, pane) ->
+        tref = make_ref()
+        timer = Process.send_after(self(), {:fence_timeout, pane, tref}, state.fence_bound_ms)
+        monitor = Process.monitor(caller)
+        pending = %{from: from, tref: tref, timer: timer, monitor: monitor}
+        {:noreply, %{state | fences: Map.put(state.fences, pane, pending)}}
+
+      true ->
+        {:reply, {:ok, make_ref()}, fence_now(state, pane)}
+    end
+  end
+
+  def handle_call({:begin_command, gate}, {caller, _}, state) do
+    %{pane: pane, msg_id: id, attempt: attempt, buffer: buffer} = gate
+
+    refusal =
+      cond do
+        state.gate_poisoned -> {:error, :effect_journal_unavailable}
+        pane in unresolved_panes(state) -> {:error, :effect_unresolved}
+        Map.has_key?(state.fences, pane) -> {:error, :fence_pending}
+        Map.has_key?(state.started, pane) -> {:error, :command_in_flight}
+        EffectJournal.residual_full?(state.journal) -> {:error, :residual_capacity_full}
+        true -> gate_binding(state, gate)
+      end
+
+    if refusal == :ok do
+      case EffectJournal.begin(state.journal, pane, id, attempt, buffer) do
+        {:ok, marker, journal} ->
+          started = %{marker: marker, owner: caller, monitor: Process.monitor(caller)}
+
+          {:reply, {:ok, marker},
+           %{state | journal: journal, started: Map.put(state.started, pane, started)}}
+
+        {:error, _reason} ->
+          {:reply, {:error, :effect_journal_unavailable}, poison_gate(state, pane)}
+      end
     else
-      {:reply, {:error, :not_issuer}, state}
+      {:reply, refusal, state}
+    end
+  end
+
+  # A poisoned gate runs no gated transaction (scope r12): a transaction already STARTED is
+  # refused its later steps too, so it ends without an end line and its pane stays held.
+  def handle_call({:run_step, marker, exe, args}, {caller, _} = from, state) do
+    pane = started_pane(state, marker)
+
+    cond do
+      is_nil(pane) ->
+        {:reply, {:error, :unknown_marker}, state}
+
+      state.started[pane].owner != caller ->
+        {:reply, {:error, :not_gate_owner}, state}
+
+      state.gate_poisoned ->
+        {:reply, {:error, :effect_journal_unavailable}, state}
+
+      true ->
+        case open_step(exe, args) do
+          {:ok, port} -> {:noreply, %{state | steps: Map.put(state.steps, port, from)}}
+          # a spawn failure is a completed step without acknowledgement
+          :spawn_failed -> {:reply, {:ok, 127}, state}
+        end
+    end
+  end
+
+  def handle_call({:residual_command, marker}, _from, state) do
+    case started_pane(state, marker) do
+      nil ->
+        {:reply, {:error, :unknown_marker}, state}
+
+      pane ->
+        case EffectJournal.residual(state.journal, marker) do
+          {:ok, journal} ->
+            {:reply, :ok, %{state | journal: journal}}
+
+          {:error, _reason} ->
+            {:reply, {:error, :effect_journal_unavailable}, poison_gate(state, pane)}
+        end
+    end
+  end
+
+  def handle_call({:end_command, marker, code, cleanup}, _from, state) do
+    case started_pane(state, marker) do
+      nil ->
+        {:reply, {:error, :unknown_marker}, state}
+
+      pane ->
+        Process.demonitor(state.started[pane].monitor, [:flush])
+        state = %{state | started: Map.delete(state.started, pane)}
+
+        case EffectJournal.finish(state.journal, marker, code, cleanup) do
+          {:ok, journal} ->
+            {:reply, :ok, complete_fence(%{state | journal: journal}, pane)}
+
+          {:error, _reason} ->
+            # the marker stays uncleared on disk as far as this store knows: the pane is held
+            state = poison_gate(state, pane)
+
+            {:reply, {:error, :effect_journal_unavailable},
+             answer_fence(state, pane, {:error, :command_in_flight})}
+        end
+    end
+  end
+
+  def handle_call(:effect_status, _from, state) do
+    status = %{
+      unresolved: unresolved_panes(state),
+      residual: EffectJournal.residuals(state.journal),
+      held: Map.new(state.held, fn {pane, set} -> {pane, Enum.sort(MapSet.to_list(set))} end),
+      poisoned: state.gate_poisoned
+    }
+
+    {:reply, status, state}
+  end
+
+  # Held is a registry state for this store's lifetime only (scope r12, "Held is a registry
+  # state"). After a store restart the entry is restored unheld, but its pane is re-admitted
+  # QUARANTINED by boot (which pastes nothing), and only a new release can lift that; the
+  # release re-reads the entry's recorded pair, which is durable and unchanged, and holds it
+  # again (RED R9). So a held entry is never pasted, across restarts included.
+  def handle_call({:hold_unmatched, id, attempt, token}, _from, state) do
+    with :ok <- valid_id(id),
+         true <- restored_entry?(state, id, attempt),
+         :ok <- authority(state, id, token, attempt),
+         {:ok, current} <- current(state, id) do
+      held =
+        Map.update(
+          state.held,
+          current.pane_id,
+          MapSet.new([{id, attempt}]),
+          &MapSet.put(&1, {id, attempt})
+        )
+
+      {:reply, :ok, %{state | held: held}}
+    else
+      false -> {:reply, {:error, :not_restored}, state}
+      {:error, _} = error -> {:reply, error, state}
     end
   end
 
@@ -417,6 +631,7 @@ defmodule AiPair.Delivery.ReceiptStore do
          :ok <- valid_id(id),
          {:ok, current} <- current(state, id),
          :ok <- authority(state, id, token, current.delivery_attempt),
+         :ok <- not_fence_pending(state, current.pane_id),
          :ok <- paste_start(state, id, current.status) do
       # The marker is durable before :ok, so paste_fn never runs without it on disk.
       case persist(state, %{current | status: "paste_started"}) do
@@ -467,7 +682,50 @@ defmodule AiPair.Delivery.ReceiptStore do
     end
   end
 
-  def handle_info({:DOWN, ref, :process, _pid, _reason}, state) do
+  # A gated step's exit status (decision 50: the acknowledgement arrives only after BEAM reaped
+  # the client) answers its deferred run_step call; its output is discarded.
+  def handle_info({port, {:exit_status, status}}, state) when is_port(port) do
+    case Map.pop(state.steps, port) do
+      {nil, _} ->
+        {:noreply, state}
+
+      {from, steps} ->
+        GenServer.reply(from, {:ok, status})
+        {:noreply, %{state | steps: steps}}
+    end
+  end
+
+  def handle_info({port, {:data, _output}}, state) when is_port(port), do: {:noreply, state}
+
+  def handle_info({:fence_timeout, pane, tref}, state) do
+    case state.fences do
+      %{^pane => %{tref: ^tref}} ->
+        {:noreply, answer_fence(state, pane, {:error, :command_in_flight})}
+
+      _stale ->
+        {:noreply, state}
+    end
+  end
+
+  def handle_info({:DOWN, ref, :process, _pid, _reason} = down, state) do
+    cond do
+      pane = Enum.find_value(state.started, fn {p, s} -> if s.monitor == ref, do: p end) ->
+        # The Tmux server died between begin and end. A step it requested runs on in a Port
+        # this store owns (its client may still be running or exit later; that exit status
+        # answers no one), and nothing proves an end. The marker stays uncleared: held.
+        {:noreply, %{state | started: Map.delete(state.started, pane)}}
+
+      pane = Enum.find_value(state.fences, fn {p, f} -> if f.monitor == ref, do: p end) ->
+        # The fence caller died: its pending fence is cleared without a reply.
+        Process.cancel_timer(state.fences[pane].timer)
+        {:noreply, %{state | fences: Map.delete(state.fences, pane)}}
+
+      true ->
+        owner_down(down, state)
+    end
+  end
+
+  defp owner_down({:DOWN, ref, :process, _pid, _reason}, state) do
     case Map.pop(state.owners, ref) do
       {nil, _} ->
         # A restore holder's death returns its entries to unheld and never finalizes them
@@ -538,8 +796,11 @@ defmodule AiPair.Delivery.ReceiptStore do
 
   # What a holder receives: identity, its token, the object path and the store's own uid, so
   # the holder's actual read re-verifies the object under the same owner check (G3).
+  # S3a: an entry held unmatched is never handed again; it stays listed in the registry.
   defp handed(state, entries) do
-    Enum.map(entries, fn entry ->
+    entries
+    |> Enum.reject(&held_entry?(state, &1))
+    |> Enum.map(fn entry ->
       %{
         msg_id: entry.msg_id,
         attempt: entry.attempt,
@@ -831,6 +1092,94 @@ defmodule AiPair.Delivery.ReceiptStore do
     end
   end
 
+  # ----- S3a gate helpers -----
+
+  # Held panes: an uncleared marker whose transaction is not STARTED by a live Tmux server,
+  # and any pane whose journal write failed in this store's lifetime.
+  defp unresolved_panes(state) do
+    state.journal
+    |> EffectJournal.unresolved()
+    |> Enum.reject(&Map.has_key?(state.started, &1))
+    |> MapSet.new()
+    |> MapSet.union(state.held_in_memory)
+    |> MapSet.to_list()
+    |> Enum.sort()
+  end
+
+  # A gate is bound to the exact attempt it names: valid values, a live token for that
+  # attempt, the receipt's own pane, and a durable paste_started (begin_paste ran first).
+  # A token for one pane can therefore never open a transaction under another.
+  defp gate_binding(state, %{pane: pane, msg_id: id, attempt: attempt, token: token, buffer: buffer}) do
+    with true <- ReceiptLog.valid_pane?(pane) and is_integer(attempt) and attempt >= 1,
+         true <- is_binary(buffer) and Regex.match?(~r/\Aai_pair_[0-9]+\z/, buffer),
+         :ok <- valid_id(id),
+         {:ok, current} <- current(state, id),
+         true <- current.pane_id == pane and current.delivery_attempt == attempt,
+         true <- current.status == "paste_started" and MapSet.member?(state.in_flight, id) do
+      authority(state, id, token, attempt)
+    else
+      false -> {:error, :gate_mismatch}
+      {:error, _} = error -> error
+    end
+  end
+
+  defp open_step(exe, args) do
+    {:ok,
+     Port.open({:spawn_executable, exe}, [:binary, :exit_status, :stderr_to_stdout, args: args])}
+  rescue
+    _ in [ErlangError, ArgumentError] -> :spawn_failed
+  end
+
+  defp started_pane(state, marker),
+    do: Enum.find_value(state.started, fn {pane, s} -> if s.marker == marker, do: pane end)
+
+  # A journal write failure poisons the gate for the store's lifetime and holds the pane.
+  defp poison_gate(state, pane),
+    do: %{state | gate_poisoned: true, held_in_memory: MapSet.put(state.held_in_memory, pane)}
+
+  defp not_fence_pending(state, pane),
+    do: if(Map.has_key?(state.fences, pane), do: {:error, :fence_pending}, else: :ok)
+
+  # The S2 fence itself: revoke the capability, re-mint every token, mark holders fenced.
+  defp fence_now(state, pane) do
+    state = remint(%{state | caps: Map.delete(state.caps, pane)}, pane)
+
+    restore =
+      Map.update(state.restore, pane, [], fn entries ->
+        Enum.map(entries, fn
+          %{holder: pid} = entry when is_pid(pid) -> %{entry | holder: {:fenced, pid}}
+          entry -> entry
+        end)
+      end)
+
+    %{state | restore: restore}
+  end
+
+  # The STARTED transaction of `pane` ended: a pending fence takes effect now, exactly once.
+  defp complete_fence(state, pane) do
+    case Map.fetch(state.fences, pane) do
+      {:ok, _pending} ->
+        state = fence_now(state, pane)
+        answer_fence(state, pane, {:ok, make_ref()})
+
+      :error ->
+        state
+    end
+  end
+
+  defp answer_fence(state, pane, reply) do
+    case Map.pop(state.fences, pane) do
+      {nil, _} ->
+        state
+
+      {pending, fences} ->
+        Process.cancel_timer(pending.timer)
+        Process.demonitor(pending.monitor, [:flush])
+        GenServer.reply(pending.from, reply)
+        %{state | fences: fences}
+    end
+  end
+
   defp paste_start(state, id, status) do
     cond do
       status == "paste_started" or MapSet.member?(state.in_flight, id) ->
@@ -891,10 +1240,23 @@ defmodule AiPair.Delivery.ReceiptStore do
   defp outcome("pending"), do: "ambiguous"
   defp outcome(status), do: status
 
-  defp close_on_failure(state) do
-    case ReceiptLog.close(state.log) do
+  defp held_entry?(state, entry) do
+    Enum.any?(state.held, fn {_pane, set} -> MapSet.member?(set, {entry.msg_id, entry.attempt}) end)
+  end
+
+  defp close_log_on_failure(log) do
+    case ReceiptLog.close(log) do
       :ok -> :ok
       {:error, reason} -> Logger.error("receipt store close failed: #{inspect(reason)}")
+    end
+  end
+
+  defp close_on_failure(state) do
+    close_log_on_failure(state.log)
+
+    case EffectJournal.close(state.journal) do
+      :ok -> :ok
+      {:error, reason} -> Logger.error("effect journal close failed: #{inspect(reason)}")
     end
   end
 end

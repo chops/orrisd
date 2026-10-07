@@ -89,6 +89,19 @@ Rollback floor: a build before RS3 refuses any version 3 line as
 incompatible and leaves the log unchanged, so a rollback after the first RS3 write fails
 closed.
 
+Proposed (NS-15.G.003 S3a, Charles decisions 49 and 50; pending independent review):
+a restored pane leaves quarantine only through ~release~, which proves the pane's exact
+pair under its Coordinator fence and starts a released child bound to it. That child
+pastes only restored attempts recorded with that pair, each through one gated tmux
+transaction (set-buffer, paste-buffer, send-keys) that the store brackets with a durable
+begin and end in ~effects.jsonl~; every other restored attempt is held in the registry
+for the store's lifetime, never pasted. A fence takes effect only when no transaction of
+the pane is STARTED. An uncleared begin (no acknowledged end) holds the pane: no release,
+no identity and no further transaction, until a later decision. The guarantee is the
+tmux clients' acknowledgement of each step, never pane-side receipt. A build before S3a
+ignores ~effects.jsonl~; that is safe only because such builds never paste restored
+attempts.
+
 A line with another ~schema~ or an unsupported ~schema_version~, newline-terminated
 or not, is refused with
 ~{:receipt_log_incompatible, %{seq: n, found: ..., expected: ...}}~ naming the line,

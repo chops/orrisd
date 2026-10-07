@@ -32,7 +32,7 @@ defmodule AiPair.IPC.DeliveryV3 do
   alias AiPair.Pane.StateMachine
   alias AiPair.PaneSupervisor
   alias AiPair.PaneRestore.Coordinator
-  alias AiPair.Delivery.ReceiptLog
+  alias AiPair.Delivery.{ReceiptLog, ReceiptStore}
 
   @identity_free_outcomes ["absent", "conflict"]
 
@@ -56,6 +56,7 @@ defmodule AiPair.IPC.DeliveryV3 do
         "status" -> status(params, context)
         "send" -> send_text(params, context)
         "reconcile" -> reconcile(params, context)
+        "release" -> release(params, context)
         _ -> %{ok: false, error: "unknown command"}
       end
 
@@ -73,11 +74,36 @@ defmodule AiPair.IPC.DeliveryV3 do
         %{
           ok: true,
           pong: AiPair.version(),
-          capabilities: ["delivery_reconcile", "pane_identity", "sessions_read"]
+          capabilities: ["delivery_reconcile", "pane_identity", "release", "sessions_read"]
         }
 
       true ->
         %{ok: true, pong: AiPair.version(), capabilities: ["delivery_reconcile", "sessions_read"]}
+    end
+  end
+
+  # NS-15.G.003 S3a: release a boot-restored quarantined pane (vendored ipc-v3.org "Release").
+  # Legacy mode, a missing or invalid pane id, and an unprovable identity refuse before any
+  # fence; the transaction itself is AiPair.PaneRestore.Release.run/3.
+  defp release(params, context) do
+    pane = params["pane_id"]
+
+    cond do
+      is_nil(pane) ->
+        %{ok: false, error: "missing_pane_id"}
+
+      not ReceiptLog.valid_pane?(pane) ->
+        %{ok: false, error: "invalid_pane_id"}
+
+      not context.durable ->
+        unavailable()
+
+      true ->
+        prove = fn ->
+          with {:ok, _child} <- child(pane), do: identity(pane, context)
+        end
+
+        AiPair.PaneRestore.Release.run(pane, context, prove)
     end
   end
 
@@ -175,13 +201,27 @@ defmodule AiPair.IPC.DeliveryV3 do
   defp with_identity(%{ok: true} = reply, identity), do: Map.put(reply, :pane_identity, identity)
   defp with_identity(refusal, _identity), do: refusal
 
+  # S3a: a pane held after an unacknowledged gated transaction (effect_unresolved) proves no
+  # identity until it is resolved (RED R12).
   defp identity(pane, context) do
-    with {:ok, id} when is_binary(id) <- PaneSupervisor.registration(pane),
+    with :ok <- effect_resolved(pane, context.receipt_store),
+         {:ok, id} when is_binary(id) <- PaneSupervisor.registration(pane),
          {:ok, %{"registration_id" => ^id, "session_gen" => generation}} <- context.committed.(pane) do
       {:ok, %{pane_id: pane, registration_id: id, generation: generation}}
     else
       _ -> :unavailable
     end
+  end
+
+  # Fail-closed: only a live store that lists the pane as NOT unresolved lets the identity
+  # proof continue. An absent or unavailable store, or one that cannot answer, cannot rule out
+  # an uncleared begin, so it proves no identity.
+  defp effect_resolved(_pane, nil), do: :unresolved
+
+  defp effect_resolved(pane, store) do
+    if pane in ReceiptStore.effect_status(store).unresolved, do: :unresolved, else: :ok
+  catch
+    :exit, _ -> :unresolved
   end
 
   defp child(pane) do

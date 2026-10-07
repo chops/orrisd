@@ -77,6 +77,11 @@ defmodule AiPair.Pane.StateMachine do
   @derive {Inspect, except: [:quarantine_token, :restore_capability]}
   defstruct [
     :restore_capability,
+    # NS-15.G.003 S3a: set only on a RELEASED child: the {registration_id, generation} its
+    # release proved, the tmux adapter its restored drain uses for gated transactions, and
+    # the attempt of each restored entry matched to that pair (only these use the gate).
+    :released_identity,
+    :tmux_server,
     :restore_claim_timeout_ms,
     :restore_retry_ms,
     :pane_id,
@@ -98,6 +103,7 @@ defmodule AiPair.Pane.StateMachine do
     :registration_id,
     recovering_capture: false,
     restore_failures: %{},
+    gated_attempts: %{},
     pending_sends: :queue.new(),
     pane_gone_count: 0
   ]
@@ -297,6 +303,8 @@ defmodule AiPair.Pane.StateMachine do
       # NS-15.G.003 S2: a boot-restored pane pulls its restored queued sends with this
       # capability (from the same child spec, so a restarted child claims again).
       restore_capability: Keyword.get(opts, :restore_capability),
+      released_identity: Keyword.get(opts, :released_identity),
+      tmux_server: Keyword.get(opts, :tmux_server),
       restore_claim_timeout_ms: Keyword.get(opts, :restore_claim_timeout_ms, 5_000),
       restore_retry_ms: Keyword.get(opts, :restore_retry_ms, 1_000)
     }
@@ -341,8 +349,11 @@ defmodule AiPair.Pane.StateMachine do
         {:keep_state_and_data, [{:next_event, :internal, :claim_restored}]}
 
       {:ok, entries} ->
+        # S3a: a released child holds every entry not recorded with its released pair and
+        # drains only the matched ones, each through the gated transaction.
+        {entries, gated} = release_partition(data, entries)
         {queue, failures} = restored_queue(data, entries)
-        data = %{data | pending_sends: queue, restore_failures: failures}
+        data = %{data | pending_sends: queue, restore_failures: failures, gated_attempts: gated}
         {:keep_state, data, restore_retry(data)}
 
       {:error, reason} ->
@@ -676,6 +687,36 @@ defmodule AiPair.Pane.StateMachine do
 
   # Each restored object passes the verified read before its entry is placed; a failed read
   # is finalized ambiguous by the store (restore_failed) before the entry is omitted.
+  # Not released: every claimed entry is queued as before (quarantine declines the drain).
+  # Released: an entry whose recorded pair equals released_identity is kept and marked for
+  # the gate; any other (no pair, another pair) is held in the store and never queued. A
+  # hold the store refuses keeps the entry out of the queue as well: it is never pasted.
+  defp release_partition(%{released_identity: nil}, entries), do: {entries, %{}}
+
+  defp release_partition(%{released_identity: pair, tmux_server: tmux} = data, entries) do
+    # Without a tmux adapter no gated transaction is possible, so nothing may be pasted:
+    # every entry, matched or not, is held (fail closed; never the ordinary paste path).
+    {matched, unmatched} =
+      if is_nil(tmux),
+        do: {[], entries},
+        else:
+          Enum.split_with(
+            entries,
+            &({Map.get(&1, :registration_id), Map.get(&1, :generation)} == pair)
+          )
+
+    for e <- unmatched do
+      case receipt_call(fn ->
+             ReceiptStore.hold_unmatched(data.receipt_store, e.msg_id, e.attempt, e.token)
+           end) do
+        :ok -> :ok
+        other -> Logger.warning("ai_pair: pane=#{data.pane_id} hold refused: #{inspect(other)}")
+      end
+    end
+
+    {matched, Map.new(matched, &{&1.msg_id, &1.attempt})}
+  end
+
   defp restored_queue(data, entries) do
     ids = MapSet.new(entries, & &1.msg_id)
 
@@ -764,6 +805,30 @@ defmodule AiPair.Pane.StateMachine do
          do: {:error, reason}
   end
 
+  # S3a: a restored entry matched by a released child is delivered through ONE gated tmux
+  # transaction (AiPair.Tmux.gated_paste/4) after its durable paste_started: delivered only
+  # when every step was acknowledged, ambiguous otherwise (decision 50: no pane-side claim).
+  defp paste_receipted(%{gated_attempts: gated, tmux_server: nil}, _text, id, _token, _wait)
+       when is_map_key(gated, id) do
+    # unreachable by construction (release_partition gates nothing without an adapter);
+    # kept so a gated entry can never fall through to the ordinary paste
+    {:error, {:paste_failed, :gate_unavailable}}
+  end
+
+  defp paste_receipted(%{gated_attempts: gated, tmux_server: tmux} = data, text, id, token, _wait)
+       when is_map_key(gated, id) do
+    with :ok <- receipt_call(fn -> ReceiptStore.begin_paste(data.receipt_store, id, token) end) do
+      gate = %{store: data.receipt_store, msg_id: id, attempt: gated[id], token: token}
+      result = gated_paste(data.pane_id, Payload.reveal(text), gate, tmux)
+      status = if result == :ok, do: "delivered", else: "ambiguous"
+
+      with :ok <-
+             receipt_call(fn -> ReceiptStore.transition(data.receipt_store, id, token, status) end) do
+        if result == :ok, do: :ok, else: {:error, {:paste_failed, :ambiguous}}
+      end
+    end
+  end
+
   defp paste_receipted(data, text, id, token, wait_ms) do
     with :ok <- receipt_call(fn -> ReceiptStore.begin_paste(data.receipt_store, id, token) end) do
       safe_data = %{data | paste_fn: fn pane, bytes -> safe_paste(data.paste_fn, pane, bytes) end}
@@ -775,6 +840,16 @@ defmodule AiPair.Pane.StateMachine do
         if result == :ok, do: :ok, else: {:error, {:paste_failed, :ambiguous}}
       end
     end
+  end
+
+  # A gated transaction that raises or exits (Tmux server down, call timeout) is an
+  # unacknowledged outcome: ambiguous. The store keeps any uncleared marker as a hold.
+  defp gated_paste(pane, bytes, gate, tmux) do
+    AiPair.Tmux.gated_paste(pane, bytes, gate, tmux)
+  rescue
+    _ -> {:error, :ambiguous_paste}
+  catch
+    _, _ -> {:error, :ambiguous_paste}
   end
 
   defp safe_paste(paste_fn, pane, bytes) do

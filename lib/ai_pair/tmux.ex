@@ -240,6 +240,25 @@ defmodule AiPair.Tmux do
     end
   end
 
+  @gated_call_timeout_ms 30_000
+
+  @doc """
+  NS-15.G.003 S3a: one GATED delivery transaction (scope r12, "Paste-command gate"), driven
+  by this server: begin_command on the receipt store (durable before any step), then
+  set-buffer, paste-buffer -d and send-keys Enter, a single delete-buffer cleanup when
+  paste-buffer did not exit 0, a residual record when that cleanup fails, and end_command
+  with the first nonzero exit (or 0). Each step is a tmux client that the STORE spawns
+  through a Port it owns (ReceiptStore.run_step/4), under the live token, answering the exit
+  status BEAM reaped. A refused begin runs no tmux command at all.
+
+  `gate` is %{store, msg_id, attempt, token}. Answers `:ok` only when all three steps
+  exited 0 (the tmux acknowledgement of decision 50; nothing about pane receipt),
+  `{:error, {:gate_refused, reason}}`, `{:error, {:paste_failed, code}}`, or
+  `{:error, {:paste_failed, :gate_lost}}` when the gate ran no further step.
+  """
+  def gated_paste(pane_id, payload, gate, server \\ __MODULE__),
+    do: GenServer.call(server, {:gated_paste, pane_id, payload, gate}, @gated_call_timeout_ms)
+
   @spec delete_buffer(buffer_name(), GenServer.server()) :: :ok | {:error, error()}
   def delete_buffer(name, server \\ __MODULE__) do
     tmux_span("delete_buffer", %{"tmux.buffer_name" => name}, fn ->
@@ -428,6 +447,10 @@ defmodule AiPair.Tmux do
     {:reply, do_paste_buffer(state, pane_id, name, opts), state}
   end
 
+  def handle_call({:gated_paste, pane_id, payload, gate}, _from, state) do
+    {:reply, do_gated_paste(state, pane_id, payload, gate), state}
+  end
+
   def handle_call({:delete_buffer, name}, _from, state) do
     {:reply, do_delete_buffer(state, name), state}
   end
@@ -531,6 +554,113 @@ defmodule AiPair.Tmux do
     delete_flag = if Keyword.get(opts, :delete) == true, do: ["-d"], else: []
     args = ["paste-buffer", "-p", "-r"] ++ delete_flag ++ ["-b", name, "-t", pane_id]
     discard_ok(run_tmux(state, args))
+  end
+
+  # The buffer name is chosen before begin so the journal's begin line names it.
+  defp do_gated_paste(state, pane_id, payload, %{store: store} = gate) do
+    buffer = "ai_pair_#{System.unique_integer([:positive])}"
+
+    request = %{
+      pane: pane_id,
+      msg_id: gate.msg_id,
+      attempt: gate.attempt,
+      token: gate.token,
+      buffer: buffer
+    }
+
+    # Port.open/2 with :spawn_executable does not search PATH, so the configured tmux_bin
+    # (the bare name "tmux" by default) is resolved once, before begin: a missing binary is
+    # refused with no marker and no step, never recorded as a completed command.
+    # The gate is the store process that answered begin, and every step is spawned BY it
+    # (ReceiptStore.run_step/4), under the live token; a dead or restarted store spawns nothing,
+    # so the transaction ends (RED R13).
+    with {:ok, exe} <- resolve_executable(state.tmux_bin),
+         owner when is_pid(owner) <- GenServer.whereis(store),
+         {:ok, marker} <- AiPair.Delivery.ReceiptStore.begin_command(owner, request) do
+      case gated_steps(%{state | tmux_bin: exe}, pane_id, payload, buffer, {owner, marker}) do
+        :gate_lost -> {:error, {:paste_failed, :gate_lost}}
+        {code, cleanup} -> record_end(owner, marker, code, cleanup)
+      end
+    else
+      {:error, reason} -> {:error, {:gate_refused, reason}}
+      _no_store -> {:error, {:gate_refused, :receipt_store_unavailable}}
+    end
+  end
+
+  @doc false
+  # A configured path is expanded to an absolute path; a bare name is looked up on PATH.
+  # Either way System.find_executable/1 must accept it (it checks the execute permission),
+  # and it must be a regular file; anything else refuses before begin.
+  def resolve_executable(bin) when is_binary(bin) do
+    candidate = if String.contains?(bin, "/"), do: Path.expand(bin), else: bin
+    resolved = System.find_executable(candidate)
+
+    if is_binary(resolved) and File.regular?(resolved),
+      do: {:ok, Path.expand(resolved)},
+      else: {:error, :tmux_not_found}
+  end
+
+  # set-buffer, then paste-buffer -d only if it exited 0, then send-keys Enter only if that
+  # exited 0; one delete-buffer cleanup when paste-buffer did not exit 0 (including a
+  # nonzero set-buffer, whose buffer state is unknown). Returns {first nonzero or 0, cleanup},
+  # or :gate_lost when the gate ran no step: no step follows, no end line is written, and the
+  # uncleared begin line holds the pane for the restarted store.
+  #
+  # The store opens each step's Port inside its own run_step call, only while it holds the
+  # marker started by this server and its gate is not poisoned, and answers with the exit
+  # status (decision 50: after BEAM reaped the client). This server spawns no gated step, so
+  # no step can start after the gate's death; a death during a step closes the Port the
+  # store owns, the call exits, and nothing follows.
+  defp gated_steps(state, pane_id, payload, buffer, {owner, marker}) do
+    step = fn args -> run_step(owner, marker, state, args) end
+    set = step.(["set-buffer", "-b", buffer, "--", payload])
+
+    pasted =
+      if set == 0,
+        do: step.(["paste-buffer", "-p", "-r", "-d", "-b", buffer, "-t", pane_id]),
+        else: :skipped
+
+    sent = if pasted == 0, do: step.(["send-keys", "-t", pane_id, "Enter"]), else: :skipped
+    cleanup = if pasted == 0, do: nil, else: step.(["delete-buffer", "-b", buffer])
+
+    if :gate_lost in [set, pasted, sent, cleanup] do
+      :gate_lost
+    else
+      {Enum.find([set, pasted, sent], 0, &(is_integer(&1) and &1 != 0)), cleanup}
+    end
+  end
+
+  defp run_step(owner, marker, state, args) do
+    case AiPair.Delivery.ReceiptStore.run_step(
+           owner,
+           marker,
+           state.tmux_bin,
+           prepend_socket(state, args)
+         ) do
+      {:ok, status} -> status
+      _refused -> :gate_lost
+    end
+  catch
+    :exit, _ -> :gate_lost
+  end
+
+  defp record_end(store, marker, code, cleanup) do
+    residual =
+      if cleanup in [nil, 0],
+        do: :ok,
+        else: AiPair.Delivery.ReceiptStore.residual_command(store, marker)
+
+    ended =
+      case residual do
+        :ok -> AiPair.Delivery.ReceiptStore.end_command(store, marker, code, cleanup)
+        error -> error
+      end
+
+    cond do
+      ended != :ok -> {:error, {:paste_failed, :effect_journal_unavailable}}
+      code == 0 -> :ok
+      true -> {:error, {:paste_failed, code}}
+    end
   end
 
   defp do_delete_buffer(state, name) do

@@ -111,6 +111,9 @@ defmodule AiPair.Delivery.SystemFs do
   def unlink(_state, path), do: :file.delete(path)
 
   @impl true
+  def rename(_state, existing, new), do: :file.rename(existing, new)
+
+  @impl true
   def list(_state, dir), do: File.ls(dir)
 
   defp read_all(fd, acc) do
