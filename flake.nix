@@ -56,6 +56,18 @@
           rollback_eligible = rev != null;
         };
 
+      # NS-32.M.002 RB-2b: the durable-state versions this release reads, stamped into its manifest
+      # as "reads". The source is AiPair.Compat.reads/0; this is a copy, and the flake checks
+      # rb2b-n1 and rb2b-n2 hold it equal to the built release's own reads/0.
+      reads = {
+        effects = [ 1 ];
+        effects_hold_aware = true;
+        lineage = [ 1 ];
+        pane_intent = [ "1.0" "2.0" ];
+        payloads = [ 1 ];
+        receipts = [ 1 2 3 ];
+      };
+
       mkAiPair = pkgs:
         let
           beamPackages = pkgs.beam.packages.erlang_29.overrideScope (final: prev: {
@@ -70,8 +82,8 @@
               let base = baseNameOf path; in
               !(base == "_build" || base == "deps" || base == ".elixir_ls");
           };
-          # NS-32.M.001 RB-1: the stamped record and the manifest with its identity object, both
-          # rendered by builtins.toJSON (sorted keys, no timestamps).
+          # NS-32.M.001 RB-1: the stamped record and the manifest with its identity object (and,
+          # RB-2b, its reads), both rendered by builtins.toJSON (sorted keys, no timestamps).
           identity = buildIdentityFor {
             rev = self.rev or null;
             narHash = self.narHash;
@@ -79,7 +91,7 @@
           };
           identityFile = pkgs.writeText "build-identity.json" (builtins.toJSON identity);
           manifestFile = pkgs.writeText "manifest.json" (builtins.toJSON (
-            builtins.fromJSON (builtins.readFile ./nix/manifest.json) // { inherit identity; }
+            builtins.fromJSON (builtins.readFile ./nix/manifest.json) // { inherit identity reads; }
           ));
         in
         beamPackages.mixRelease {
