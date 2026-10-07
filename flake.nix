@@ -28,6 +28,34 @@
       # The Elixir the RB-1 C3 check helpers run under (the CLI package's pin).
       elixirFor = pkgs: pkgs.beam.packages.erlang_29.elixir_1_20;
 
+      # NS-32.M.001 RB-1: the build identity, an INPUT identity (never the build's own output):
+      # build_id is the sha256 of these "key=value\n" lines in this order. Rebuilding the same
+      # inputs on the same system gives the same record. A tree without a revision (dirty) records
+      # source_revision null, clean false, rollback_eligible false.
+      buildIdentityFor = { rev, narHash, system }:
+        let
+          canonical = nixpkgs.lib.concatMapStrings ({ key, value }: "${key}=${value}\n") [
+            { key = "name"; value = "ai-pair"; }
+            { key = "version"; value = version; }
+            { key = "source_nar_hash"; value = narHash; }
+            { key = "flake_lock_sha256"; value = builtins.hashFile "sha256" ./flake.lock; }
+            { key = "mix_deps_hash"; value = mixDepsHash; }
+            { key = "system"; value = system; }
+            { key = "release_name"; value = "ai_pair"; }
+            { key = "ipc_protocols"; value = "1,2,3"; }
+          ];
+        in
+        {
+          name = "ai-pair";
+          inherit version;
+          source_revision = rev;
+          clean = rev != null;
+          source_nar_hash = narHash;
+          build_id = builtins.hashString "sha256" canonical;
+          ipc_protocols = [ 1 2 3 ];
+          rollback_eligible = rev != null;
+        };
+
       mkAiPair = pkgs:
         let
           beamPackages = pkgs.beam.packages.erlang_29.overrideScope (final: prev: {
@@ -42,6 +70,17 @@
               let base = baseNameOf path; in
               !(base == "_build" || base == "deps" || base == ".elixir_ls");
           };
+          # NS-32.M.001 RB-1: the stamped record and the manifest with its identity object, both
+          # rendered by builtins.toJSON (sorted keys, no timestamps).
+          identity = buildIdentityFor {
+            rev = self.rev or null;
+            narHash = self.narHash;
+            system = pkgs.stdenv.hostPlatform.system;
+          };
+          identityFile = pkgs.writeText "build-identity.json" (builtins.toJSON identity);
+          manifestFile = pkgs.writeText "manifest.json" (builtins.toJSON (
+            builtins.fromJSON (builtins.readFile ./nix/manifest.json) // { inherit identity; }
+          ));
         in
         beamPackages.mixRelease {
           pname = "ai-pair";
@@ -66,6 +105,9 @@
             install -Dm755 ${./nix/files/ap-bridge.sh} $out/bin/ap-bridge
             install -Dm644 ${./nix/files/tooling.ex} $out/bin/tooling.ex
             substituteInPlace $out/bin/ap-bridge --replace-fail 'elixir -r' '${beamPackages.elixir}/bin/elixir -r'
+            # RB-1: the identity record, and the manifest copy_manifest/1 wrote, now with its identity.
+            install -Dm644 ${identityFile} $out/share/ai-pair/build-identity.json
+            install -Dm644 ${manifestFile} $out/share/ai-pair/manifest.json
           '';
         };
     in
@@ -266,5 +308,8 @@
 
       # Helper for direnv .envrc: `use ai_pair`.
       lib.useAiPair = ./nix/files/use_ai_pair.sh;
+
+      # NS-32.M.001 RB-1: the build identity function (checked by rb1-n3-dirty-shape).
+      lib.buildIdentity = buildIdentityFor;
     };
 }
