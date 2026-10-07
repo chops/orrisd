@@ -21,6 +21,8 @@ defmodule AiPair.Admission do
 
   use GenServer
 
+  require Logger
+
   @default_bound_ms 30_000
   @kinds [:ipc_send, :attach_pane, :detach_pane, :release, :idle_paste, :restore_submit]
   @hash ~r/\Asha256:[0-9a-f]{64}\z/
@@ -39,7 +41,12 @@ defmodule AiPair.Admission do
   @spec enter(GenServer.server(), atom()) :: {:ok, reference()} | {:error, :quiescing}
   def enter(server, kind) when kind in @kinds, do: GenServer.call(server, {:enter, kind})
 
-  @spec exit(GenServer.server(), reference()) :: :ok
+  @doc """
+  Return `ticket`. Only the process that entered it may: `{:error, :not_holder}` for any other
+  caller and `{:error, :orphaned}` once its holder has exited, each changing nothing. An unknown
+  ticket is `:ok` (already returned).
+  """
+  @spec exit(GenServer.server(), reference()) :: :ok | {:error, :not_holder | :orphaned}
   def exit(server, ticket), do: GenServer.call(server, {:exit, ticket})
 
   def quiesce(server, resume_hash), do: GenServer.call(server, {:quiesce, resume_hash}, :infinity)
@@ -78,31 +85,73 @@ defmodule AiPair.Admission do
   @spec fence(GenServer.server()) :: String.t() | nil
   def fence(server), do: GenServer.call(server, :fence)
 
-  @impl true
-  def init(opts) do
-    {:ok,
-     %{
-       bound_ms: Keyword.get(opts, :bound_ms, default_bound_ms()),
-       timer: Keyword.get(opts, :timer, AiPair.Admission.Timer),
-       observe: Keyword.get(opts, :observe, fn -> {:error, "receipts"} end),
-       store: Keyword.get(opts, :receipt_store),
-       tickets: %{},
-       # :open | {:draining, from, digest, timer_ref, token} | {:fenced, fence_id, digest}
-       mode: :open
-     }}
-  end
+  @doc """
+  The outstanding tickets, sorted: `{kind, holder}` for a live holder, `{kind, holder,
+  :orphaned}` for a holder that exited before returning its ticket. Read-only.
+  """
+  @spec outstanding(GenServer.server()) :: [tuple()]
+  def outstanding(server), do: GenServer.call(server, :outstanding)
 
   @impl true
-  def handle_call({:enter, _kind}, _from, %{mode: :open} = state) do
+  def init(opts) do
+    case Keyword.get(opts, :bound_ms, default_bound_ms()) do
+      bound_ms when is_integer(bound_ms) and bound_ms > 0 -> {:ok, initial(opts, bound_ms)}
+      other -> {:stop, {:invalid_quiesce_bound_ms, other}}
+    end
+  end
+
+  defp initial(opts, bound_ms) do
+    %{
+      bound_ms: bound_ms,
+      timer: Keyword.get(opts, :timer, AiPair.Admission.Timer),
+      observe: Keyword.get(opts, :observe, fn -> {:error, "receipts"} end),
+      store: Keyword.get(opts, :receipt_store),
+      tickets: %{},
+      # :open | {:draining, from, digest, timer_ref, token} | {:fenced, fence_id, digest}
+      mode: :open
+    }
+  end
+
+  # Each ticket records its kind and holder (the caller of enter), monitored so that a holder
+  # that dies before exit leaves an ORPHANED ticket: never released here, because the effect it
+  # started may still run (RB-3a GREEN-2 W6). Only the daemon process ending clears it.
+  @impl true
+  def handle_call({:enter, kind}, {holder, _tag}, %{mode: :open} = state) do
     ticket = make_ref()
-    {:reply, {:ok, ticket}, %{state | tickets: Map.put(state.tickets, ticket, true)}}
+    entry = %{kind: kind, holder: holder, monitor: Process.monitor(holder), orphaned: false}
+    {:reply, {:ok, ticket}, %{state | tickets: Map.put(state.tickets, ticket, entry)}}
   end
 
   def handle_call({:enter, _kind}, _from, state), do: {:reply, {:error, :quiescing}, state}
 
-  def handle_call({:exit, ticket}, _from, state) do
-    state = %{state | tickets: Map.delete(state.tickets, ticket)}
-    {:reply, :ok, maybe_complete(state)}
+  # Only the live holder returns its ticket. An orphaned ticket is never released, whoever holds
+  # its reference (W6), and a ticket presented by any other process changes nothing.
+  def handle_call({:exit, ticket}, {caller, _tag}, state) do
+    case Map.fetch(state.tickets, ticket) do
+      {:ok, %{orphaned: true}} ->
+        {:reply, {:error, :orphaned}, state}
+
+      {:ok, %{holder: ^caller} = entry} ->
+        Process.demonitor(entry.monitor, [:flush])
+        {:reply, :ok, maybe_complete(%{state | tickets: Map.delete(state.tickets, ticket)})}
+
+      {:ok, _other_holder} ->
+        {:reply, {:error, :not_holder}, state}
+
+      :error ->
+        {:reply, :ok, state}
+    end
+  end
+
+  def handle_call(:outstanding, _from, state) do
+    listed =
+      for {_ticket, entry} <- state.tickets do
+        if entry.orphaned,
+          do: {entry.kind, entry.holder, :orphaned},
+          else: {entry.kind, entry.holder}
+      end
+
+    {:reply, Enum.sort(listed), state}
   end
 
   def handle_call({:quiesce, hash}, from, %{mode: :open} = state) do
@@ -146,6 +195,17 @@ defmodule AiPair.Admission do
   def handle_info({:drain_bound, token}, %{mode: {:draining, from, _h, _t, token}} = state) do
     GenServer.reply(from, {:error, {:quiesce_timeout, state.bound_ms}})
     {:noreply, %{state | mode: :open}}
+  end
+
+  def handle_info({:DOWN, monitor, :process, _pid, _reason}, state) do
+    case Enum.find(state.tickets, fn {_ticket, entry} -> entry.monitor == monitor end) do
+      {ticket, entry} ->
+        Logger.warning("ai_pair admission: a #{entry.kind} ticket holder exited; ticket orphaned")
+        {:noreply, put_in(state.tickets[ticket].orphaned, true)}
+
+      nil ->
+        {:noreply, state}
+    end
   end
 
   def handle_info(_message, state), do: {:noreply, state}

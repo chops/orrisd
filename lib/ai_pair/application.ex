@@ -11,6 +11,8 @@ defmodule AiPair.Application do
   alias AiPair.PaneRestore.Coordinator
   alias AiPair.PaneRestore.Marker
 
+  @fenced_owner [restart: :temporary, significant: true]
+
   @impl true
   def start(_type, _args) do
     Tracer.with_span "daemon.start", %{
@@ -29,9 +31,8 @@ defmodule AiPair.Application do
 
         receipt_store = {:global, {AiPair.Delivery.ReceiptStore, Path.expand(inbox)}}
 
-        children = children(inbox, receipt_store)
+        {children, opts} = children(inbox, receipt_store)
 
-        opts = [strategy: :one_for_one, name: AiPair.Supervisor]
         result = Supervisor.start_link(children, opts)
         annotate_boot_outcome(result)
         result
@@ -48,13 +49,19 @@ defmodule AiPair.Application do
   # "The one switch"). `AiPair.IPC.Server` re-reads the same key per dispatch,
   # which is why a daemon started legacy and flipped at runtime serves refusals
   # until it is restarted. Only the literal `true` is durable.
+  #
+  # NS-32.M.002 RB-3a GREEN-2 (design r4 W1): the durable supervisor also runs with
+  # `auto_shutdown: :any_significant`, so the exit of a significant child (the admission server
+  # and the two stores whose state its fence observes) ends the whole durable daemon instead of
+  # restarting that child. The legacy options are unchanged.
   defp children(inbox, receipt_store) do
     legacy = legacy_children(inbox, receipt_store)
+    opts = [strategy: :one_for_one, name: AiPair.Supervisor]
 
     if Application.get_env(:ai_pair, :durable_attachments) == true do
-      durable_children(legacy, inbox, receipt_store)
+      {durable_children(legacy, inbox, receipt_store), opts ++ [auto_shutdown: :any_significant]}
     else
-      legacy
+      {legacy, opts}
     end
   end
 
@@ -102,9 +109,10 @@ defmodule AiPair.Application do
     store_opts = [root: inbox, fs: fs]
 
     # Only `:start` is replaced, so the supervision child keeps the store's own
-    # id and its `:permanent` restart whatever module is configured.
+    # id whatever module is configured. NS-32.M.002 RB-3a GREEN-2 (design r4 W1): the
+    # store is significant and never restarted, whatever module is configured.
     store_spec = %{
-      Supervisor.child_spec({PaneIntentStore, store_opts}, [])
+      Supervisor.child_spec({PaneIntentStore, store_opts}, @fenced_owner)
       | start: {store_module, :start_link, [store_opts]}
     }
 
@@ -113,9 +121,10 @@ defmodule AiPair.Application do
     store = {:global, {PaneIntentStore, Path.expand(inbox)}}
 
     # The split is exact and fails loudly if the legacy list ever changes shape:
-    # the first five children are shared and keep their positions, the three new
-    # ones are inserted after `AiPair.Tmux` and before the connection
-    # supervisor, and the IPC server gains the validated generation.
+    # the first five children are shared and keep their positions, the four new
+    # ones (the Coordinator, the intent store, Admission and Boot) are inserted after
+    # `AiPair.Tmux` and before the connection supervisor, and the IPC server gains the
+    # validated generation and the admission server.
     #
     # NS-15.G.003 S2 (finding 02 (a)): the receipt store starts BEFORE Boot, with the
     # Coordinator as its restore issuer, because Boot's one reconciliation issues restore
@@ -128,19 +137,47 @@ defmodule AiPair.Application do
       [
         {Coordinator, []},
         store_spec,
-        {AiPair.Delivery.ReceiptStore, receipt_opts ++ [restore_issuer: Coordinator]},
+        Supervisor.child_spec(
+          {AiPair.Delivery.ReceiptStore, receipt_opts ++ [restore_issuer: Coordinator]},
+          @fenced_owner
+        ),
+        admission_spec(receipt_store, store, tmux),
         {Boot,
          store: store,
          root: inbox,
          tmux: tmux,
          binding: binding,
          callbacks: callbacks(tmux),
-         receipt_store: receipt_store}
+         receipt_store: receipt_store,
+         admission: AiPair.Admission}
       ] ++
       [
         connections,
-        {AiPair.IPC.Server, ipc_opts ++ [boot_generation: generation]}
+        {AiPair.IPC.Server, ipc_opts ++ [boot_generation: generation, admission: AiPair.Admission]}
       ]
+  end
+
+  # NS-32.M.002 RB-3a GREEN-2 (design r4 W1): the quiesce fence's owner. Every user holds the
+  # registered name. Like the two stores its fence observes it is never restarted: its exit, for
+  # any reason, ends the durable daemon (`auto_shutdown: :any_significant`), so a fence or an
+  # orphaned ticket ends only with the daemon process and no store re-initialises under a fence.
+  defp admission_spec(receipt_store, intent_store, tmux) do
+    marker = fn ->
+      AiPair.Admission.MarkerSource.observe(%{intent: intent_store, tmux: tmux})
+    end
+
+    observe = fn ->
+      AiPair.Admission.Observer.observe(%{
+        receipt_store: receipt_store,
+        pane_intent_store: intent_store,
+        marker: marker
+      })
+    end
+
+    Supervisor.child_spec(
+      {AiPair.Admission, name: AiPair.Admission, receipt_store: receipt_store, observe: observe},
+      @fenced_owner
+    )
   end
 
   # `fetch_env`, not `get_env || mint`: absence and a present-but-useless value

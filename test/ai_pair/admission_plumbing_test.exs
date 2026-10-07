@@ -126,8 +126,8 @@ defmodule AiPair.AdmissionPlumbingTest do
              "defp admission_opts(context), do: AiPair.Admission.child_opts(context[:admission])"
 
     assert length(Regex.scan(~r/admission_opts\(context\)/, server)) >= 4
-    assert server =~ "] ++ AiPair.Admission.child_opts(admission)}"
-    assert server =~ "pane_opts: fn pane -> released_pane_opts(pane, context[:admission]) end"
+    assert server =~ "] ++ AiPair.Admission.child_opts(admission)\n"
+    assert server =~ "released_pane_opts(pane, provenance, context[:admission])"
 
     # boot reconciliation and readmit build theirs in the reconciler
     assert reconciler =~ "] ++ restore ++ AiPair.Admission.child_opts(admission)"

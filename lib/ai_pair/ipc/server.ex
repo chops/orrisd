@@ -1004,7 +1004,9 @@ defmodule AiPair.IPC.Server do
       durable: durable_enabled?() and is_binary(context.boot_generation),
       committed: &committed_record/1,
       current_pid: &current_pane_pid/1,
-      pane_opts: fn pane -> released_pane_opts(pane, context[:admission]) end,
+      pane_opts: fn pane, provenance ->
+        released_pane_opts(pane, provenance, context[:admission])
+      end,
       build_identity: context.build_identity,
       admission: context[:admission]
     }
@@ -1015,23 +1017,46 @@ defmodule AiPair.IPC.Server do
   # same adapter as the tmux_server its restored drain uses for gated transactions.
   defp admission_opts(context), do: AiPair.Admission.child_opts(context[:admission])
 
-  defp released_pane_opts(_pane, admission) do
+  # NS-32.M.002 RB-3a GREEN-2 F-1: a released child classifies with the classifier of the record
+  # its release proved (provenance, from that one record read), resolved exactly as attach
+  # resolves it. A record whose agent is not a nonempty string, an agent the loader cannot load,
+  # or a recorded classifier the loader does not reproduce is {:error, _}: Release.base_opts
+  # refuses release_fence_unavailable before the fence, the stop and the start.
+  defp released_pane_opts(_pane, provenance, admission) do
+    with {:ok, classifier_opts} <- released_classifier(provenance) do
+      {:ok, released_child_opts(admission) ++ classifier_opts}
+    end
+  end
+
+  defp released_classifier(%{agent: agent, classifier: recorded})
+       when is_binary(agent) and agent != "" and is_binary(recorded) do
+    case AiPair.Pane.Classifier.Loader.load_for_agent(agent) do
+      {:ok, classifier, ^recorded} ->
+        {:ok, [agent: agent, classifier: classifier, classifier_name: recorded]}
+
+      _not_reproducible ->
+        {:error, :classifier_unprovable}
+    end
+  end
+
+  defp released_classifier(_provenance), do: {:error, :classifier_unprovable}
+
+  defp released_child_opts(admission) do
     tmux = Application.get_env(:ai_pair, :tmux_server, AiPair.Tmux)
 
-    {:ok,
-     [
-       capture_fn: fn pane -> AiPair.Tmux.capture_pane(pane, [], tmux) end,
-       paste_fn: fn pane, text ->
-         buffer = "ai_pair_#{System.unique_integer([:positive])}"
+    [
+      capture_fn: fn pane -> AiPair.Tmux.capture_pane(pane, [], tmux) end,
+      paste_fn: fn pane, text ->
+        buffer = "ai_pair_#{System.unique_integer([:positive])}"
 
-         with :ok <- AiPair.Tmux.set_buffer(buffer, text, tmux),
-              :ok <- AiPair.Tmux.paste_buffer(pane, buffer, [delete: true], tmux),
-              :ok <- AiPair.Tmux.send_keys(pane, ["Enter"], tmux) do
-           :ok
-         end
-       end,
-       tmux_server: tmux
-     ] ++ AiPair.Admission.child_opts(admission)}
+        with :ok <- AiPair.Tmux.set_buffer(buffer, text, tmux),
+             :ok <- AiPair.Tmux.paste_buffer(pane, buffer, [delete: true], tmux),
+             :ok <- AiPair.Tmux.send_keys(pane, ["Enter"], tmux) do
+          :ok
+        end
+      end,
+      tmux_server: tmux
+    ] ++ AiPair.Admission.child_opts(admission)
   end
 
   defp committed_record(pane) do

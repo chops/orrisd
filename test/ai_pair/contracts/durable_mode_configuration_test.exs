@@ -16,7 +16,8 @@ defmodule AiPair.Contracts.DurableModeConfigurationTest do
     * the `:project_binding` key set, against the real `AiPair.PaneRestore.Admission.admit/4`;
     * the store child's id and restart under the `:pane_intent_store_module` substitution,
       against the real `Supervisor.child_spec/2`;
-    * every durable child's declared restart type, against its own `child_spec/1`;
+    * every durable child's declared restart type, against its own `child_spec/1` (or, where
+      the durable list overrides it, the recorded module_restart);
     * and the legacy composition, twice over - against the RUNNING supervision tree and
       against the whitespace-normalised text of `lib/ai_pair/application.ex`, so that S10
       cannot alter the legacy branch without failing here.
@@ -33,8 +34,11 @@ defmodule AiPair.Contracts.DurableModeConfigurationTest do
   # one) gained `max_children:`. The contract's "The connection cap" section
   # carries the amendment; the bytes below carry its consequence. Amended again for
   # NS-15.G.003 S2: the receipt store moved before Boot (durable children 8-10) with
-  # its restore issuer, Boot gained receipt_store:, and the ninth edge was added.
-  @pinned_hash "92f9bd72932e8b751c67110885d9cff5dd5ea3ae76d07f33fef475ecedfd2b5c"
+  # its restore issuer, Boot gained receipt_store:, and the ninth edge was added. Amended
+  # again for NS-32.M.002 RB-3a GREEN-2 (design r4 W1/W2): AiPair.Admission is durable child
+  # 9; Admission and the two stores its fence observes are temporary and significant under
+  # auto_shutdown: :any_significant; four edges; the quiesce_bound_ms key.
+  @pinned_hash "da293a56e4fb8b156d4c156ee76eb10a957865f66e3d0573d97167866bacd16a"
   @expected_fixture_count 3
 
   @application_source Path.expand("../../../lib/ai_pair/application.ex", __DIR__)
@@ -42,7 +46,7 @@ defmodule AiPair.Contracts.DurableModeConfigurationTest do
 
   @key_names ~w(
     durable_attachments project_binding tmux_server
-    pane_intent_store_fs pane_intent_store_module boot_generation
+    pane_intent_store_fs pane_intent_store_module boot_generation quiesce_bound_ms
   )
 
   @key_fields ~w(
@@ -64,10 +68,10 @@ defmodule AiPair.Contracts.DurableModeConfigurationTest do
     assert @hash_path |> File.read!() |> String.trim() == @pinned_hash
   end
 
-  # --- the six keys ---------------------------------------------------------
+  # --- the seven keys -------------------------------------------------------
 
   describe "configuration.keys.json" do
-    test "names exactly the six keys of the contract, each with the full field set" do
+    test "names exactly the seven keys of the contract, each with the full field set" do
       doc = fixture("configuration.keys.json")
 
       assert Enum.map(doc["keys"], & &1["key"]) == @key_names
@@ -109,6 +113,11 @@ defmodule AiPair.Contracts.DurableModeConfigurationTest do
 
       assert exports?(Marker, :mint_generation, 0)
       assert exports?(AiPair.PaneIntentStore, :start_link, 1)
+
+      # NS-32.M.002 RB-3a GREEN-2: the drain bound's default is the module's own.
+      assert by_key["quiesce_bound_ms"]["default_term"] == "30000"
+      assert Application.fetch_env(:ai_pair, :quiesce_bound_ms) == :error
+      assert AiPair.Admission.default_bound_ms() == 30_000
     end
 
     test "the frozen generation pattern is the one a minted generation satisfies" do
@@ -278,23 +287,42 @@ defmodule AiPair.Contracts.DurableModeConfigurationTest do
   # --- the durable composition ---------------------------------------------
 
   describe "supervision.durable.json" do
-    test "declares eleven children in start order with the three new ones marked" do
+    test "declares twelve children in start order with the four new ones marked" do
       durable = fixture("supervision.durable.json")
 
       assert durable["strategy"] == "one_for_one"
-      assert durable["child_count"] == 11
+      assert durable["auto_shutdown"] == "any_significant"
+      assert durable["child_count"] == 12
       assert durable["generation_validated_before_children"] == true
-      assert length(durable["start_order"]) == 11
+      assert length(durable["start_order"]) == 12
 
-      assert Enum.map(durable["start_order"], & &1["position"]) == Enum.to_list(1..11)
+      assert Enum.map(durable["start_order"], & &1["position"]) == Enum.to_list(1..12)
 
       new_ids = for child <- durable["start_order"], child["new"], do: child["id"]
 
       assert new_ids == [
                "AiPair.PaneRestore.Coordinator",
                "AiPair.PaneIntentStore",
+               "AiPair.Admission",
                "AiPair.PaneRestore.Boot"
              ]
+
+      # NS-32.M.002 RB-3a GREEN-2 (design r4 W1): exactly the fence's owner and the two
+      # stores its observation reads are significant, temporary, and end the daemon.
+      significant = for child <- durable["start_order"], child["significant"], do: child["id"]
+
+      assert significant == [
+               "AiPair.PaneIntentStore",
+               "AiPair.Delivery.ReceiptStore",
+               "AiPair.Admission"
+             ]
+
+      for child <- durable["start_order"], child["significant"] do
+        assert child["restart"] == "temporary", "#{child["id"]} is significant but restarts"
+      end
+
+      assert durable["ends_the_daemon"] ==
+               Enum.map(Enum.sort(significant), &(&1 <> " exits for any reason"))
 
       # Every child the legacy branch starts is still started, and none is dropped.
       legacy = fixture("supervision.legacy.json")
@@ -315,15 +343,21 @@ defmodule AiPair.Contracts.DurableModeConfigurationTest do
         assert Code.ensure_loaded?(module), "#{child["module"]} is not a loadable module"
         spec = module.child_spec(child_spec_args(module))
 
-        assert Map.get(spec, :restart, :permanent) == String.to_existing_atom(child["restart"]),
-               "#{inspect(module)} declares restart #{child["restart"]} in the frozen table " <>
+        # A child the durable list starts with an overriding restart (RB-3a GREEN-2) records
+        # the module's own as module_restart; the override is checked on the running tree.
+        own = Map.get(child, "module_restart", child["restart"])
+
+        assert Map.get(spec, :restart, :permanent) == String.to_existing_atom(own),
+               "#{inspect(module)} declares restart #{own} in the frozen table " <>
                  "but its own child_spec/1 says #{inspect(Map.get(spec, :restart, :permanent))}"
       end
     end
 
     test "the store child keeps its id and restart under the module substitution" do
       opts = [root: "/synthetic/inbox", fs: AiPair.PaneIntentStore.Fs.default()]
-      base = Supervisor.child_spec({AiPair.PaneIntentStore, opts}, [])
+      # The durable list's own overrides (RB-3a GREEN-2): temporary and significant.
+      overrides = [restart: :temporary, significant: true]
+      base = Supervisor.child_spec({AiPair.PaneIntentStore, opts}, overrides)
       substituted = %{base | start: {__MODULE__, :start_link, [opts]}}
 
       # The rule the contract states and B5b relies on: only :start changes, so the
@@ -331,8 +365,8 @@ defmodule AiPair.Contracts.DurableModeConfigurationTest do
       # module :pane_intent_store_module names.
       assert base.id == AiPair.PaneIntentStore
       assert substituted.id == AiPair.PaneIntentStore
-      assert Map.get(base, :restart, :permanent) == :permanent
-      assert Map.get(substituted, :restart, :permanent) == :permanent
+      assert base.restart == :temporary and base.significant == true
+      assert substituted.restart == :temporary and substituted.significant == true
       assert substituted.start == {__MODULE__, :start_link, [opts]}
       assert base.start == {AiPair.PaneIntentStore, :start_link, [opts]}
       assert Map.delete(base, :start) == Map.delete(substituted, :start)
@@ -342,8 +376,9 @@ defmodule AiPair.Contracts.DurableModeConfigurationTest do
       durable = fixture("supervision.durable.json")
       positions = Map.new(durable["start_order"], &{&1["id"], &1["position"]})
 
-      # Nine since NS-15.G.003 S2 added ReceiptStore before Boot.
-      assert length(durable["edges"]) == 9
+      # Nine since NS-15.G.003 S2 added ReceiptStore before Boot; thirteen since RB-3a
+      # GREEN-2 added the four Admission edges.
+      assert length(durable["edges"]) == 13
 
       for edge <- durable["edges"] do
         assert Enum.sort(Map.keys(edge)) == ~w(after before breaks why)
@@ -370,6 +405,17 @@ defmodule AiPair.Contracts.DurableModeConfigurationTest do
                &(&1["before"] == "AiPair.Delivery.ReceiptStore" and
                    &1["after"] == "AiPair.PaneRestore.Boot")
              )
+
+      # NS-32.M.002 RB-3a GREEN-2: the four Admission edges.
+      for {before, aft} <- [
+            {"AiPair.Delivery.ReceiptStore", "AiPair.Admission"},
+            {"AiPair.PaneIntentStore", "AiPair.Admission"},
+            {"AiPair.Admission", "AiPair.PaneRestore.Boot"},
+            {"AiPair.Admission", "AiPair.IPC.Server"}
+          ] do
+        assert Enum.any?(durable["edges"], &(&1["before"] == before and &1["after"] == aft)),
+               "missing edge #{before} before #{aft}"
+      end
     end
 
     test "the fail-closed lists are disjoint and name the store and the generation" do
@@ -381,6 +427,7 @@ defmodule AiPair.Contracts.DurableModeConfigurationTest do
       assert MapSet.disjoint?(MapSet.new(closed), MapSet.new(open))
 
       assert "the store child fails to start" in closed
+      assert "the Admission child fails to start" in closed
       assert "boot_generation present and not a decimal string" in closed
       assert "project_binding absent or malformed" in open
       assert "the boot report cannot be written" in open
@@ -446,9 +493,11 @@ defmodule AiPair.Contracts.DurableModeConfigurationTest do
   end
 
   # `child_spec/1` from `use GenServer` builds the map without starting anything,
-  # so these arguments are inert. Every clause head names one of the four modules
+  # so these arguments are inert. Every clause head names one of the six modules
   # the frozen durable table carries, which also puts their atoms in the table.
   defp child_spec_args(AiPair.PaneIntentStore), do: [root: "/synthetic/inbox"]
+  defp child_spec_args(AiPair.Delivery.ReceiptStore), do: [inbox: "/synthetic/inbox"]
+  defp child_spec_args(AiPair.Admission), do: [name: AiPair.Admission]
   defp child_spec_args(AiPair.PaneRestore.Boot), do: [root: "/synthetic/inbox"]
   defp child_spec_args(AiPair.PaneRestore.Coordinator), do: []
   defp child_spec_args(AiPair.IPC.Server), do: []

@@ -69,11 +69,11 @@ every legacy-shaped attach and detach answers ~coordinator_unavailable~ (C1
 daemon serves refusals until it is restarted. Durability is a restart-scoped
 deployment decision, not a runtime toggle.
 
-** The six keys
+** The seven keys
 :PROPERTIES:
 :CUSTOM_ID: the-six-keys
 :END:
-All six live under the ~:ai_pair~ application environment. None has a
+All seven live under the ~:ai_pair~ application environment. None has a
 command-line or environment-variable spelling, and this contract does not add
 one. The frozen table is
 ~test/fixtures/contracts/durable-mode-config/configuration.keys.json~.
@@ -174,6 +174,17 @@ The value is immutable for the life of the daemon and survives an ordinary
 restart of the ~IPC.Server~ child, because it was computed by ~Application~ and
 lives in that child's spec (~lane:103~; ~scope:176~).
 
+*** ~:quiesce_bound_ms~ (NS-32.M.002 RB-3a GREEN-2)
+| Property        | Value                                                                                   | Source                          |
+|-----------------+-------------------------------------------------------------------------------------------+---------------------------------|
+| Type            | a positive integer, milliseconds: the bound of a quiesce drain                          | ~admission.ex~ ~default_bound_ms/0~ |
+| Default         | 30000                                                                                   | ~admission.ex~                   |
+| Absent          | 30000, read once when ~AiPair.Admission~ starts                                         | ~admission.ex~ ~init/1~          |
+| Present-invalid | ~AiPair.Admission~ refuses to start, so a durable boot fails closed                     | ~admission.ex~ ~init/1~          |
+| Who may set it  | tests and fixtures; an installed configuration may set it                               | RB-3a GREEN-2 design r4 W2       |
+
+The legacy branch starts no ~AiPair.Admission~ and never reads it.
+
 *** The inbox root is not one of these keys
 Every durable key is relative to the daemon inbox, which is resolved exactly as
 it is today by ~AiPair.Inbox.resolve!/0~ (~main:19~; ~lane:19~) from
@@ -188,7 +199,9 @@ and therefore the boot report's directory (~lane:74,77,100~; ~boot.ex:191~).
 :END:
 Both branches use ~Supervisor.start_link(children, strategy: :one_for_one, name:
 AiPair.Supervisor)~ (~main:38-39~; ~lane:29-30~), so children are started in list
-order and each child's ~start_link~ returns before the next one begins. The
+order and each child's ~start_link~ returns before the next one begins. The durable
+branch adds ~auto_shutdown: :any_significant~ (NS-32.M.002 RB-3a GREEN-2; see "The
+quiesce fence's owners"). The
 frozen tables are
 ~test/fixtures/contracts/durable-mode-config/supervision.legacy.json~ and
 ~supervision.durable.json~.
@@ -204,7 +217,7 @@ would let a whole reconciliation run and quarantine panes before the daemon
 failed.
 
 *** The durable child list
-Eleven children, in this order (~lane:92-104~). The three new ones are marked.
+Twelve children, in this order (~lane:92-104~). The four new ones are marked.
 
 | # | Child                                                                              | New | Source                |
 |---+--------------------------------------------------------------------------------------+-----+-----------------------|
@@ -214,11 +227,12 @@ Eleven children, in this order (~lane:92-104~). The three new ones are marked.
 | 4 | ~{AiPair.Inbox.StuckScanner, inbox: inbox}~                                          |     | ~lane:96~             |
 | 5 | ~{AiPair.Tmux, []}~                                                                  |     | ~lane:97~             |
 | 6 | ~{AiPair.PaneRestore.Coordinator, []}~                                               | yes | ~lane:98~             |
-| 7 | the store spec: id ~AiPair.PaneIntentStore~, start ~{configured module, :start_link, [root: inbox, fs: configured fs]}~ | yes | ~lane:74-76,99~ |
-| 8 | ~{AiPair.Delivery.ReceiptStore, inbox: inbox, restore_issuer: AiPair.PaneRestore.Coordinator}~ |  | NS-15.G.003 S2 amendment, see "The S2 restore amendment" |
-| 9 | ~{AiPair.PaneRestore.Boot, store:, root:, tmux:, binding:, callbacks:, receipt_store:}~ | yes | ~lane:100~; ~receipt_store:~ added by S2 |
-|10 | ~{Task.Supervisor, name: AiPair.IPC.ConnectionSupervisor, max_children: max_connections}~ |  | ~lane:101~; see "The connection cap" |
-|11 | ~{AiPair.IPC.Server, inbox:, receipt_store:, boot_generation: generation}~            |     | ~lane:103~            |
+| 7 | the store spec: id ~AiPair.PaneIntentStore~, start ~{configured module, :start_link, [root: inbox, fs: configured fs]}~, restart ~:temporary~, significant | yes | ~lane:74-76,99~; RB-3a GREEN-2 |
+| 8 | ~{AiPair.Delivery.ReceiptStore, inbox: inbox, restore_issuer: AiPair.PaneRestore.Coordinator}~, restart ~:temporary~, significant |  | NS-15.G.003 S2 amendment, see "The S2 restore amendment"; RB-3a GREEN-2 |
+| 9 | ~{AiPair.Admission, name: AiPair.Admission, receipt_store:, observe:}~, restart ~:temporary~, significant | yes | NS-32.M.002 RB-3a GREEN-2, see "The quiesce fence's owners" |
+|10 | ~{AiPair.PaneRestore.Boot, store:, root:, tmux:, binding:, callbacks:, receipt_store:, admission: AiPair.Admission}~ | yes | ~lane:100~; ~receipt_store:~ added by S2; ~admission:~ by RB-3a |
+|11 | ~{Task.Supervisor, name: AiPair.IPC.ConnectionSupervisor, max_children: max_connections}~ |  | ~lane:101~; see "The connection cap" |
+|12 | ~{AiPair.IPC.Server, inbox:, receipt_store:, boot_generation: generation, admission: AiPair.Admission}~ |     | ~lane:103~; ~admission:~ by RB-3a |
 
 ~Boot~'s ~store:~ is the name tuple ~{:global, {AiPair.PaneIntentStore,
 Path.expand(inbox)}}~, not a pid, so it resolves through ~:global~ at call time
@@ -242,6 +256,23 @@ rows are measurements; the rest are derived from the cited source.
 | ~ReceiptStore~ before ~Boot~  | boot reconciliation issues each admitted pane's restore capability from the receipt store, through a ~Coordinator~ worker, before starting the quarantined child (NS-15.G.003 S2) | no boot-restored queued send is ever handed to its admitted pane: every entry stays unheld and listed while the pane runs without it | S2 design r6; finding 02 (a); ~application.ex~ ~durable_children/3~ |
 | ~ReceiptStore~ before ~IPC.Server~ | ~IPC.Server.start_link/1~ answers ~{:error, :receipt_store_unavailable}~ unless the receipt store is available                                                     | boot fails closed with a misleading cause                                                                                                         | ~server.ex:96-102~ (pre-existing legacy edge)   |
 | ~ConnectionSupervisor~ before ~IPC.Server~ | connection handler tasks run under it                                                                                                                     | accepted connections could not be handled                                                                                                        | ~server.ex:14-16~ (pre-existing legacy edge)    |
+| ~ReceiptStore~ before ~Admission~ | Admission closes and reopens the receipt store and reads four observation dimensions from it by its global name | the first quiesce exits on a missing store and, Admission being significant, ends the daemon | RB-3a GREEN-2 design r4 W1 |
+| ~PaneIntentStore~ before ~Admission~ | the quiesce observation reads the pane_intent and session_marker dimensions from the intent store | every quiesce answers ~observation_incomplete~ ~pane_intent~ | RB-3a GREEN-2 design r4 W1 |
+| ~Admission~ before ~Boot~ | every pane child ~Boot~'s reconciliation starts carries the admission name, so its first idle paste is gated | a boot-restored pane would paste a queued send while a fence is held | RB-3a GREEN-2 design r4 W1, W3 |
+| ~Admission~ before ~IPC.Server~ | every IPC entry that can mutate takes an admission ticket, and quiesce and resume are served by Admission | the first send, attach, detach, release or quiesce exits on a missing admission server | RB-3a GREEN-2 design r4 W1, W3 |
+
+**** The quiesce fence's owners (NS-32.M.002 RB-3a GREEN-2)
+~AiPair.Admission~, ~AiPair.Delivery.ReceiptStore~ and ~AiPair.PaneIntentStore~ are
+started with ~restart: :temporary, significant: true~ and the durable supervisor runs
+with ~auto_shutdown: :any_significant~. None of the three is ever restarted: the exit of
+any of them, for any reason, makes ~AiPair.Supervisor~ terminate every child and exit,
+and the ~:permanent~ ~ai_pair~ application then ends the node. So a quiesce fence or an
+orphaned admission ticket ends only with the daemon process, and no store
+re-initialises (its init writes: log open, lineage attestation, effect journal, payload
+cleanup) while a fence is held. The cost, stated: a store crash while no fence is held
+also ends the durable daemon instead of restarting the store; the installed service
+manager starts a new daemon (installation is Charles-only). The legacy branch keeps its
+permanent stores and its options.
 
 **** The S2 restore amendment
 NS-15.G.003 S2 moved the receipt store from position 10 to position 8, ahead of ~Boot~. It starts
@@ -292,6 +323,7 @@ still outstanding, and an attach on that pane is correctly refused
 | ~:boot_generation~ present and not a decimal string     | ~ArgumentError~ raised before the child list is built; ~Application.start~ answers ~{:error, _}~, no supervisor, no marker attempt | ~lane:67-68~; G9 ~RED:3653-3663~ |
 | the store child fails to start                          | ~Supervisor.start_link~ aborts, already-started children are terminated, ~Application.start~ answers ~{:error, _}~, nothing serves, no socket is left behind | ~scope:70~; B5a ~RED:2006-2022~ |
 | the ~Coordinator~ child fails to start                  | the same                                                                                             | ~scope:70~ (M5); NO RED row measures it — see OQ-3 |
+| the ~Admission~ child fails to start (for example a ~:quiesce_bound_ms~ that is not a positive integer) | the same | RB-3a GREEN-2 |
 | ~Boot~'s reconciliation worker CRASHES                  | ~Boot~ exits ~{:reconciliation_failed, reason}~ and the boot fails. A crash is not a source refusal and must never become a successful empty report | ~boot.ex:40-43,292-294~ |
 | ~Boot~ cannot join its own worker                       | ~Boot~ exits ~{:reconciliation_join_failed, worker}~                                                  | ~boot.ex:328-334~                     |
 | a caller defect in ~Boot~'s options (unknown key, missing required key, relative ~root~, non-positive ~deadline_ms~, a writer that does not export ~write/2~) | ~ArgumentError~ raised in the caller, so a composition defect never looks like a source failure | ~boot.ex:195-248~ |
@@ -299,6 +331,12 @@ still outstanding, and an attach on that pane is correctly refused
 Failing closed means exactly what B5a asserts: no ~AiPair.Supervisor~, no
 ~AiPair.IPC.Server~, no socket file and nothing accepting on the socket path
 (~RED:2015-2022~).
+
+*** What ends a running durable daemon (NS-32.M.002 RB-3a GREEN-2)
+- ~AiPair.Admission~ exits for any reason
+- ~AiPair.Delivery.ReceiptStore~ exits for any reason
+- ~AiPair.PaneIntentStore~ exits for any reason
+See "The quiesce fence's owners".
 
 *** What does NOT fail the boot
 | Condition                                               | Outcome                                                                                                 | Source                                    |
@@ -466,7 +504,7 @@ refusing the next one.
 :PROPERTIES:
 :CUSTOM_ID: installed-activation
 :END:
-*Setting any of these six keys in the installed daemon's configuration, and
+*Setting any of these seven keys in the installed daemon's configuration, and
 restarting the installed ~ai-pair~ daemon, are reserved to Charles. No slice
 performs either, and this contract authorises neither.*
 
@@ -542,9 +580,9 @@ document with one trailing newline, in the convention the sibling contracts use.
 
 | Fixture                     | Content                                                                                                                | Checked against                                                                                     |
 |-----------------------------+--------------------------------------------------------------------------------------------------------------------------+---------------------------------------------------------------------------------------------------|
-| ~configuration.keys.json~   | the six keys with type, default, absent behaviour, invalid behaviour and who may set them                               | the three defaults that EXIST on main (~Fs.default/0~, ~AiPair.Tmux~, ~AiPair.PaneIntentStore~), ~Marker.mint_generation/0~, and ~Admission.admit/4~ for the binding shape |
+| ~configuration.keys.json~   | the seven keys with type, default, absent behaviour, invalid behaviour and who may set them                               | the three defaults that EXIST on main (~Fs.default/0~, ~AiPair.Tmux~, ~AiPair.PaneIntentStore~), ~Marker.mint_generation/0~, and ~Admission.admit/4~ for the binding shape |
 | ~supervision.legacy.json~   | the eight legacy children in start order, their ~which_children~ order, and the eight normalised source lines           | the running legacy tree AND the whitespace-normalised text of ~lib/ai_pair/application.ex~          |
-| ~supervision.durable.json~  | the eleven durable children in start order, which three are new, and the eight ordering edges with their consequences   | the contract table itself, plus every named module's real ~child_spec/1~ (ids and restart types)    |
+| ~supervision.durable.json~  | the twelve durable children in start order, which four are new, which three are significant (restart, and the module's own restart where the list overrides it), the supervisor's ~auto_shutdown~, the thirteen ordering edges with their consequences, and what ends the daemon | the contract table itself, plus every named module's real ~child_spec/1~ (ids and restart types)    |
 
 The producer arrives with S10, so the durable composition is NOT regenerated
 here: its table is pinned as documentation, and the checks that can be made

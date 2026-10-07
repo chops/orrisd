@@ -175,7 +175,7 @@ defmodule AiPair.IPC.DeliveryV3 do
 
       true ->
         prove = fn ->
-          with {:ok, _child} <- child(pane), do: identity(pane, context)
+          with {:ok, _child} <- child(pane), do: identity_with_provenance(pane, context)
         end
 
         admitted(context, :release, fn -> AiPair.PaneRestore.Release.run(pane, context, prove) end)
@@ -281,10 +281,22 @@ defmodule AiPair.IPC.DeliveryV3 do
   # S3a: a pane held after an unacknowledged gated transaction (effect_unresolved) proves no
   # identity until it is resolved (RED R12).
   defp identity(pane, context) do
+    case identity_with_provenance(pane, context) do
+      {:ok, identity, _provenance} -> {:ok, identity}
+      :unavailable -> :unavailable
+    end
+  end
+
+  # NS-32.M.002 RB-3a GREEN-2 F-1: the identity together with the classifier provenance (agent and
+  # classifier name) of the SAME committed record read that proved it. Only release uses the
+  # provenance (its released child classifies with it); no reply carries it.
+  defp identity_with_provenance(pane, context) do
     with :ok <- effect_resolved(pane, context.receipt_store),
          {:ok, id} when is_binary(id) <- PaneSupervisor.registration(pane),
-         {:ok, %{"registration_id" => ^id, "session_gen" => generation}} <- context.committed.(pane) do
-      {:ok, %{pane_id: pane, registration_id: id, generation: generation}}
+         {:ok, %{"registration_id" => ^id, "session_gen" => generation} = record} <-
+           context.committed.(pane) do
+      {:ok, %{pane_id: pane, registration_id: id, generation: generation},
+       %{agent: record["agent"], classifier: record["classifier"]}}
     else
       _ -> :unavailable
     end

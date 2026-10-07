@@ -52,8 +52,8 @@ defmodule AiPair.PaneRestore.Release do
     # The replacement options are prepared before anything changes, so a failure there
     # refuses with the quarantined child untouched.
     with :ok <- not_held(pane, store),
-         {:ok, identity} <- proven(pane, prove),
-         {:ok, base} <- base_opts(pane, context),
+         {:ok, identity, provenance} <- proven(pane, prove),
+         {:ok, base} <- base_opts(pane, context, provenance),
          :ok <- fence(pane, store, ops),
          :ok <- stop(pane, ops) do
       released =
@@ -81,11 +81,19 @@ defmodule AiPair.PaneRestore.Release do
       else: :ok
   end
 
+  # NS-32.M.002 RB-3a GREEN-2 F-1: the prove answers the identity together with the classifier
+  # provenance (agent, classifier name) of the SAME committed record that proved it, so the
+  # released child's classifier is bound to the registration this release proves. A prove
+  # without provenance (component tests) releases with none.
   defp proven(pane, prove) do
     case prove.() do
+      {:ok, %{pane_id: ^pane, registration_id: id, generation: gen} = identity, provenance}
+      when is_binary(id) and is_binary(gen) ->
+        {:ok, identity, provenance}
+
       {:ok, %{pane_id: ^pane, registration_id: id, generation: gen} = identity}
       when is_binary(id) and is_binary(gen) ->
-        {:ok, identity}
+        {:ok, identity, nil}
 
       _ ->
         {:refuse, "pane_identity_unavailable"}
@@ -110,11 +118,19 @@ defmodule AiPair.PaneRestore.Release do
     if result == :ok, do: :ok, else: {:refuse, "release_stop_failed"}
   end
 
-  defp base_opts(pane, context) do
+  defp base_opts(pane, context, provenance) do
     # Checked before the fence and the stop, so a refusal changes nothing. A released child
     # can deliver only through the gated tmux transaction: without a tmux adapter the
-    # release is refused here rather than started with every entry held (c5 r4).
-    case context.pane_opts.(pane) do
+    # release is refused here rather than started with every entry held (c5 r4). F-1: a
+    # two-argument pane_opts builds the options from the proved record's provenance and
+    # refuses (anything but {:ok, opts}) when its classifier cannot be reproduced.
+    built =
+      case context.pane_opts do
+        build when is_function(build, 2) -> build.(pane, provenance)
+        build -> build.(pane)
+      end
+
+    case built do
       {:ok, opts} when is_list(opts) ->
         if is_nil(Keyword.get(opts, :tmux_server)),
           do: {:refuse, "release_fence_unavailable"},
