@@ -1,0 +1,35 @@
+ 
+  [38;2;99;168;248m>_ [1m[39mOpenAI Codex[0;2m (v0.161.0)
+[0m     [2m/private/tmp/d53-scratch
+[0m                   
+[2m  To get started, describe a task or try one of these commands:
+
+[0m  /init[2m - create an AGENTS.md file with instructions for Codex
+[0m  /status[2m - show current session configuration
+[0m  /permissions[2m - choose what Codex is allowed to do
+[0m  /model[2m - choose what model and reasoning effort to use
+[0m  /review[2m - review any changes and find issues
+
+
+[1m› [0mcreate file probe.txt containing hi
+
+
+[2m• [0mI’ll create [38;2;166;227;161mprobe.txt[39m containing [38;2;166;227;161mhi[39m.
+
+
+  [1mWould you like to run the following command?
+
+[0m  Environment: [1mlocal
+
+[0m  Reason: [3mMay I write probe.txt containing hi in the workspace?
+[0m  [3mThe filesystem sandbox is read-only.
+
+[0m  $ [38;2;137;180;250mprintf[38;2;205;214;244m [38;2;166;227;161m'hi\n'[38;2;205;214;244m [38;2;148;226;213m>[38;2;205;214;244m probe.txt
+
+[39m                                 
+[1;7m› 1. Yes, proceed (y)                                              
+[0m  2. Yes, and don't ask again for commands that start with `printf
+     'hi\n' > probe.txt` ([1mp[0m)
+  3. No, and tell Codex what to do differently ([1mesc[0m)
+                                                                   
+  [2mPress [0;1menter[0;2m to confirm or [0;1mesc[0;2m to cancel                          
