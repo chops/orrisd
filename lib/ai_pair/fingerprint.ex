@@ -22,6 +22,12 @@ defmodule AiPair.Fingerprint do
     * `:all` — every regex must match at least one of the bottom-N lines
     * `:any` — at least one regex must match (empty `any` = check skipped)
     * `:bottom_lines` — slice taken from the end of the captured text
+    * `:unless_tail` — dialog state only: an ordered list of N regexes. The
+      dialog state does not fire when the last N non-blank lines of the
+      ANSI-stripped screen match the list one-to-one, in order. Only a
+      non-empty proper list of strings that all compile grants the exemption;
+      an absent, empty, non-list or partly invalid value, or a screen with
+      fewer than N non-blank lines, grants none. Busy and idle ignore the key.
 
   ## Returns
 
@@ -29,6 +35,8 @@ defmodule AiPair.Fingerprint do
 
   Dialog fingerprints are matched before busy and idle so approval overlays
   that leave an idle composer prompt visible underneath still block sends.
+  `unless_tail` exempts only a screen that ends with the exact composer tail;
+  the measured Codex approval overlay does not end that way.
   """
 
   @type fingerprint :: map()
@@ -56,12 +64,53 @@ defmodule AiPair.Fingerprint do
     states = Map.get(fingerprint, "states", %{})
 
     cond do
-      state_matches?(stripped, Map.get(states, "dialog")) -> {:ok, :dialog}
+      dialog_matches?(stripped, Map.get(states, "dialog")) -> {:ok, :dialog}
       state_matches?(stripped, Map.get(states, "busy")) -> {:ok, :busy}
       state_matches?(stripped, Map.get(states, "idle")) -> {:ok, :idle}
       true -> {:error, :no_match}
     end
   end
+
+  defp dialog_matches?(stripped, spec) do
+    state_matches?(stripped, spec) and not tail_exempt?(stripped, spec)
+  end
+
+  defp tail_exempt?(stripped, %{"unless_tail" => patterns}) do
+    case compile_tail(patterns) do
+      {:ok, regexes} ->
+        n = length(regexes)
+
+        tail =
+          stripped
+          |> String.split("\n")
+          |> Enum.reject(&(String.trim(&1) == ""))
+          |> Enum.take(-n)
+
+        length(tail) == n and
+          tail |> Enum.zip(regexes) |> Enum.all?(fn {line, re} -> Regex.match?(re, line) end)
+
+      :error ->
+        false
+    end
+  end
+
+  defp tail_exempt?(_stripped, _spec), do: false
+
+  # All or nothing: one non-string member, invalid regex or improper tail
+  # voids the whole list rather than dropping that member.
+  defp compile_tail([_ | _] = patterns), do: compile_tail(patterns, [])
+  defp compile_tail(_patterns), do: :error
+
+  defp compile_tail([], acc), do: {:ok, Enum.reverse(acc)}
+
+  defp compile_tail([pattern | rest], acc) when is_binary(pattern) do
+    case Regex.compile(pattern, "u") do
+      {:ok, re} -> compile_tail(rest, [re | acc])
+      {:error, _} -> :error
+    end
+  end
+
+  defp compile_tail(_patterns, _acc), do: :error
 
   defp state_matches?(_stripped, nil), do: false
 
