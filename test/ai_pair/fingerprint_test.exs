@@ -145,6 +145,53 @@ defmodule AiPair.FingerprintTest do
       overlay = File.read!(fixture_path(["codex_cli", "dialog_trust_gate_yolo.txt"]))
       assert {:ok, :dialog} = Fingerprint.match(overlay, fp)
     end
+
+    # Regression (docs/adr/0007-codex-0162-dialog-coverage.org): an idle Codex
+    # 0.162 pane whose status line showed the branch `agy-ai-pair-yolo` and
+    # whose transcript said "Git errors can bypass ..." read :dialog, holding
+    # every wakeup, because the 0.162 footers (`⚠ 1 warning`, plain
+    # `? for shortcuts`) were outside the unless_tail exemption. The fixture
+    # is reconstructed from the observed screen. A busy screen with a dialog
+    # word still reads :dialog by design; busy holds sends either way.
+    test "0.162 idle composer tail exempts yolo branch name and `bypass` prose", %{fp: fp} do
+      text = File.read!(fixture_path(["codex_cli", "idle_0162_yolo_branch_bypass_prose.txt"]))
+      assert {:ok, :idle} = Fingerprint.match(text, fp)
+    end
+
+    # Real Codex 0.162 captures. The folder-trust dialog read :idle (its
+    # `› 1. Trust and continue` line satisfied the idle prompt rule, so a
+    # wakeup paste + Enter would have trusted the folder).
+    test "0.162 folder-trust dialog matches :dialog", %{fp: fp} do
+      text = File.read!(fixture_path(["codex_cli", "dialog_trust_folder_0162.txt"]))
+      assert {:ok, :dialog} = Fingerprint.match(text, fp)
+    end
+
+    test "0.162 command-approval dialog matches :dialog", %{fp: fp} do
+      text = File.read!(fixture_path(["codex_cli", "dialog_command_approval_0162.txt"]))
+      assert {:ok, :dialog} = Fingerprint.match(text, fp)
+    end
+
+    # With the 0.162 idle composer tail at the bottom, transcript prose that
+    # quotes or discusses approval wording leaves the pane idle.
+    @approval_prose [
+      "• The wrapper should never bypass permissions automatically.",
+      "• A docs paragraph says do not bypass approvals.",
+      "• The flag --dangerously-allow should stay disabled.",
+      "  Quoting the overlay: \"bypass permissions for this session\" is not shown.",
+      "  It said `--dangerously-allow enabled` in an old log; ignore that.",
+      "  The dialog text \"Press enter to continue\" appears in the fixture.",
+      "• We could bypass the check, but yolo merges and an Allow-list are out.",
+      "  The flag --dangerously-bypass-approvals-and-sandbox stays off."
+    ]
+    @composer "\n› Ask Codex to do anything\n\n" <>
+                "  gpt-5.5 high · ~/src/x · gpt-5.5 · yolo-bypass · Context 3% used\n" <>
+                "  ? for shortcuts\n"
+
+    test "approval wording in prose above a 0.162 idle tail stays :idle", %{fp: fp} do
+      for line <- @approval_prose do
+        assert {:ok, :idle} = Fingerprint.match(line <> "\n" <> @composer, fp), line
+      end
+    end
   end
 
   test "ANSI is stripped before matching" do
