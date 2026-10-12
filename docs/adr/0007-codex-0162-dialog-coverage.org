@@ -1,0 +1,44 @@
+#+options: ^:nil
+
+* ADR-0007: Cover the Codex 0.162 idle tail and folder-trust dialog
+:PROPERTIES:
+:CUSTOM_ID: adr-0007-cover-the-codex-0162-idle-tail-and-folder-trust-dialog
+:END:
+** Decision
+:PROPERTIES:
+:CUSTOM_ID: decision
+:END:
+Dated 2026-10-12. Within the existing codex_cli design (dialog words count
+unless the screen ends with the real idle composer tail), the ~unless_tail~
+footer row also accepts the two codex-cli 0.162.0 footers, a plain
+~? for shortcuts~ and ~? for shortcuts~ followed by a singular or plural
+~⚠ N warning(s) · f2 to view~. The dialog state also matches the 0.162.0
+folder-trust modal by its whole lines ~Trust this folder?~ and
+~enter continue · esc quit~. Dialog precedence, the dialog word rules and the
+footer prefix/suffix controls are unchanged.
+
+** Consequences
+:PROPERTIES:
+:CUSTOM_ID: consequences
+:END:
+An idle 0.162.0 pane whose transcript or status line holds a dialog word (for
+example a git branch named ~agy-ai-pair-yolo~ shown in the status line, or
+prose saying "bypass") classifies :idle instead of holding every send. The
+0.162.0 folder-trust modal classifies :dialog; before this change its
+~› 1. Trust and continue~ option satisfied the idle prompt rule, so a queued
+send and its Enter would have accepted the trust prompt. A busy screen that
+shows a dialog word still classifies :dialog, as before; sends are held while
+busy either way. A later Codex release that changes its footer or modal
+wording needs a new capture and rule.
+
+** Verification
+:PROPERTIES:
+:CUSTOM_ID: verification
+:END:
+Real codex-cli 0.162.0 captures of the folder-trust and command-approval
+modals (operator paths replaced by same-length placeholders) and an idle
+screen reconstructed from the observed incident are fingerprint fixtures; the
+approval-dialog delivery test covers both modals for plain and receipted sends.
+The new tests fail on the previous rules and pass on these, and the transcript
+controls of design r6 still hold. Rules are checked against captured text,
+not against a live pane.

@@ -22,12 +22,14 @@
         "^\\s*›\\s+\\d+\\.\\s+Yes,\\s*continue",
         "(?i)Press enter to continue",
         "^\\s*Press enter to confirm or esc to cancel\\s*$",
-        "^\\s*›\\s+\\d+\\.\\s+Yes, proceed \\(y\\)\\s*$"
+        "^\\s*›\\s+\\d+\\.\\s+Yes, proceed \\(y\\)\\s*$",
+        "^\\s*Trust this folder\\?",
+        "^\\s*enter continue · esc quit\\s*$"
       ],
       "unless_tail": [
         "^›(?:\\s*|\\s+(?!\\d+\\.\\s)\\S.*)$",
         "^\\s+\\S.*\\s·\\s.*$",
-        "^\\s*(?:\\? for shortcuts\\s+⚠ \\d+ warnings · f2 to view|← for agents · \\? for shortcuts)\\s*$"
+        "^\\s*(?:\\? for shortcuts(?:\\s+⚠ \\d+ warnings? · f2 to view)?|← for agents · \\? for shortcuts)\\s*$"
       ]
     },
     "busy": {

@@ -1,0 +1,24 @@
+                                                   
+[1m[38;2;128;128;128m•[0m [1mRunning[0m [38;2;137;180;250mtouch[38;2;205;214;244m /private/tmp/agent-0001/-Users-example-src-proj-alpha/00000000-…
+[2m[39m    + Show details                                                              
+[0m                                                   
+                                                   
+  [1mWould you like to run the following command?[0m     
+                                                   
+  Environment: [1mlocal[0m                                                           
+                                                                               
+  Reason: [3mThe read-only sandbox blocked the command. Allow running the exact
+[0m  [3mtouch command outside the sandbox?[0m                                           
+                                                                               
+  $ [38;2;137;180;250mtouch[39m                                                                      
+  [38;2;205;214;244m/private/tmp/agent-0001/-Users-example-src-proj-alpha/00000000-0000-0000-000[39m 
+  [38;2;205;214;244mf-000000000000/scratchpad/fpcap/probe.txt[39m                                     
+                                                                                
+
+[1;7m› 1. Yes, proceed (y)                                                           
+[0m  2. Yes, and don't ask again for commands that start with `touch /private/tmp/
+     agent-0001/-Users-example-src-proj-alpha/00000000-0000-0000-0000-
+     000000000000/scratchpad/fpcap/probe.txt` ([1mp[0m)
+  3. No, and tell Codex what to do differently ([1mesc[0m)
+                                                                                
+  [2mPress [0;1menter[0;2m to confirm or [0;1mesc[0;2m to cancel                                       
